@@ -22,7 +22,7 @@ If a `CLAUDE.local.md` exists here, read it too — it carries the owner's machi
 | Transactions Ledger | `app/api/transactions.py`, `/api/transactions`, `/transactions` page |
 | Monarch tag sync (bidirectional) | `scripts/monarch_tag_writeback.py` (out), `reclassify()` tag map (in) |
 
-Test suite: **152 tests, <1s** (`cd backend && uv run pytest -v`). Run after engine, config, tax, or scenario changes.
+Test suite: **179 tests, <1s** (`cd backend && uv run pytest -v`). Run after engine, config, tax, or scenario changes.
 
 **Property P&L gotchas:**
 - Transactions are classified to a property by DB-stored merchant rules (`property_rules`), stamped onto `transactions.property_id/property_category/property_source` by `PropertyPnLEngine.reclassify()` (runs post-sync + on `POST /api/properties/reclassify`).

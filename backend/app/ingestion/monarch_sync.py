@@ -40,6 +40,9 @@ ACCOUNT_TYPE_MAP: dict[str, AccountType] = {
     "depository": AccountType.CHECKING,
     "checking": AccountType.CHECKING,
     "savings": AccountType.SAVINGS,
+    "cd": AccountType.SAVINGS,
+    "cash_management": AccountType.SAVINGS,
+    "money_market": AccountType.SAVINGS,
     "investment": AccountType.TAXABLE,
     "credit": AccountType.CREDIT_CARD,
     "loan": AccountType.OTHER,
@@ -58,6 +61,17 @@ def _dollars_to_cents(amount: float) -> int:
     return int(round(amount * 100))
 
 
+def _snapshot_balance(current_balance: int, is_asset: bool) -> int:
+    """Balance for a today-snapshot row, matching the history API's sign
+    convention: liabilities negative. Monarch's account API reports loan
+    balances as positive amounts owed, while its balance-history API reports
+    them negative — writing current_balance verbatim made every liability's
+    chart spike positive on the last point (fire-master#7)."""
+    if is_asset:
+        return current_balance
+    return -abs(current_balance)
+
+
 def _map_account_type(monarch_type: str, monarch_subtype: str | None = None) -> AccountType:
     """Map Monarch account type/subtype to our AccountType enum."""
     if monarch_subtype:
@@ -69,6 +83,10 @@ def _map_account_type(monarch_type: str, monarch_subtype: str | None = None) -> 
             return AccountType.ROTH_IRA
         if "ira" in subtype_lower:
             return AccountType.IRA
+        # Bare "roth" (Monarch brokerage subtype) — after the 401/ira checks
+        # so roth_401k stays FOUR_OH_ONE_K and roth_ira stays ROTH_IRA
+        if "roth" in subtype_lower:
+            return AccountType.ROTH_IRA
         if "hsa" in subtype_lower:
             return AccountType.HSA
         if subtype_lower in ACCOUNT_TYPE_MAP:
@@ -140,6 +158,10 @@ class MonarchSyncService:
                     index_elements=["external_id"],
                     set_={
                         "name": raw.get("displayName") or raw.get("name", "Unknown"),
+                        # account_type is sync-derived (not in AccountEnrichmentUpdate),
+                        # so updating on conflict is clobber-safe and lets mapper fixes
+                        # self-heal existing rows on the next sync (fire-master#6)
+                        "account_type": account_type,
                         "institution": institution_name,
                         "current_balance": _dollars_to_cents(balance),
                         "is_asset": is_asset,
@@ -163,7 +185,7 @@ class MonarchSyncService:
         # This ensures compute_snapshot(today) matches calculate_current() even for
         # stale accounts whose historical snapshots lag behind.
         result = await self.db.execute(
-            select(Account.id, Account.current_balance).where(
+            select(Account.id, Account.current_balance, Account.is_asset).where(
                 Account.source == DataSource.MONARCH
             )
         )
@@ -171,7 +193,7 @@ class MonarchSyncService:
             {
                 "account_id": row.id,
                 "date": date.today(),
-                "balance": row.current_balance,
+                "balance": _snapshot_balance(row.current_balance, row.is_asset),
                 "source": DataSource.MONARCH,
             }
             for row in result.all()
