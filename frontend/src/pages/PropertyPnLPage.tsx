@@ -101,6 +101,62 @@ export default function PropertyPnLPage() {
     );
   }
 
+  // Empty state: no properties declared yet. Accounts synced from Monarch show
+  // under Assets regardless — this module additionally needs properties +
+  // merchant rules declared so transactions can classify into a per-property P&L.
+  if (properties.length === 0) {
+    return (
+      <Layout>
+        <div className="max-w-2xl mx-auto mt-12">
+          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-6 space-y-4">
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">
+              No properties configured yet
+            </h2>
+            <p className="text-sm text-[var(--text-secondary)]">
+              Your real-estate <em>accounts</em> (values, mortgages) already show under
+              Assets — that comes from Monarch. This page is different: it builds a
+              per-property P&amp;L from your <em>transactions</em>, and Monarch&apos;s
+              merchant text doesn&apos;t know which charges belong to which property.
+              You declare that mapping once:
+            </p>
+            <ol className="text-sm text-[var(--text-secondary)] space-y-2 list-decimal list-inside">
+              <li>
+                Copy{" "}
+                <code className="font-mono text-[12px] bg-[var(--bg)] border border-[var(--border)] rounded px-1">
+                  config/properties.example.json
+                </code>{" "}
+                to{" "}
+                <code className="font-mono text-[12px] bg-[var(--bg)] border border-[var(--border)] rounded px-1">
+                  config/properties.json
+                </code>
+              </li>
+              <li>Edit it: your properties, merchant rules (lender, HOA, Airbnb…), exclusions</li>
+              <li>
+                Seed it:{" "}
+                <code className="font-mono text-[12px] bg-[var(--bg)] border border-[var(--border)] rounded px-1">
+                  docker compose exec backend uv run python ../scripts/seed_properties.py
+                </code>
+              </li>
+            </ol>
+            <p className="text-sm text-[var(--text-secondary)]">
+              From then on every synced transaction classifies itself; one-offs are fixed
+              inline on the Transactions page or by tagging the transaction with the
+              property&apos;s name in Monarch.{" "}
+              <a
+                href="https://github.com/gdb-mtx/fire-master/blob/main/docs/MONARCH_SETUP.md#5-property-owners-classification-setup"
+                target="_blank"
+                rel="noreferrer"
+                className="text-[var(--green)] hover:underline"
+              >
+                Full guide →
+              </a>
+            </p>
+          </div>
+        </div>
+      </Layout>
+    );
+  }
+
   return (
     <Layout>
       <div className="space-y-6">
