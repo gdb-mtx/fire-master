@@ -31,7 +31,49 @@ permissions:
   packages: write   # required for docker/login-action to push to GHCR via GITHUB_TOKEN
 
 jobs:
+  # Test gate (added Aug 4 2026 after the enum-bind incident: a sync-breaking bug
+  # shipped to :latest while every mock-based unit test and the image build passed).
+  # Runs the full unit suite PLUS Postgres-backed integration tests for the
+  # ingestion layer — bind/enum/ON CONFLICT bugs are invisible without real PG.
+  # Images only build and publish if this job is green.
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: firemaster
+          POSTGRES_PASSWORD: firemaster
+          POSTGRES_DB: firemaster_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U firemaster"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install deps
+        working-directory: backend
+        run: uv sync --frozen
+
+      - name: Unit tests
+        working-directory: backend
+        run: uv run pytest -q
+
+      - name: Postgres integration tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://firemaster:firemaster@localhost:5432/firemaster_test
+        run: uv run pytest tests/integration/ -q
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     # Two parallel jobs, one per image. fail-fast: false so a frontend failure doesn't
     # cancel an in-flight backend build (and vice versa).

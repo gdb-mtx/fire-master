@@ -91,6 +91,7 @@ Things that will cause bugs if you don't know them.
 - Demo-seed rows (`scripts/seed_demo.py`) are `source=MANUAL`, `external_id=NULL`, marked `custom_data.demo_seed=true` — invisible to sync/reconcile; `--remove` deletes exactly those
 - Uses `monarchmoneycommunity` fork (original `monarchmoney` unmaintained, domain rebrand broke it)
 - Uses `bcrypt` directly (not `passlib` — incompatible with bcrypt 5.x)
+- **Enum columns in raw SQL expressions** (`case()`, on-conflict `set_`): never pass a bare enum member as a literal — it binds the lowercase `.value`, but the PG enum labels are member NAMES, and one bad bind aborts the whole transaction (the Aug 4 sync outage). Route through `stmt.excluded.<col>` or an explicitly typed bind, and cover the path in `tests/integration/` — mock tests structurally cannot catch this class.
 - Celery worker needs `-I app.tasks.sync_tasks` for task autodiscovery
 - `get_settings()` uses `@lru_cache` — restart backend after .env changes
 - Expense reconciliation vs Monarch intentionally runs higher: tax refunds are not netted against spending (conservative burn rate)
