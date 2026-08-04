@@ -101,7 +101,7 @@ ACCOUNTS = [
     ("Startup B Equity",         AccountType.PRIVATE,   None,                  "illiquid_private",         1_900_000,  True,  1.0,  0.0),
     ("Startup C Equity",         AccountType.PRIVATE,   None,                  "illiquid_private",         3_100_000,  True,  1.0,  0.0),
     ("Pickup Truck",             AccountType.VEHICLE,   None,                  "depreciating",             3_800_000,  True,  1.24, 0.0),
-    ("Pontoon Boat",             AccountType.OTHER,     None,                  "depreciating",             1_900_000,  True,  1.13, 0.0),
+    ("Pontoon Boat",             AccountType.VEHICLE,   None,                  "depreciating",             1_900_000,  True,  1.13, 0.0),
 ]
 
 # Mortgages amortize linearly back in time: balance N months ago was higher by
