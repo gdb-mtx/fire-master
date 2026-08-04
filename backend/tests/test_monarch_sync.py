@@ -21,6 +21,13 @@ class TestMapAccountType:
         # fire-master#6: bare roth previously missed both ira checks → TAXABLE
         ("brokerage", "roth", AccountType.ROTH_IRA),
         ("investment", "roth", AccountType.ROTH_IRA),
+        # fire-master#8: explicit vehicle-loan subtypes (generic "loan" subtype
+        # still maps OTHER — that's what the manual override is for)
+        ("loan", "car", AccountType.VEHICLE),
+        ("loan", "auto", AccountType.VEHICLE),
+        ("loan", "auto_loan", AccountType.VEHICLE),
+        ("loan", "vehicle_loan", AccountType.VEHICLE),
+        ("loan", "loan", AccountType.OTHER),
         # Existing behavior that must not regress
         ("investment", "roth_ira", AccountType.ROTH_IRA),
         ("investment", "ira", AccountType.IRA),

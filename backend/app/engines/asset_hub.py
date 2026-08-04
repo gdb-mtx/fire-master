@@ -180,8 +180,27 @@ class AssetHubEngine:
             return None
 
         update_data = data.model_dump(exclude_unset=True)
+
+        # account_type is a sync-managed field with a manual-override escape
+        # hatch (fire-master#8): a value stamps the manual flag so the sync
+        # upsert's clobber guard preserves it; an explicit null clears the
+        # flag and lets auto-mapping resume on the next sync.
+        account_type = update_data.pop("account_type", "__absent__")
+
         for field, value in update_data.items():
             setattr(account, field, value)
+
+        if account_type != "__absent__":
+            base_custom = dict(account.custom_data or {})
+            # honor a custom_data payload from this same request
+            if "custom_data" in update_data and update_data["custom_data"] is not None:
+                base_custom = dict(update_data["custom_data"])
+            if account_type is None:
+                base_custom.pop("account_type_manual", None)
+            else:
+                account.account_type = account_type
+                base_custom["account_type_manual"] = True
+            account.custom_data = base_custom
 
         await self.db.flush()
         return account

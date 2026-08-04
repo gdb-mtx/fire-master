@@ -8,6 +8,7 @@ import { accountTypeLabel, accountTypeColor } from "../utils/accountTypes";
 
 
 interface EnrichmentForm {
+  account_type: string;
   fire_role: string;
   notes: string;
   strategy: string;
@@ -22,6 +23,7 @@ export default function AccountDetailPage() {
   const enrichmentMutation = useUpdateAccountEnrichment();
 
   const [form, setForm] = useState<EnrichmentForm>({
+    account_type: "",
     fire_role: "",
     notes: "",
     strategy: "",
@@ -37,6 +39,7 @@ export default function AccountDetailPage() {
   useEffect(() => {
     if (account && !initialized) {
       setForm({
+        account_type: account.account_type ?? "",
         fire_role: account.fire_role ?? "",
         notes: account.notes ?? "",
         strategy: account.strategy ?? "",
@@ -56,6 +59,8 @@ export default function AccountDetailPage() {
     if (!id) return;
     const data: Record<string, unknown> = {};
 
+    if (form.account_type !== (account?.account_type ?? ""))
+      data.account_type = form.account_type || null; // null = clear override, re-auto on next sync
     if (form.fire_role !== (account?.fire_role ?? ""))
       data.fire_role = form.fire_role || null;
     if (form.notes !== (account?.notes ?? ""))
@@ -222,6 +227,27 @@ export default function AccountDetailPage() {
               </div>
 
               <div className="space-y-5">
+                {/* Account Type (manual override — survives Monarch sync) */}
+                <div>
+                  <label className="block text-xs uppercase tracking-wider text-[var(--text-secondary)] mb-1.5">
+                    Account Type
+                  </label>
+                  <select
+                    value={form.account_type}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, account_type: e.target.value }))
+                    }
+                    className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--blue)] transition-colors"
+                  >
+                    {["checking", "savings", "401k", "ira", "roth_ira", "taxable", "hsa", "real_estate", "crypto", "CREDIT_CARD", "VEHICLE", "PRIVATE", "other"].map((t) => (
+                      <option key={t} value={t}>{t.replace(/_/g, " ").toLowerCase()}</option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-[var(--text-secondary)] mt-1 block">
+                    Changing this overrides Monarch's type and survives future syncs
+                  </span>
+                </div>
+
                 {/* FIRE Role */}
                 <div>
                   <label className="block text-xs uppercase tracking-wider text-[var(--text-secondary)] mb-1.5">

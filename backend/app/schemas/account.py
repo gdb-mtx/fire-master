@@ -70,6 +70,10 @@ class AccountEnrichmentUpdate(BaseModel):
     target_allocation_pct: float | None = None
     strategy: str | None = None
     custom_data: dict | None = None
+    # Manual account-type override (fire-master#8): setting a value stamps
+    # custom_data.account_type_manual so sync stops clobbering it; sending an
+    # explicit null clears the override (auto-mapping resumes next sync).
+    account_type: AccountType | None = None
 
 
 class AccountDetailResponse(AccountResponse):

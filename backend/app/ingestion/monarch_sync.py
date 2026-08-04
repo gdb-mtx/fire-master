@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import case, delete, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +46,10 @@ ACCOUNT_TYPE_MAP: dict[str, AccountType] = {
     "investment": AccountType.TAXABLE,
     "credit": AccountType.CREDIT_CARD,
     "loan": AccountType.OTHER,
+    "car": AccountType.VEHICLE,
+    "auto": AccountType.VEHICLE,
+    "auto_loan": AccountType.VEHICLE,
+    "vehicle_loan": AccountType.VEHICLE,
     "mortgage": AccountType.REAL_ESTATE,
     "property": AccountType.REAL_ESTATE,
     "real_estate": AccountType.REAL_ESTATE,
@@ -158,10 +162,17 @@ class MonarchSyncService:
                     index_elements=["external_id"],
                     set_={
                         "name": raw.get("displayName") or raw.get("name", "Unknown"),
-                        # account_type is sync-derived (not in AccountEnrichmentUpdate),
-                        # so updating on conflict is clobber-safe and lets mapper fixes
-                        # self-heal existing rows on the next sync (fire-master#6)
-                        "account_type": account_type,
+                        # account_type self-heals from the mapper on every sync
+                        # (fire-master#6) UNLESS the user set a manual override via
+                        # enrichment — custom_data.account_type_manual is the clobber
+                        # guard (fire-master#8), same pattern as property_source='manual'
+                        "account_type": case(
+                            (
+                                Account.custom_data["account_type_manual"].as_boolean().is_(True),
+                                Account.account_type,
+                            ),
+                            else_=account_type,
+                        ),
                         "institution": institution_name,
                         "current_balance": _dollars_to_cents(balance),
                         "is_asset": is_asset,
