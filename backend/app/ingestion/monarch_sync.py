@@ -76,6 +76,68 @@ def _snapshot_balance(current_balance: int, is_asset: bool) -> int:
     return -abs(current_balance)
 
 
+def _account_upsert_stmt(raw: dict):
+    """Build the accounts upsert for one raw Monarch account payload."""
+    balance = raw.get("displayBalance") or raw.get("currentBalance", 0) or 0
+    account_type = _map_account_type(
+        raw.get("type", {}).get("name", "other") if isinstance(raw.get("type"), dict) else raw.get("type", "other"),
+        raw.get("subtype", {}).get("name") if isinstance(raw.get("subtype"), dict) else raw.get("subtype"),
+    )
+    institution_name = None
+    inst = raw.get("institution")
+    if isinstance(inst, dict):
+        institution_name = inst.get("name")
+    elif isinstance(inst, str):
+        institution_name = inst
+
+    stmt = insert(Account).values(
+        external_id=str(raw["id"]),
+        name=raw.get("displayName") or raw.get("name", "Unknown"),
+        account_type=account_type,
+        institution=institution_name,
+        current_balance=_dollars_to_cents(balance),
+        is_asset=raw.get("isAsset", True),
+        include_in_net_worth=raw.get("includeInNetWorth", True),
+        source=DataSource.MONARCH,
+        last_synced_at=datetime.now(timezone.utc),
+        extra_data={
+            "monarch_type": raw.get("type"),
+            "monarch_subtype": raw.get("subtype"),
+            "is_closed": raw.get("isArchived", False),
+        },
+    )
+    return stmt.on_conflict_do_update(
+        index_elements=["external_id"],
+        set_={
+            "name": raw.get("displayName") or raw.get("name", "Unknown"),
+            # account_type self-heals from the mapper on every sync
+            # (fire-master#6) UNLESS the user set a manual override via
+            # enrichment — custom_data.account_type_manual is the clobber
+            # guard (fire-master#8), same pattern as property_source='manual'.
+            # else_ must be excluded.account_type, not the raw enum member:
+            # a bare literal binds as a plain string (the lowercase .value),
+            # which Postgres rejects — the enum labels are the member NAMES.
+            "account_type": case(
+                (
+                    Account.custom_data["account_type_manual"].as_boolean().is_(True),
+                    Account.account_type,
+                ),
+                else_=stmt.excluded.account_type,
+            ),
+            "institution": institution_name,
+            "current_balance": _dollars_to_cents(balance),
+            "is_asset": raw.get("isAsset", True),
+            "include_in_net_worth": raw.get("includeInNetWorth", True),
+            "last_synced_at": datetime.now(timezone.utc),
+            "extra_data": {
+                "monarch_type": raw.get("type"),
+                "monarch_subtype": raw.get("subtype"),
+                "is_closed": raw.get("isArchived", False),
+            },
+        },
+    )
+
+
 def _map_account_type(monarch_type: str, monarch_subtype: str | None = None) -> AccountType:
     """Map Monarch account type/subtype to our AccountType enum."""
     if monarch_subtype:
@@ -129,63 +191,7 @@ class MonarchSyncService:
                 if raw.get("isHidden") or raw.get("deactivatedAt"):
                     continue
 
-                external_id = str(raw["id"])
-                balance = raw.get("displayBalance") or raw.get("currentBalance", 0) or 0
-                is_asset = raw.get("isAsset", True)
-                account_type = _map_account_type(
-                    raw.get("type", {}).get("name", "other") if isinstance(raw.get("type"), dict) else raw.get("type", "other"),
-                    raw.get("subtype", {}).get("name") if isinstance(raw.get("subtype"), dict) else raw.get("subtype"),
-                )
-                institution_name = None
-                inst = raw.get("institution")
-                if isinstance(inst, dict):
-                    institution_name = inst.get("name")
-                elif isinstance(inst, str):
-                    institution_name = inst
-
-                stmt = insert(Account).values(
-                    external_id=external_id,
-                    name=raw.get("displayName") or raw.get("name", "Unknown"),
-                    account_type=account_type,
-                    institution=institution_name,
-                    current_balance=_dollars_to_cents(balance),
-                    is_asset=is_asset,
-                    include_in_net_worth=raw.get("includeInNetWorth", True),
-                    source=DataSource.MONARCH,
-                    last_synced_at=datetime.now(timezone.utc),
-                    extra_data={
-                        "monarch_type": raw.get("type"),
-                        "monarch_subtype": raw.get("subtype"),
-                        "is_closed": raw.get("isArchived", False),
-                    },
-                ).on_conflict_do_update(
-                    index_elements=["external_id"],
-                    set_={
-                        "name": raw.get("displayName") or raw.get("name", "Unknown"),
-                        # account_type self-heals from the mapper on every sync
-                        # (fire-master#6) UNLESS the user set a manual override via
-                        # enrichment — custom_data.account_type_manual is the clobber
-                        # guard (fire-master#8), same pattern as property_source='manual'
-                        "account_type": case(
-                            (
-                                Account.custom_data["account_type_manual"].as_boolean().is_(True),
-                                Account.account_type,
-                            ),
-                            else_=account_type,
-                        ),
-                        "institution": institution_name,
-                        "current_balance": _dollars_to_cents(balance),
-                        "is_asset": is_asset,
-                        "include_in_net_worth": raw.get("includeInNetWorth", True),
-                        "last_synced_at": datetime.now(timezone.utc),
-                        "extra_data": {
-                            "monarch_type": raw.get("type"),
-                            "monarch_subtype": raw.get("subtype"),
-                            "is_closed": raw.get("isArchived", False),
-                        },
-                    },
-                )
-                await self.db.execute(stmt)
+                await self.db.execute(_account_upsert_stmt(raw))
                 count += 1
             except Exception as e:
                 logger.error("Failed to sync account %s: %s", raw.get("id"), e)
