@@ -22,7 +22,7 @@ If a `CLAUDE.local.md` exists here, read it too — it carries the owner's machi
 | Transactions Ledger | `app/api/transactions.py`, `/api/transactions`, `/transactions` page |
 | Monarch tag sync (bidirectional) | `scripts/monarch_tag_writeback.py` (out), `reclassify()` tag map (in) |
 
-Test suite: **200 unit tests, <1s** (`cd backend && uv run pytest -v`) + **9 Postgres integration tests** (skipped unless `TEST_DATABASE_URL` points at a scratch DB; CI runs them). Run after engine, config, tax, or scenario changes.
+Test suite: **200 unit tests, <1s** (`cd backend && uv run pytest -v`) + **14 Postgres integration tests** (skipped unless `TEST_DATABASE_URL` points at a scratch DB; CI runs them). Run after engine, config, tax, or scenario changes.
 
 **Property P&L gotchas:**
 - Transactions are classified to a property by DB-stored merchant rules (`property_rules`), stamped onto `transactions.property_id/property_category/property_source` by `PropertyPnLEngine.reclassify()` (runs post-sync + on `POST /api/properties/reclassify`).
@@ -118,7 +118,7 @@ Things that will cause bugs if you don't know them.
 - Scenarios store overrides-only JSONB, deep-merged via `get_effective_config(scenario_id)`.
 - Config PATCH uses `flag_modified` + `db.refresh` for JSONB dirty-tracking.
 - `PATCH /api/fire/config` merges `custom_assumptions` server-side as an RFC 7386 JSON Merge Patch (`app/core/merge.py`): omitted keys survive, dicts merge recursively, arrays/scalars replace, explicit `null` DELETES a key (fire-master#9). Clients (config page, tax planner, Claude Code) send ONLY the keys they manage — never resend a full spread (a stale spread clobbers concurrent edits), and clear a field by sending `null`, not by omitting it. Scenario `_apply_overrides` keeps its own one-level merge — different contract, do NOT unify them.
-- Every `fire_config` UPDATE/DELETE is archived to `fire_config_history` by a Postgres trigger (fire-master#10; DDL in `app/models/fire_config_history.py`, shared by the migration and the PG integration tests). `GET /api/fire/config/history`, `POST /api/fire/config/history/{id}/restore` (restore replaces `custom_assumptions` wholesale and is itself archived). The trigger fires on ALL write paths incl. seed scripts and psql — don't add app-level history code.
+- Every `fire_config` AND `fire_scenarios` UPDATE/DELETE is archived to `fire_config_history` / `fire_scenario_history` by Postgres triggers (fire-master#10 pattern; DDL in the respective `app/models/*_history.py`, shared by the migrations and the PG integration tests). `GET /api/fire/config/history` + `POST /api/fire/config/history/{id}/restore` (restore replaces `custom_assumptions` wholesale, is itself archived); `GET /api/fire/scenarios/history` + `POST /api/fire/scenarios/history/{id}/restore` (restores content only — `is_active` is a selection pointer, untouched on update-restore, False on delete-resurrect). Triggers fire on ALL write paths incl. seed scripts and psql — don't add app-level history code.
 - Seed scripts upsert (update existing, don't duplicate).
 
 **Frontend:**

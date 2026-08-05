@@ -18,6 +18,7 @@ from app.models.enums import (
 from app.models.fire_config import FireConfig
 from app.models.fire_config_history import FireConfigHistory
 from app.models.fire_scenario import FireScenario
+from app.models.fire_scenario_history import FireScenarioHistory
 from app.models.goal import Goal
 from app.models.income_source import IncomeSource
 from app.models.net_worth_snapshot import NetWorthSnapshot
@@ -42,6 +43,7 @@ __all__ = [
     "FireConfig",
     "FireConfigHistory",
     "FireScenario",
+    "FireScenarioHistory",
     "Goal",
     "GoalStatus",
     "GoalType",

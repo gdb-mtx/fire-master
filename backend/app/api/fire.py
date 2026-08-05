@@ -13,6 +13,7 @@ from app.engines.spending import SpendingEngine
 from app.models.fire_config import FireConfig
 from app.models.fire_config_history import FireConfigHistory
 from app.models.fire_scenario import FireScenario
+from app.models.fire_scenario_history import FireScenarioHistory
 from app.models.goal import Goal
 from app.models.income_source import IncomeSource
 from app.schemas.fire import (
@@ -22,6 +23,7 @@ from app.schemas.fire import (
     FireMetricsResponse,
     FireNumberResponse,
     FireScenarioCreate,
+    FireScenarioHistoryEntry,
     FireScenarioResponse,
     FireScenarioUpdate,
     GoalCreate,
@@ -432,6 +434,69 @@ async def list_scenarios(
         select(FireScenario).order_by(FireScenario.is_active.desc(), FireScenario.updated_at.desc())
     )
     return result.scalars().all()
+
+
+# --- Scenario History (trigger-backed, same pattern as config history) ---
+
+
+@router.get("/scenarios/history", response_model=list[FireScenarioHistoryEntry])
+async def get_scenario_history(
+    limit: int = 50,
+    _user: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(FireScenarioHistory)
+        .order_by(FireScenarioHistory.id.desc())
+        .limit(max(1, min(limit, 200)))
+    )
+    return result.scalars().all()
+
+
+@router.post(
+    "/scenarios/history/{entry_id}/restore", response_model=FireScenarioResponse
+)
+async def restore_scenario_history(
+    entry_id: int,
+    _user: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restore a scenario to a captured prior state.
+
+    If the scenario still exists, its content (name, description, overrides)
+    is restored; is_active is left as it currently stands — the active flag
+    is a selection pointer, not scenario content. If the scenario was deleted,
+    it is re-created under its original id, inactive, so a restore can never
+    produce two active scenarios.
+    """
+    from datetime import datetime as _datetime
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    entry = await db.get(FireScenarioHistory, entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="History entry not found")
+
+    data = entry.data
+    scenario = await db.get(FireScenario, UUID(data["id"]))
+    if scenario:
+        scenario.name = data["name"]
+        scenario.description = data.get("description")
+        scenario.overrides = data.get("overrides")
+        flag_modified(scenario, "overrides")
+    else:
+        scenario = FireScenario(
+            id=UUID(data["id"]),
+            name=data["name"],
+            description=data.get("description"),
+            overrides=data.get("overrides"),
+            is_active=False,
+            created_at=_datetime.fromisoformat(data["created_at"]),
+        )
+        db.add(scenario)
+    await db.commit()
+    await db.refresh(scenario)
+    return scenario
 
 
 @router.post("/scenarios", response_model=FireScenarioResponse, status_code=201)

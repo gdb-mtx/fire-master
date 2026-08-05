@@ -443,3 +443,15 @@ class FireScenarioResponse(BaseModel):
     updated_at: _dt.datetime
 
     model_config = {"from_attributes": True}
+
+
+class FireScenarioHistoryEntry(BaseModel):
+    """One prior state of a fire_scenarios row, captured by the DB trigger."""
+
+    id: int
+    scenario_id: UUID | None = None
+    op: str
+    changed_at: _dt.datetime
+    data: dict
+
+    model_config = {"from_attributes": True}
