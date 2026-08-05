@@ -142,16 +142,13 @@ function SeppCalculatorCard({ deferredBalance }: { deferredBalance?: number }) {
       setConfirming(true);
       return;
     }
-    // Config PATCH replaces custom_assumptions wholesale — spread the FULL
-    // existing object so unmanaged keys survive (CLAUDE.md merge contract).
-    const ca = (fireConfig.custom_assumptions ?? {}) as Record<string, unknown>;
-    const seppBlock = (ca.sepp ?? {}) as Record<string, unknown>;
+    // Config PATCH merges custom_assumptions (RFC 7386, fire-master#9) — send
+    // ONLY the two managed fields; siblings and other blocks survive untouched.
+    // Resending a stale full spread here would clobber concurrent edits.
     updateConfig.mutate(
       {
         custom_assumptions: {
-          ...ca,
           sepp: {
-            ...seppBlock,
             sepp_monthly: applyValues.monthly,
             ira_a_balance: applyValues.iraA,
           },

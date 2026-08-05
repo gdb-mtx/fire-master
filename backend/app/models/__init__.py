@@ -16,6 +16,7 @@ from app.models.enums import (
     IncomeType,
 )
 from app.models.fire_config import FireConfig
+from app.models.fire_config_history import FireConfigHistory
 from app.models.fire_scenario import FireScenario
 from app.models.goal import Goal
 from app.models.income_source import IncomeSource
@@ -39,6 +40,7 @@ __all__ = [
     "DataSource",
     "AccountType",
     "FireConfig",
+    "FireConfigHistory",
     "FireScenario",
     "Goal",
     "GoalStatus",

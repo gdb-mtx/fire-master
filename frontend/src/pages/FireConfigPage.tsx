@@ -155,25 +155,20 @@ export default function FireConfigPage() {
     // Parse a float that allows zero (unlike ||, which treats 0 as falsy)
     const pf = (v: string, fallback: number) => { const n = parseFloat(v); return isNaN(n) ? fallback : n; };
 
-    // Merge settings into custom_assumptions. The tax/projection blocks are
-    // MERGED with their existing contents (not replaced) so keys the form
-    // doesn't manage — e.g. sell_event_label_match, illiquid_vest_event_match —
-    // survive a config save.
-    const existingAssumptions = (config?.custom_assumptions as Record<string, unknown>) || {};
-    const existingTax = (existingAssumptions.tax as Record<string, unknown>) || {};
-    const existingProjection = (existingAssumptions.projection as Record<string, unknown>) || {};
+    // custom_assumptions is sent as an RFC 7386 merge patch (fire-master#9):
+    // the backend merges it into the existing object, so only form-managed
+    // keys appear here — unmanaged keys (sell_event_label_match, sepp, ...)
+    // survive without resending them. Clearing a field means sending null;
+    // omitting a key would leave the old value in place.
     data.custom_assumptions = {
-      ...existingAssumptions,
       tax: {
-        ...existingTax,
         filing_status: form.filing_status,
         household_size: parseInt(form.household_size) || 1,
         cost_basis_pct: pf(form.cost_basis_pct, 60) / 100,
-        state: form.state_of_residence || undefined,
-        state_tax_rate: form.state_tax_rate ? parseFloat(form.state_tax_rate) : undefined,
+        state: form.state_of_residence || null,
+        state_tax_rate: form.state_tax_rate ? parseFloat(form.state_tax_rate) : null,
       },
       projection: {
-        ...existingProjection,
         surplus_investment_rate: pf(form.surplus_investment_rate, 4) / 100,
         cash_reserve_months: parseInt(form.cash_reserve_months) || 12,
         cash_savings_rate_early: pf(form.cash_savings_rate_early, 1) / 100,
@@ -182,11 +177,11 @@ export default function FireConfigPage() {
         re_appreciation_rate: pf(form.re_appreciation_rate, 1) / 100,
         primary_property_purchase_price: form.primary_property_purchase_price
           ? parseInt(form.primary_property_purchase_price)
-          : undefined,
+          : null,
         primary_property_agent_fee_pct: pf(form.primary_property_agent_fee_pct, 6) / 100,
         primary_property_mortgage_pi: form.primary_property_mortgage_pi
           ? parseInt(form.primary_property_mortgage_pi)
-          : undefined,
+          : null,
         ss_early_reduction: pf(form.ss_early_reduction, 70) / 100,
         ss_claim_age: parseInt(form.ss_claim_age) || 62,
         spending_phase_slow: pf(form.spending_phase_slow, 85) / 100,

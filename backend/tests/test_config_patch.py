@@ -114,3 +114,93 @@ class TestSetAttrPreservesFields:
         # Non-projection fields preserved
         assert base_fire_config.target_annual_spending == 15_300_000
         assert base_fire_config.social_security_monthly == 465_000
+
+
+class TestCustomAssumptionsMergePatch:
+    """fire-master#9: PATCHing custom_assumptions is an RFC 7386 merge, not a
+    replace. Tim's incident: {"custom_assumptions": {"sepp": {"sepp_monthly": X}}}
+    silently deleted every sibling key and every sibling field inside sepp."""
+
+    def _patch(self, config: FireConfig, body: dict) -> FireConfig:
+        """Replicate the PATCH endpoint's field loop exactly."""
+        from app.core.merge import json_merge_patch
+
+        update = FireConfigUpdate(**body)
+        for field, value in update.model_dump(exclude_unset=True).items():
+            if field == "custom_assumptions":
+                value = json_merge_patch(config.custom_assumptions, value)
+            setattr(config, field, value)
+        return config
+
+    def test_partial_nested_update_preserves_siblings(self, base_fire_config: FireConfig):
+        """The exact issue-9 reproduction: one sepp leaf must not wipe anything."""
+        before = {k: v for k, v in base_fire_config.custom_assumptions.items()}
+        self._patch(base_fire_config, {"custom_assumptions": {"sepp": {"sepp_monthly": 2_500}}})
+        ca = base_fire_config.custom_assumptions
+        # The leaf changed
+        assert ca["sepp"]["sepp_monthly"] == 2_500
+        # sepp's sibling fields survive
+        assert ca["sepp"]["ira_a_balance"] == 402_000
+        assert ca["sepp"]["ira_growth_rate"] == 0.06
+        # every top-level sibling key survives
+        assert set(ca.keys()) == set(before.keys())
+        assert ca["projection"] == before["projection"]
+        assert ca["tax"] == before["tax"]
+
+    def test_explicit_null_deletes_key(self, base_fire_config: FireConfig):
+        """Deletion is spelled null, matching the config page's cleared fields."""
+        self._patch(base_fire_config, {"custom_assumptions": {"tax": {"state": None}}})
+        tax = base_fire_config.custom_assumptions["tax"]
+        assert "state" not in tax
+        assert tax["filing_status"] == "single"  # siblings intact
+
+    def test_arrays_replace_wholesale(self, base_fire_config: FireConfig):
+        """property_sales-style lists replace, never element-merge."""
+        sales = [{"key": "coastal_condo", "sale_month": 24}]
+        self._patch(base_fire_config, {"custom_assumptions": {"property_sales": sales}})
+        self._patch(base_fire_config, {"custom_assumptions": {"property_sales": []}})
+        assert base_fire_config.custom_assumptions["property_sales"] == []
+
+    def test_new_subkey_added(self, base_fire_config: FireConfig):
+        self._patch(base_fire_config, {"custom_assumptions": {"taxable_pool": {"return_rate": 0.065}}})
+        assert base_fire_config.custom_assumptions["taxable_pool"] == {"return_rate": 0.065}
+        assert base_fire_config.custom_assumptions["sepp"]["sepp_monthly"] == 2_100
+
+    def test_top_level_null_is_explicit_full_clear(self, base_fire_config: FireConfig):
+        self._patch(base_fire_config, {"custom_assumptions": None})
+        assert base_fire_config.custom_assumptions is None
+
+    def test_merge_onto_null_base(self, base_fire_config: FireConfig):
+        base_fire_config.custom_assumptions = None
+        self._patch(base_fire_config, {"custom_assumptions": {"sepp": {"sepp_monthly": 900}}})
+        assert base_fire_config.custom_assumptions == {"sepp": {"sepp_monthly": 900}}
+
+    def test_config_page_save_shape_preserves_unmanaged_keys(self, base_fire_config: FireConfig):
+        """The config page now sends ONLY its managed keys (no client-side
+        spread); unmanaged keys like sell_event_label_match must survive."""
+        self._patch(base_fire_config, {"custom_assumptions": {
+            "tax": {"filing_status": "single", "household_size": 1, "cost_basis_pct": 0.6,
+                    "state": None, "state_tax_rate": None},
+            "projection": {"re_appreciation_rate": 0.0, "primary_property_purchase_price": None},
+            "rental_occupancy_rate": 0.7,
+        }})
+        ca = base_fire_config.custom_assumptions
+        proj = ca["projection"]
+        # cleared fields deleted, zero preserved as zero
+        assert "primary_property_purchase_price" not in proj
+        assert proj["re_appreciation_rate"] == 0.0
+        # unmanaged keys the form never touches survive
+        assert proj["sell_event_label_match"] == "mountain house"
+        assert proj["primary_property_mortgage_pi"] == 3_100
+        assert ca["occupancy_source_match"] == ["river house"]
+        assert ca["sepp"]["ira_a_balance"] == 402_000
+
+    def test_inputs_not_mutated(self, base_fire_config: FireConfig):
+        from app.core.merge import json_merge_patch
+
+        base = {"a": {"b": 1}}
+        patch = {"a": {"c": 2}}
+        out = json_merge_patch(base, patch)
+        assert base == {"a": {"b": 1}} and patch == {"a": {"c": 2}}
+        out["a"]["b"] = 99
+        assert base["a"]["b"] == 1

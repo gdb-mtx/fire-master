@@ -61,6 +61,18 @@ class FireConfigUpdate(BaseModel):
     custom_assumptions: dict | None = None
 
 
+class FireConfigHistoryEntry(BaseModel):
+    """One prior state of fire_config, captured by the DB trigger (fire-master#10)."""
+
+    id: int
+    config_id: UUID | None = None
+    op: str
+    changed_at: _dt.datetime
+    data: dict
+
+    model_config = {"from_attributes": True}
+
+
 # --- Income Source Schemas ---
 
 

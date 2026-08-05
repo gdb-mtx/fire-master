@@ -6,14 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.database import get_db
+from app.core.merge import json_merge_patch
 from app.engines.fire_projections import FireProjectionsEngine
 from app.engines.net_worth import NetWorthEngine
 from app.engines.spending import SpendingEngine
 from app.models.fire_config import FireConfig
+from app.models.fire_config_history import FireConfigHistory
 from app.models.fire_scenario import FireScenario
 from app.models.goal import Goal
 from app.models.income_source import IncomeSource
 from app.schemas.fire import (
+    FireConfigHistoryEntry,
     FireConfigResponse,
     FireConfigUpdate,
     FireMetricsResponse,
@@ -70,10 +73,67 @@ async def update_fire_config(
     config = await engine.get_or_create_config()
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
+        if field == "custom_assumptions":
+            # RFC 7386 merge patch, NOT replace (fire-master#9): omitted keys
+            # survive, explicit null deletes, explicit top-level null clears.
+            value = json_merge_patch(config.custom_assumptions, value)
         setattr(config, field, value)
     # JSONB columns need explicit dirty-flagging for SQLAlchemy change detection
     if "custom_assumptions" in update_data:
         flag_modified(config, "custom_assumptions")
+    await db.commit()
+    await db.refresh(config)
+    return config
+
+
+# --- FIRE Config History (fire-master#10) ---
+#
+# History rows are written by a Postgres trigger on every fire_config
+# UPDATE/DELETE (see app/models/fire_config_history.py) — the API only reads
+# and restores. Restoring is itself an UPDATE, so the pre-restore state is
+# captured too; a restore can always be undone by restoring the entry the
+# restore just created.
+
+
+@router.get("/config/history", response_model=list[FireConfigHistoryEntry])
+async def get_config_history(
+    limit: int = 50,
+    _user: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(FireConfigHistory)
+        .order_by(FireConfigHistory.id.desc())
+        .limit(max(1, min(limit, 200)))
+    )
+    return result.scalars().all()
+
+
+@router.post("/config/history/{entry_id}/restore", response_model=FireConfigResponse)
+async def restore_config_history(
+    entry_id: int,
+    _user: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from sqlalchemy.orm.attributes import flag_modified
+
+    entry = await db.get(FireConfigHistory, entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="History entry not found")
+
+    engine = FireProjectionsEngine(db)
+    config = await engine.get_or_create_config()
+
+    # Route the raw JSONB snapshot through FireConfigUpdate for type coercion
+    # (ISO date strings -> date objects). Only keys present in the snapshot are
+    # applied; custom_assumptions is REPLACED, not merged — restore means
+    # "return to exactly this state".
+    snapshot = FireConfigUpdate(
+        **{k: v for k, v in entry.data.items() if k in FireConfigUpdate.model_fields}
+    )
+    for field, value in snapshot.model_dump(exclude_unset=True).items():
+        setattr(config, field, value)
+    flag_modified(config, "custom_assumptions")
     await db.commit()
     await db.refresh(config)
     return config
