@@ -25,7 +25,15 @@ async def main():
     try:
         await mm.login(email, password)
     except RequireMFAException:
-        print("\nMFA required. Check your authenticator app or email.")
+        # The Monarch API only accepts authenticator-app (TOTP) codes here — it
+        # cannot trigger Monarch's email codes, so email-MFA users would wait
+        # for a code that never arrives (first hit in the wild: r/MM, Aug 6).
+        print(
+            "\nMFA required. Enter the 6-digit code from your authenticator app."
+            "\nNOTE: email codes do NOT work here — if your Monarch MFA is set to"
+            "\nemail, first enable an authenticator app in Monarch: Settings ->"
+            "\nSecurity -> Enable MFA, then re-run this script."
+        )
         mfa_code = input("MFA code: ")
         await mm.multi_factor_authenticate(email, password, mfa_code)
     except Exception as e:

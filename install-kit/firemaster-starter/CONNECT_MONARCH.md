@@ -8,8 +8,10 @@ machine — FIREMaster reads from Monarch and stores everything in your local da
 > your real accounts automatically. The demo doesn't come back (you can always re-seed it later if
 > you want a sandbox again). So connect when you actually want to go live.
 
-**You'll need:** your Monarch email + password, and your MFA code (authenticator app or email) if you
-have two-factor enabled.
+**You'll need:** your Monarch email + password, and — if you have two-factor enabled — a code from
+your **authenticator app**. Email MFA codes do NOT work here: the Monarch API only accepts
+authenticator (TOTP) codes and can't trigger an email send. If your Monarch MFA is email-only,
+first enable an authenticator app in Monarch (Settings → Security → Enable MFA), then come back.
 
 ---
 
@@ -54,6 +56,9 @@ That's it — FIREMaster is now running on your real financial picture.
   set deliberately, e.g. on a public demo box.)
 - **Login fails / MFA loop** — re-run the command; have your authenticator code ready before you
   start (the codes rotate every 30s).
+- **"MFA code" prompt but no code ever arrives** — your Monarch MFA is set to email codes, which
+  the API can't trigger. Switch to an authenticator app in Monarch (Settings → Security), then
+  re-run the login.
 - **Session expired later** (sync stops importing new data) — just re-run the step-2 command to
   refresh it.
 - **Nothing imported / `Sync: error` in the header** — open the logs (`docker compose logs
