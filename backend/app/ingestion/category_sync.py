@@ -176,8 +176,12 @@ PARENT_GROUP: dict[str, str] = {
     "Hide from Budgets & Trends": "Other",
 }
 
-# Categories flagged as income
+# Categories flagged as income by NAME. This is a fallback only — the primary signal is
+# the parent group Monarch itself assigned (see classify_flags). fire-master#11: custom-named
+# income categories ("Alice - Paycheck") under Monarch's Income group were silently non-income.
 INCOME_CATEGORIES = {"Paychecks", "Paycheck", "Other Income", "Business Income", "Interest"}
+INCOME_PARENT = "Income"
+TRANSFER_PARENT = "Transfers"
 
 # Categories flagged as transfers (not real spending)
 TRANSFER_CATEGORIES = {
@@ -192,6 +196,18 @@ NON_DISCRETIONARY = {
     "Child Support", "L Support", "Education", "Auto Payment",
     "Loan Payment",
 }
+
+
+def classify_flags(normalized: str, parent: str | None) -> tuple[bool, bool]:
+    """(is_income, is_transfer) for a category.
+
+    Monarch already grouped the category; trust that first (parent == "Income" /
+    "Transfers"), then fall back to the hardcoded name sets for installs whose
+    parent came from the Mint-era lookup table. A category is never both.
+    """
+    is_transfer = parent == TRANSFER_PARENT or normalized in TRANSFER_CATEGORIES
+    is_income = not is_transfer and (parent == INCOME_PARENT or normalized in INCOME_CATEGORIES)
+    return is_income, is_transfer
 
 
 class CategorySyncService:
@@ -227,14 +243,15 @@ class CategorySyncService:
             parent = group_map.get(group_id, _lookup_parent(raw_name))
 
             normalized = MINT_TO_MONARCH.get(raw_name, raw_name)
+            is_income, is_transfer = classify_flags(normalized, parent)
 
             stmt = insert(CategoryMapping).values(
                 raw_category=raw_name,
                 normalized_category=normalized,
                 parent_category=parent,
                 is_discretionary=normalized not in NON_DISCRETIONARY,
-                is_income=normalized in INCOME_CATEGORIES,
-                is_transfer=normalized in TRANSFER_CATEGORIES,
+                is_income=is_income,
+                is_transfer=is_transfer,
                 monarch_category_id=cat_id or None,
             ).on_conflict_do_update(
                 index_elements=["raw_category"],
@@ -242,8 +259,8 @@ class CategorySyncService:
                     "normalized_category": normalized,
                     "parent_category": parent,
                     "is_discretionary": normalized not in NON_DISCRETIONARY,
-                    "is_income": normalized in INCOME_CATEGORIES,
-                    "is_transfer": normalized in TRANSFER_CATEGORIES,
+                    "is_income": is_income,
+                    "is_transfer": is_transfer,
                     "monarch_category_id": cat_id or None,
                 },
             )
@@ -283,13 +300,14 @@ class CategorySyncService:
         for raw in missing:
             normalized = MINT_TO_MONARCH.get(raw, raw)
             parent = _lookup_parent(normalized)
+            is_income, is_transfer = classify_flags(normalized, parent)
             rows.append({
                 "raw_category": raw,
                 "normalized_category": normalized,
                 "parent_category": parent,
                 "is_discretionary": normalized not in NON_DISCRETIONARY,
-                "is_income": normalized in INCOME_CATEGORIES,
-                "is_transfer": normalized in TRANSFER_CATEGORIES,
+                "is_income": is_income,
+                "is_transfer": is_transfer,
             })
 
         for row in rows:

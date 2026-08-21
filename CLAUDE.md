@@ -22,7 +22,7 @@ If a `CLAUDE.local.md` exists here, read it too — it carries the owner's machi
 | Transactions Ledger | `app/api/transactions.py`, `/api/transactions`, `/transactions` page |
 | Monarch tag sync (bidirectional) | `scripts/monarch_tag_writeback.py` (out), `reclassify()` tag map (in) |
 
-Test suite: **200 unit tests, <1s** (`cd backend && uv run pytest -v`) + **14 Postgres integration tests** (skipped unless `TEST_DATABASE_URL` points at a scratch DB; CI runs them). Run after engine, config, tax, or scenario changes.
+Test suite: **218 unit tests, <1s** (`cd backend && uv run pytest -v`) + **14 Postgres integration tests** (skipped unless `TEST_DATABASE_URL` points at a scratch DB; CI runs them). Run after engine, config, tax, or scenario changes.
 
 **Property P&L gotchas:**
 - Transactions are classified to a property by DB-stored merchant rules (`property_rules`), stamped onto `transactions.property_id/property_category/property_source` by `PropertyPnLEngine.reclassify()` (runs post-sync + on `POST /api/properties/reclassify`).
@@ -93,6 +93,7 @@ Things that will cause bugs if you don't know them.
 - Uses `bcrypt` directly (not `passlib` — incompatible with bcrypt 5.x)
 - **Enum columns in raw SQL expressions** (`case()`, on-conflict `set_`): never pass a bare enum member as a literal — it binds the lowercase `.value`, but the PG enum labels are member NAMES, and one bad bind aborts the whole transaction (the Aug 4 sync outage). Route through `stmt.excluded.<col>` or an explicitly typed bind, and cover the path in `tests/integration/` — mock tests structurally cannot catch this class.
 - Celery worker needs `-I app.tasks.sync_tasks` for task autodiscovery
+- Category `is_income`/`is_transfer` derive from Monarch's parent group first (`classify_flags()` in `category_sync.py`), hardcoded name sets are the fallback only — custom-named income categories ("Alice - Paycheck") must count as income (fire-master#11). Readiness uses the window-AVERAGE savings rate, clamped 0-100; never a single month's point.
 - `get_settings()` uses `@lru_cache` — restart backend after .env changes
 - Expense reconciliation vs Monarch intentionally runs higher: tax refunds are not netted against spending (conservative burn rate)
 - Incremental sync look-back = `INCREMENTAL_SYNC_DAYS` (45 days) in `monarch_sync.py`, used by both `sync_transactions` and `reconcile_transactions`. Was 7 days, which silently + permanently dropped any txn that posted >7 days after its date or fell in a >7-day sync gap (no incremental pass ever looks back further). If the stack is offline >45 days, run a backfill (`run_full_sync(full_history=True)`, or `sync_transactions(start_date=...)` for a pure upsert with no delete). Reconcile-delete is scoped to `source=MONARCH` rows only — never touches manual entries.

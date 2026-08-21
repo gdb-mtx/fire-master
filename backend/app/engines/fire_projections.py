@@ -99,6 +99,20 @@ def _spending_multiplier(age: float) -> float:
     return SPENDING_FLOOR
 
 
+
+def savings_rate_component(rate: float | None) -> float:
+    """Readiness sub-score (0-100) for a savings rate (%). 30%+ is full marks.
+
+    Takes the dollar-weighted AVERAGE over the window, not the latest month: one
+    miscategorized or partial month must not dominate the score. Clamped on both
+    sides — fire-master#11 saw -693,000 on the 0-100 scale from an un-floored
+    single-month point.
+    """
+    if rate is None:
+        return 0.0
+    return max(0.0, min(100.0, rate / 30 * 100))
+
+
 class FireProjectionsEngine:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -659,9 +673,7 @@ class FireProjectionsEngine:
         # Savings rate (20%)
         spending_engine = SpendingEngine(self.db)
         savings_data = await spending_engine.get_savings_rate(months=6)
-        current_rate = savings_data.current_rate or 0
-        # Target: 30%+ savings rate is excellent
-        savings_rate_score = min(100, current_rate / 30 * 100) * 0.2
+        savings_rate_score = savings_rate_component(savings_data.average_rate) * 0.2
 
         # Income stability (15%) — check if income sources are configured
         sources = await self._get_income_sources()
