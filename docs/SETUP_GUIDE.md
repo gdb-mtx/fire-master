@@ -32,7 +32,7 @@ and unzip it — updating later is just re-downloading.
   Docker Desktop sets up WSL2 for you (**one reboot**). You do **not** install or manage an
   Ubuntu distro, and you never touch bash.
 - **Prefer to develop natively** (run the backend/frontend on the host for fast hot-reload)?
-  That path needs `uv` + Node 18+ and a bash shell — see the **Contributor / native dev**
+  That path needs `uv` + Node 22.22+ and a bash shell — see the **Contributor / native dev**
   section in the [README](../README.md#contributor--native-dev-optional). This guide uses the
   Docker path throughout.
 

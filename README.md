@@ -109,7 +109,7 @@ account enrichment, property rules, and your first FIRE config — in
 ### Contributor / native dev (optional)
 
 Prefer to run the backend and frontend **directly on your machine** for fast hot-reload? That
-path still exists. It needs [uv](https://docs.astral.sh/uv/) and Node 18+ in addition to Docker
+path still exists. It needs [uv](https://docs.astral.sh/uv/) and Node 22.22+ in addition to Docker
 (which still provides Postgres/Redis), and a bash shell (macOS/Linux/WSL2):
 
 ```bash
@@ -118,6 +118,25 @@ path still exists. It needs [uv](https://docs.astral.sh/uv/) and Node 18+ in add
 ```
 
 Both paths share the same database, so you can switch between them freely.
+
+### Build only from your checkout
+
+For a higher-assurance local install, use the local-build overlay. It gives the images distinct
+local names, refuses registry pulls at runtime, requires both dependency lockfiles, and builds
+the exact source currently checked out. The frontend is compiled into a minimal nginx runtime;
+Node, npm, source files, and development dependencies are not present in the running container:
+
+```bash
+touch backend/.env
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml pull postgres redis
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml build --pull
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml run --rm --no-deps backend uv run python -m app.setup
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml up --pull never
+```
+
+Run `touch` and setup only on first install. Subsequent starts need only the final command; rebuild
+after reviewing and checking out an update. The standalone base keeps Postgres and Redis entirely
+inside the container network and publishes the web UI and API on localhost only.
 
 ## What's inside
 

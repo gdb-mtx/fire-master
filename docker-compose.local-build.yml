@@ -1,0 +1,42 @@
+# Opt-in overlay for building and running only the checked-out source.
+#
+# Usage:
+#   docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml pull postgres redis
+#   docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml build --pull
+#   docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml up --pull never
+#
+# Distinct local image names and pull_policy=never prevent an image published to
+# GHCR under the mutable `latest` tag from being substituted at runtime.
+
+services:
+  migrate:
+    image: firemaster-backend:local
+    pull_policy: never
+
+  backend:
+    image: firemaster-backend:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+
+  celery-worker:
+    image: firemaster-backend:local
+    pull_policy: never
+
+  celery-beat:
+    image: firemaster-backend:local
+    pull_policy: never
+
+  frontend:
+    image: firemaster-frontend:local
+    pull_policy: never
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    ports: !override
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-5173}:8080"
+    # The production image contains only static assets + nginx. Remove the
+    # development source/node_modules mounts if this overlay is used with docker-compose.yml.
+    volumes: !reset []
+    environment: !reset {}

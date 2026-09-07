@@ -89,7 +89,7 @@ docker compose up            # rebuilds the world; data still there
   `Connection refused`.
 
 ### Change 2 — Frontend container (`frontend/Dockerfile`, `docker-compose.yml`)
-- New `frontend/Dockerfile` (node:20-slim): `npm install`, copy app, run the Vite dev server
+- New `frontend/Dockerfile` (node:22.22-slim): `npm ci`, copy app, run the Vite dev server
   with **`--host`** (binds `0.0.0.0` — without it `:5173` is unreachable from the host).
 - New `frontend` compose service: publishes
   `127.0.0.1:${FRONTEND_HOST_PORT:-5173}:5173`, sets
@@ -222,6 +222,20 @@ docker compose -p fmtest down -v
 
 (Those same env vars are the escape hatch for any **user** whose `:5432`/`:5173` is already
 taken — no file edits, just set the var.)
+
+### Source-only local images
+
+Use `docker-compose.local-build.yml` when the checked-out source, rather than a mutable registry
+tag, must be the source of truth. The overlay assigns distinct `:local` image names and sets
+`pull_policy: never`; the Dockerfiles require their lockfiles and use frozen installs. It also
+uses the production multi-stage frontend, so the running image contains nginx and compiled
+static assets instead of the Node development server and toolchain.
+
+```bash
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml pull postgres redis
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml build --pull
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml up --pull never
+```
 
 ---
 
