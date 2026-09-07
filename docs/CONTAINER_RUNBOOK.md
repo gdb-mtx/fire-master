@@ -91,7 +91,8 @@ docker compose up            # rebuilds the world; data still there
 ### Change 2 — Frontend container (`frontend/Dockerfile`, `docker-compose.yml`)
 - New `frontend/Dockerfile` (node:20-slim): `npm install`, copy app, run the Vite dev server
   with **`--host`** (binds `0.0.0.0` — without it `:5173` is unreachable from the host).
-- New `frontend` compose service: publishes `${FRONTEND_HOST_PORT:-5173}:5173`, sets
+- New `frontend` compose service: publishes
+  `127.0.0.1:${FRONTEND_HOST_PORT:-5173}:5173`, sets
   **`VITE_API_URL=http://backend:8000`** (the Vite proxy in `vite.config.ts` runs *inside* the
   container, so it must reach the backend by service name), and an anonymous
   `- /app/frontend/node_modules` volume (same shadow fix as the backend's `.venv`).
@@ -188,6 +189,7 @@ bind-mounts `./scripts` + `./config` over the baked copies, so native edit-reloa
 The file shipped in the install kit (firemaster.io): GHCR images only, **no `build:`**, **no
 source bind-mounts**, no `scripts/`/`config/` on disk (they're in the image). Run it with
 `-f docker-compose.public.yml`. Differences from the dev compose worth knowing:
+- PostgreSQL and Redis have no host ports. The API and UI publish only on `127.0.0.1`.
 - **`.env` is a single-file bind mount** (`./backend/.env:/app/backend/.env`), not `env_file`
   (the interpolation bug — see the troubleshooting table). A bind mount of a **non-existent**
   host file is created as a *directory*, which breaks `app.setup`, so the kit must ship an
@@ -205,7 +207,7 @@ All container testing runs under a **separate Docker Compose project** named `fm
 data volumes. A `fmtest` project gets its own network and its own EMPTY volumes
 (`fmtest_pgdata`), entirely separate from the real `firemaster_*` volumes.
 
-The published host ports are parameterized in `docker-compose.yml`
+The loopback-only host ports are parameterized in `docker-compose.yml`
 (`${POSTGRES_HOST_PORT:-5432}`, `${REDIS_HOST_PORT:-6379}`, `${BACKEND_HOST_PORT:-8000}`,
 `${FRONTEND_HOST_PORT:-5173}`), so an isolated stack just sets them inline:
 

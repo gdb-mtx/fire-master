@@ -2,6 +2,7 @@
 
 import logging
 from datetime import date, datetime
+from pathlib import Path
 
 from monarchmoney import MonarchMoney
 
@@ -15,6 +16,13 @@ class MonarchClient:
 
     async def connect(self):
         """Load saved session and verify connectivity."""
+        session_path = Path(self.session_file)
+        if session_path.is_symlink() or not session_path.is_file():
+            raise RuntimeError("Monarch session path must be a regular file")
+        try:
+            session_path.chmod(0o600)
+        except OSError as exc:
+            raise RuntimeError("Could not restrict Monarch session permissions") from exc
         self.mm.load_session(self.session_file)
         logger.info("Monarch session loaded from %s", self.session_file)
 

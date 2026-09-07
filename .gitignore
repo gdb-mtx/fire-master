@@ -20,6 +20,7 @@ frontend/dist/
 .env
 .env.local
 .monarch_session
+.mm/
 # ...except the install-kit placeholder (comments only, no secrets) — it MUST ship in the kit
 !install-kit/firemaster-starter/backend/.env
 

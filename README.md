@@ -77,6 +77,9 @@ first launch.
 
 > **First run pulls prebuilt multi-arch images from GHCR (~30–60s)**; subsequent `docker compose up` is faster still.
 > (No prebuilt image yet, or offline? `docker compose up --build` builds locally instead.) To update later: `docker compose pull && docker compose up -d`.
+> Published ports bind to `127.0.0.1` by default, so the database, queue, API, and UI are not
+> reachable from other devices on your network. Do not remove that binding or expose this stack
+> directly to the internet.
 > A `migrate` container that shows `Exited (0)` is normal — it applied migrations + seeded the demo, then quit.
 > If `:5432`/`:6379`/`:8000`/`:5173` are already taken, set e.g.
 > `BACKEND_HOST_PORT=8001 FRONTEND_HOST_PORT=5174` before the command. Operational details,
@@ -139,7 +142,8 @@ on the native path).
 ## Troubleshooting
 
 - **`Docker daemon is not running`** — start Docker Desktop first and wait for it to finish launching.
-- **Port already in use** — the stack publishes 5432, 6379, 8000, 5173. Remap any of them with the
+- **Port already in use** — the development stack publishes 5432, 6379, 8000, and 5173 on
+  `127.0.0.1` only. Remap any of them with the
   `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT` / `BACKEND_HOST_PORT` / `FRONTEND_HOST_PORT` env vars,
   e.g. `BACKEND_HOST_PORT=8001 docker compose up`.
 - **`migrate` container shows `Exited (0)`** — that's normal; it ran migrations and quit. See
