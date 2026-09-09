@@ -189,10 +189,13 @@ export interface WealthPoolPoint {
   illiquid: number;
   taxable: number;
   taxable_draw?: number;
+  roth?: number; // Roth / tax-free pool (custom_assumptions.roth_pool), drawn last
+  roth_draw?: number;
   total: number;
   income: number;
   expenses: number;
-  ira_draw: number;
+  ira_draw: number; // SEPP + IRA-B gap draw + any forced RMD
+  rmd_redeposit?: number; // part of ira_draw redeposited to taxable by an RMD (never reaches cash)
   rrsp_draw: number;
   cash_interest: number;
   month: number | null;

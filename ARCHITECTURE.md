@@ -204,9 +204,9 @@ Each month, expenses are funded through this sequence:
 2. **Fixed draws execute** — SEPP from IRA-A and RRSP/RRIF (amounts + start months from `custom_assumptions.sepp` / `.rrsp`; inactive unless configured)
 3. **Social Security starts** — at configured claim age (default 62), reduced for early claiming (70% of full)
 4. **Net applied to cash** — income + draws - expenses → cash pool increases or decreases
-5. **Taxable, then IRA-B, backstop** — when cash falls below its ~12-month reserve, the taxable brokerage (if funded by property sales) is drawn first (penalty-free at any age); after 59½, IRA-B covers any residual gap
+5. **Taxable, then IRA-B, then RMDs, then Roth** — when cash falls below its ~12-month reserve, the taxable brokerage is drawn first (penalty-free at any age); after 59½, IRA-B covers any residual gap; from `rmd_start_age` the IRS minimum is forced out of the IRAs regardless of need (surplus redeposited to taxable, see below); the Roth pool covers whatever gap survives — last, because a tax-free dollar is the most valuable dollar. A pool is drawable whenever it holds money, however it was funded (configured `starting_balance`, sale proceeds, RMD redeposits) — nothing gates the waterfall on property sales (fire-master#12)
 6. **Surplus invested** — cash above 12-month reserve earns investment return (4% real)
-7. **Cash can go negative only while no drawable pool exists** — pre-rescue bridge stress stays visible (and `cash_zero_month` records it); once the taxable pool is funded, a repair draw tops cash back to exactly $0, so a cash line resting at zero reads "funded month-to-month by pool draws, no buffer." Frontend clamps display at $0.
+7. **Cash can go negative only while no drawable pool exists** — pre-rescue bridge stress stays visible (and `cash_zero_month` records it); once the taxable or Roth pool is funded, a repair draw (taxable first, then Roth) tops cash back to exactly $0, so a cash line resting at zero reads "funded month-to-month by pool draws, no buffer." Frontend clamps display at $0.
 
 ### Why This Matters for Spending Sensitivity
 
@@ -225,6 +225,16 @@ Each sale entry models:
 
 The taxable pool is the 6th pool in the funding waterfall and is drawn **before** IRA-B (it's penalty-free at any age) — see step 5 above. That ordering is what lets a scenario test whether 72(t)/SEPP is still needed: set `sepp.sepp_monthly = 0` and check whether the taxable pool alone keeps cash positive to 59½. (`WealthPoolPoint` carries `taxable` and `taxable_draw`; both feed `total` and the teal band on the Retirement chart.)
 
+The pool is **independent of property sales**: `custom_assumptions.taxable_pool.starting_balance` alone (an existing brokerage, no `property_sales`) is projected and drawn exactly the same way. `property_sales` gates only the sale mechanics (legacy-vs-generic sale paths, burn deltas, event suppression, markers), never the drawdown waterfall (fire-master#12). When no `taxable_pool` block exists the pool still works (sale proceeds and RMD redeposits can fund it) and compounds at the engine's 6.5% real default — declare the block to choose the rate.
+
+### Roth / Tax-Free Pool
+
+`custom_assumptions.roth_pool = {starting_balance, return_rate}` (opt-in, same shape as `taxable_pool`; `return_rate` is REAL and defaults to `sepp.ira_growth_rate` — same index, never taxed on the way out). This is the **only door** tax-free money enters the projection through: `tax_free_reserve` accounts feed net worth, not this engine, exactly like retirement-role accounts vs the SEPP block. Drawn **last** in the waterfall (after taxable and IRA-B) and used for cash repair after taxable. No age gate — contribution basis is withdrawable at any age, earnings are not, and the engine can't split them, so the user decides what balance to expose. No RMDs. `WealthPoolPoint.roth` / `roth_draw` feed `total` and the olive band on the Retirement chart. It is also the natural destination for balances the Roth conversion planner (`/api/tax/roth-conversion-plan`) recommends converting — without it a conversion looks like pure tax cost with no asset on the other side (fire-master#13).
+
+### Required Minimum Distributions
+
+From `config.rmd_start_age` (default 73) the engine forces the IRS Uniform Lifetime minimum out of the tax-deferred IRAs — the same table and mechanics the tax engine's withdrawal planner uses (`_get_rmd_divisor`), on the IRA-A + IRA-B aggregate (the IRS aggregates traditional IRAs). Monthly approximation: `balance / divisor / 12`. When the month's voluntary draws (SEPP + IRA-B gap draw) already meet it nothing changes; otherwise the shortfall is forced out of IRA-B first, then IRA-A. Forced money is cash in hand: it covers whatever gap is still open that month, and the surplus is **not spending** — it is redeposited gross into the taxable pool, where next month's waterfall can draw it. `ira_draw` includes the forced amount (it IS a taxable distribution) and `rmd_redeposit` carries the redeposited part so the cash line never counts it; the chart gets an "RMDs at N" marker. Opt out with `projection.enforce_rmd = false`. Limitation: the divisor keys off the single `date_of_birth` — a two-owner household keyed to the younger owner starts RMDs later and divides by a larger factor, understating them (fire-master#14).
+
 **Month-0 hygiene** (related fix): one-off cashflow events dated before today are dropped rather than clamped to month 0 — otherwise a finished severance or paid expense reappears as a phantom month-0 flow. Recurring events start from today. (Known limitation: the day-based bucketing rounds events <~30 days out to month 0.)
 
 ## Which Surface Runs on Which Engine (and how fresh it is)
@@ -237,13 +247,14 @@ between deciding on today's money and April's (verified Jul 23, 2026):
 |---|---|---|---|
 | **Runway page** | `CashflowEngine.project_runway()` | Liquid cash + DECLARED income (sources with dates + events; fixed Jul 27) + trailing 3-mo actual burn | Live balances + declared income model |
 | **Retirement page, top strip** (projected date, on-track) | `project_timeline()` (single-pool) | Total synced net worth, one pot | Live balances |
-| **Retirement page, pool charts + ALL scenarios** | `project_wealth_pools()` — the trusted engine | Cash/RE/illiquid live from enriched accounts; **IRA-A/IRA-B, RRSP, taxable pool from config only** | The stale-config zone |
+| **Retirement page, pool charts + ALL scenarios** | `project_wealth_pools()` — the trusted engine | Cash/RE/illiquid live from enriched accounts; **IRA-A/IRA-B, RRSP, taxable pool, Roth pool from config only** | The stale-config zone |
 | **Dashboard / FIRE progress** | summary calcs | Synced accounts | Live |
 
 Two non-obvious consequences (both empirically verified):
 - **Retirement-role account balances are IGNORED by `project_wealth_pools()`** — the SEPP
   config block is the only door retirement money enters through (identical totals with $0 vs
-  $870K of enriched retirement accounts). They drive only the FIRE-progress "accessible"
+  $870K of enriched retirement accounts); likewise `roth_pool` for `tax_free_reserve` balances.
+  They drive only the FIRE-progress "accessible"
   number. Corollary: the real double-count vectors are a liquid-role brokerage also counted in
   `taxable_pool.starting_balance`, or liquid-role pension money also in the RRSP block —
   retirement roles themselves cannot double-count.

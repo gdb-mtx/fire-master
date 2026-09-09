@@ -346,7 +346,12 @@ class TestGradualPropertyExit:
         r_cash = await self._engine(to_cash, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources).project_wealth_pools(end_age=82, bridge_months=60)
 
         assert max(p.taxable for p in r_tax.points) > 100_000, "taxable route should park proceeds in the pool"
-        assert max(p.taxable for p in r_cash.points) == 0, "cash route must never populate the taxable pool"
+        # Scoped to pre-RMD ages: this invariant is about sale PROCEEDS. From
+        # rmd_start_age forced RMD excess legitimately lands in the taxable pool
+        # from an unrelated source (fire-master#14).
+        rmd_age = 73  # persona config.rmd_start_age
+        assert max(p.taxable for p in r_cash.points if p.age < rmd_age) == 0, (
+            "cash route must never populate the taxable pool (before RMDs)")
 
     @pytest.mark.asyncio
     async def test_taxable_growth_rate_matters(
@@ -488,3 +493,198 @@ class TestGradualPropertyExit:
         # taxable draws cover the burn
         floor_months = [p for p in r.points if p.cash == 0 and (p.taxable_draw or 0) > 0]
         assert len(floor_months) >= 3, "expected cash pinned at zero by repair draws"
+
+
+# ---------------------------------------------------------------------------
+# Drawdown waterfall: taxable gate (#12), Roth pool (#13), RMDs (#14)
+# ---------------------------------------------------------------------------
+
+class TestWaterfallPools:
+    """fire-master#12/#13/#14 — the waterfall is one path with no property-sale
+    gate, a tax-free pool is drawn last, and RMDs are forced from rmd_start_age."""
+
+    # No property sales; a configured brokerage must still be spendable.
+    BROKERAGE_ONLY = {
+        "sepp": {"ira_a_balance": 402_000, "ira_b_balance": 165_000, "sepp_monthly": 2_100,
+                 "sepp_start_month": 12, "ira_growth_rate": 0.06},
+        "rrsp": {"monthly_net": 1_900, "start_month": 12, "total_available": 205_000},
+        "taxable_pool": {"starting_balance": 600_000, "return_rate": 0.06},
+        "projection": {"enforce_rmd": False},
+    }
+
+    def _engine(self, overrides, nwb, accts, cfs, inc, **cfg_overrides):
+        config = _make_fire_config(**cfg_overrides)
+        _apply_scenario(config, deepcopy(overrides))
+        return _make_engine(config, nwb, accts, cfs, inc)
+
+    # --- #12 -------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_taxable_pool_is_drawn_without_property_sales(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        """A configured taxable_pool with NO property_sales used to compound untouched
+        while cash ran arbitrarily negative (use_generic_sales gated the waterfall)."""
+        r = await self._engine(
+            self.BROKERAGE_ONLY, net_worth_breakdown, mock_accounts, mock_cashflow_events,
+            mock_income_sources, target_annual_spending=30_000_000,  # $300K/yr burn
+        ).project_wealth_pools(end_age=82, bridge_months=60)
+
+        assert any((p.taxable_draw or 0) > 0 for p in r.points), "brokerage never drawn"
+        stranded = [p for p in r.points if p.cash < 0 and p.taxable > 1]
+        assert not stranded, f"negative cash beside a funded brokerage: {stranded[:3]}"
+        assert r.points[-1].taxable < 600_000, "pool should be spent down, not compound forever"
+
+    @pytest.mark.asyncio
+    async def test_no_taxable_pool_still_matches_legacy_path(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        """With an empty pool the unified waterfall reduces to the legacy IRA-B-only
+        formula: taxable stays 0 and never draws (behavior-preserving)."""
+        overrides = deepcopy(self.BROKERAGE_ONLY)
+        del overrides["taxable_pool"]
+        r = await self._engine(
+            overrides, net_worth_breakdown, mock_accounts, mock_cashflow_events,
+            mock_income_sources, target_annual_spending=30_000_000,
+        ).project_wealth_pools(end_age=82, bridge_months=60)
+        assert all(p.taxable == 0 and (p.taxable_draw or 0) == 0 for p in r.points)
+        assert any(p.age >= 59.5 and p.ira_draw > 2_100 for p in r.points), "IRA-B still drawn after 59½"
+
+    # --- #13 -------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_roth_pool_is_projected_and_drawn(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        overrides = deepcopy(self.BROKERAGE_ONLY)
+        overrides["taxable_pool"] = {"starting_balance": 100_000, "return_rate": 0.06}
+        overrides["roth_pool"] = {"starting_balance": 400_000, "return_rate": 0.06}
+        r = await self._engine(
+            overrides, net_worth_breakdown, mock_accounts, mock_cashflow_events,
+            mock_income_sources, target_annual_spending=30_000_000,
+        ).project_wealth_pools(end_age=82, bridge_months=60)
+
+        assert r.points[0].roth > 400_000, "Roth should compound at its real rate"
+        assert any((p.roth_draw or 0) > 0 for p in r.points), "Roth never drawn"
+        assert r.points[-1].roth < r.points[0].roth
+        # Pools feed the total
+        p0 = r.points[0]
+        assert abs(p0.total - (max(0, p0.cash) + p0.ira_sepp + p0.ira_growth + p0.rrsp
+                               + p0.real_estate + p0.illiquid + p0.taxable + p0.roth)) < 2
+
+    @pytest.mark.asyncio
+    async def test_roth_is_drawn_strictly_last(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        """A tax-free dollar is the most valuable dollar: Roth is touched only once
+        taxable is exhausted, and (after 59½) only once IRA-B is exhausted too."""
+        overrides = deepcopy(self.BROKERAGE_ONLY)
+        overrides["taxable_pool"] = {"starting_balance": 150_000, "return_rate": 0.06}
+        overrides["roth_pool"] = {"starting_balance": 400_000, "return_rate": 0.06}
+        r = await self._engine(
+            overrides, net_worth_breakdown, mock_accounts, mock_cashflow_events,
+            mock_income_sources, target_annual_spending=30_000_000,
+        ).project_wealth_pools(end_age=82, bridge_months=60)
+
+        drawn = [p for p in r.points if (p.roth_draw or 0) > 0]
+        assert drawn, "expected Roth draws under a $300K burn"
+        assert all(p.taxable == 0 for p in drawn), "Roth drawn while taxable still funded"
+        assert all(p.ira_growth == 0 for p in drawn if p.age >= 59.5), "Roth drawn while IRA-B still funded"
+
+    @pytest.mark.asyncio
+    async def test_absent_roth_pool_is_behavior_preserving(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        """No roth_pool key (or an empty one) reproduces the existing projection
+        to the dollar; the new point fields sit at zero."""
+        base = deepcopy(SCENARIO_SELL_ALL_THREE)
+        empty = {**deepcopy(SCENARIO_SELL_ALL_THREE), "roth_pool": {}}
+        r_a = await self._engine(base, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources).project_wealth_pools(end_age=82, bridge_months=60)
+        r_b = await self._engine(empty, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources).project_wealth_pools(end_age=82, bridge_months=60)
+        assert r_a.total_at_end == r_b.total_at_end
+        assert [p.model_dump() for p in r_a.points] == [p.model_dump() for p in r_b.points]
+        assert all(p.roth == 0 and (p.roth_draw or 0) == 0 for p in r_a.points)
+
+    # --- #14 -------------------------------------------------------------
+
+    RMD_HEAVY = {
+        # Spending comfortably covered elsewhere; a large IRA-B nobody needs to touch.
+        "sepp": {"ira_a_balance": 0, "ira_b_balance": 3_000_000, "sepp_monthly": 0,
+                 "sepp_start_month": 0, "ira_growth_rate": 0.06},
+        "rrsp": {"monthly_net": 0, "start_month": 0, "total_available": 0},
+        "taxable_pool": {"starting_balance": 1_000_000, "return_rate": 0.06},
+    }
+
+    @pytest.mark.asyncio
+    async def test_rmd_forces_minimum_ira_draw(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        """From rmd_start_age every recorded month's IRA draw covers at least
+        balance / Uniform Lifetime divisor / 12 — even when the spending gap is zero."""
+        from app.engines.tax_engine import _get_rmd_divisor
+        r = await self._engine(
+            self.RMD_HEAVY, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources,
+        ).project_wealth_pools(end_age=90)
+
+        post = [p for p in r.points if p.age >= 73 and (p.ira_growth + p.ira_sepp) > 0]
+        assert len(post) >= 10, "persona should carry IRA money well past 73"
+        for p in post:
+            required = (p.ira_growth + p.ira_sepp) / _get_rmd_divisor(int(p.age))
+            assert p.ira_draw * 12 >= required * 0.98, (
+                f"age {p.age}: drew {p.ira_draw * 12:,.0f}/yr against required {required:,.0f}")
+            assert (p.rmd_redeposit or 0) > 0, f"age {p.age}: forced excess should be redeposited"
+        pre = [p for p in r.points if p.age < 73]
+        assert all((p.rmd_redeposit or 0) == 0 for p in pre)
+        assert any("RMDs at 73" in e["label"] for e in r.events)
+
+    @pytest.mark.asyncio
+    async def test_rmd_opt_out_reproduces_under_draw(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        """projection.enforce_rmd=false restores the old behavior: $0 drawn against a
+        multi-million IRA-B past 73 (the symptom in the issue)."""
+        overrides = {**deepcopy(self.RMD_HEAVY), "projection": {"enforce_rmd": False}}
+        r = await self._engine(
+            overrides, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources,
+        ).project_wealth_pools(end_age=90)
+        post = [p for p in r.points if p.age >= 73]
+        assert any(p.ira_draw == 0 and p.ira_growth > 1_000_000 for p in post)
+        assert all((p.rmd_redeposit or 0) == 0 for p in r.points)
+        assert not any("RMD" in e["label"] for e in r.events)
+
+    @pytest.mark.asyncio
+    async def test_rmd_redeposit_is_not_double_counted(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        """The forced excess moves IRA → taxable; it is not spending and not cash.
+        With both pools at the same real rate total wealth is (nearly) unchanged —
+        a double count would add every redeposit to cash AND taxable."""
+        on = deepcopy(self.RMD_HEAVY)
+        off = {**deepcopy(self.RMD_HEAVY), "projection": {"enforce_rmd": False}}
+        r_on = await self._engine(on, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources).project_wealth_pools(end_age=90)
+        r_off = await self._engine(off, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources).project_wealth_pools(end_age=90)
+
+        total_redeposited = sum((p.rmd_redeposit or 0) * 12 for p in r_on.points)
+        assert total_redeposited > 500_000, "test needs material forced RMDs to be meaningful"
+        assert abs(r_on.total_at_end - r_off.total_at_end) < 0.01 * r_off.total_at_end, (
+            f"RMD on={r_on.total_at_end:,.0f} vs off={r_off.total_at_end:,.0f}")
+        # Cash never receives the redeposit: net cash flow is income + draws to cash - expenses
+        for p in r_on.points:
+            assert (p.rmd_redeposit or 0) <= p.ira_draw
+
+    @pytest.mark.asyncio
+    async def test_rmd_redeposit_is_drawable_without_taxable_pool_config(
+        self, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources, frozen_today,
+    ):
+        """A config that never declared taxable_pool still gets a reachable pool once
+        RMDs fund it (the gate is 'pool has money', not 'pool was configured')."""
+        overrides = deepcopy(self.RMD_HEAVY)
+        del overrides["taxable_pool"]
+        r = await self._engine(
+            overrides, net_worth_breakdown, mock_accounts, mock_cashflow_events,
+            mock_income_sources, target_annual_spending=24_000_000,  # $240K/yr
+        ).project_wealth_pools(end_age=90)
+        post = [p for p in r.points if p.age >= 74]
+        assert any(p.taxable > 0 for p in post), "redeposits should populate the pool"
+        assert any((p.taxable_draw or 0) > 0 for p in post), "the redeposit-funded pool must be drawable"
+        assert not [p for p in post if p.cash < 0 and p.taxable > 1]
