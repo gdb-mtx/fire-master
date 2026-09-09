@@ -26,8 +26,10 @@ def _lifetime_engine():
 
 
 def _patch_common(config, *, net_worth=1_500_000.0, spending_cents=15_300_000,
-                  income_cents=0, sources=()):
+                  income_cents=0, sources=(), events=()):
     return [
+        patch.object(FireProjectionsEngine, "_get_cashflow_events",
+                     AsyncMock(return_value=list(events))),
         patch.object(FireProjectionsEngine, "get_effective_config",
                      AsyncMock(return_value=config)),
         patch.object(FireProjectionsEngine, "_get_annual_spending",

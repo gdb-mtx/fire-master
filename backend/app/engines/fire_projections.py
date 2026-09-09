@@ -18,6 +18,7 @@ import logging
 import uuid as uuid_mod
 from copy import deepcopy
 from datetime import date, timedelta
+from typing import Callable
 from dateutil.relativedelta import relativedelta
 
 from sqlalchemy import select, func
@@ -112,6 +113,85 @@ def savings_rate_component(rate: float | None) -> float:
     if rate is None:
         return 0.0
     return max(0.0, min(100.0, rate / 30 * 100))
+
+
+_RECURRENCE_STEP_MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
+
+
+def build_cashflow_schedule(
+    events,
+    today: date,
+    total_months: int,
+    skip: "Callable[[CashflowEvent], bool] | None" = None,
+) -> tuple[dict[int, list[tuple[str, float]]], dict[int, list[str]]]:
+    """Expand CashflowEvent rows into a month-offset → [(label, signed $)] map.
+
+    THE one place cashflow events become projection flows. Every engine that
+    models the plan forward (project_wealth_pools, project_lifetime, Monte
+    Carlo) consumes this so they cannot drift apart again (fire-master#16/#17:
+    only project_wealth_pools read events; the other three simulated a
+    zero-income household for an event-based plan).
+
+    Returns (by_month, labels_by_month):
+      by_month drives the money math for every month an event fires;
+      labels_by_month tags label-worthy occurrences only (one-offs + the first
+      remaining occurrence of a recurring) so chart markers aren't stamped on
+      every month a recurring event is active.
+
+    Rules (shared with the Runway page's expansion in engines/cashflow.py):
+    - Amount = amount_cents/100 × probability, signed (+income / −expense).
+    - CALENDAR-month offsets (an Aug-12 event 16 days out is "next month",
+      never "this month").
+    - Recurring: monthly / quarterly / annual, in phase with the start date;
+      occurrences before today are dropped (only remaining ones count);
+      end_date month is INCLUSIVE (an event ending Jul 31 still fires in July).
+    - One-off dated before today already happened — dropped, not clamped to
+      month 0 (that double-counted a finished severance).
+    - `skip(event)` filters events another mechanism owns (e.g. a generic
+      property sale that replaces its legacy "… Sale Proceeds" event, or a
+      conversion event a single-pool model must not add on top of net worth).
+    """
+    by_month: dict[int, list[tuple[str, float]]] = {}
+    labels_by_month: dict[int, list[str]] = {}
+    for cf in events:
+        if skip is not None and skip(cf):
+            continue
+        sign = 1.0 if cf.event_type == "income" else -1.0
+        amount = cf.amount_cents / 100.0 * sign * (cf.probability if cf.probability is not None else 1.0)
+        raw_offset = (cf.date.year - today.year) * 12 + (cf.date.month - today.month)
+
+        if cf.is_recurring:
+            step = _RECURRENCE_STEP_MONTHS.get(cf.recurrence or "monthly", 1)
+            last_offset = total_months - 1
+            if cf.end_date:
+                cal_end = (cf.end_date.year - today.year) * 12 + (cf.end_date.month - today.month)
+                last_offset = min(last_offset, cal_end)
+            if last_offset < 0:
+                continue  # recurring window is entirely in the past
+            first = True
+            for mo in range(raw_offset, last_offset + 1, step):
+                if mo < 0:
+                    continue
+                by_month.setdefault(mo, []).append((cf.name, amount))
+                if first:
+                    labels_by_month.setdefault(mo, []).append(cf.name)
+                    first = False
+        else:
+            if raw_offset < 0 or raw_offset >= total_months:
+                continue
+            by_month.setdefault(raw_offset, []).append((cf.name, amount))
+            labels_by_month.setdefault(raw_offset, []).append(cf.name)
+    return by_month, labels_by_month
+
+
+def cashflow_by_year(by_month: dict[int, list[tuple[str, float]]], total_years: int) -> list[float]:
+    """Collapse a month-offset schedule into net signed dollars per year."""
+    out = [0.0] * total_years
+    for mo, entries in by_month.items():
+        yr = mo // 12
+        if 0 <= yr < total_years:
+            out[yr] += sum(a for _, a in entries)
+    return out
 
 
 class FireProjectionsEngine:
@@ -369,6 +449,66 @@ class FireProjectionsEngine:
         )
         return list(result.scalars().all())
 
+    async def _get_cashflow_events(self) -> list[CashflowEvent]:
+        """Planned + confirmed cashflow events — the declared plan's dated flows."""
+        result = await self.db.execute(
+            select(CashflowEvent).where(
+                CashflowEvent.status.in_(["planned", "confirmed"]),
+            )
+        )
+        return list(result.scalars().all())
+
+    def _single_pool_event_skip(self, config: FireConfig) -> Callable[[CashflowEvent], bool]:
+        """Skip predicate for engines that model ONE undifferentiated net worth
+        (project_lifetime, Monte Carlo). Their starting balance already holds
+        every asset at book value, so a CONVERSION event — a property sale's
+        proceeds, a private-investment vest — must not be added on top (that
+        would count the asset twice). project_wealth_pools partitions those
+        assets out and handles the conversion itself; single-pool models drop
+        the event and keep the book value. Only INCOME events are conversions —
+        an expense carrying the same label (a special assessment on the property
+        being sold) is real money out and stays. Matchers: projection.sell_event_label_match,
+        projection.illiquid_vest_event_match, property_sales[].suppress_cashflow_match.
+        """
+        ca = config.custom_assumptions or {}
+        proj_cfg = ca.get("projection", {}) or {}
+        tokens: list[str] = []
+        sell_match = proj_cfg.get("sell_event_label_match")
+        if sell_match:
+            tokens.append(sell_match)
+        tokens.extend(t for t in (proj_cfg.get("illiquid_vest_event_match", ["vest"]) or []) if t)
+        for sale in ca.get("property_sales", []) or []:
+            t = sale.get("suppress_cashflow_match") if isinstance(sale, dict) else None
+            if t:
+                tokens.append(t)
+        lowered = [t.lower() for t in tokens]
+        return lambda cf: cf.event_type == "income" and any(t in cf.name.lower() for t in lowered)
+
+    @staticmethod
+    def _recurring_events_active_now(
+        events: list[CashflowEvent], today: date,
+    ) -> list[tuple[CashflowEvent, float]]:
+        """Recurring events whose window covers this calendar month, with their
+        MONTHLY-EQUIVALENT signed dollars (quarterly ÷ 3, annual ÷ 12,
+        probability-weighted). Used by the "now" snapshots (bridge status,
+        readiness) — the forward engines use build_cashflow_schedule()."""
+        out: list[tuple[CashflowEvent, float]] = []
+        for cf in events:
+            if not cf.is_recurring:
+                continue
+            start_offset = (cf.date.year - today.year) * 12 + (cf.date.month - today.month)
+            if start_offset > 0:
+                continue
+            if cf.end_date:
+                end_offset = (cf.end_date.year - today.year) * 12 + (cf.end_date.month - today.month)
+                if end_offset < 0:
+                    continue
+            step = _RECURRENCE_STEP_MONTHS.get(cf.recurrence or "monthly", 1)
+            sign = 1.0 if cf.event_type == "income" else -1.0
+            prob = cf.probability if cf.probability is not None else 1.0
+            out.append((cf, cf.amount_cents / 100.0 * sign * prob / step))
+        return out
+
     def _compute_age(self, config: FireConfig, target_date: date) -> float:
         """Compute age at a given date."""
         if not config.date_of_birth:
@@ -439,6 +579,7 @@ class FireProjectionsEngine:
         annual_spending_cents = await self._get_annual_spending(config)
         annual_income_cents = await self._get_annual_income()
         income_sources = await self._get_income_sources()
+        cashflow_events = await self._get_cashflow_events()
 
         # Scenario adjustments
         return_adj = 0.0
@@ -491,8 +632,22 @@ class FireProjectionsEngine:
         else:
             end_date = today + relativedelta(years=40)
 
-        # Use income sources if available, otherwise use transaction-derived income
-        use_sources = len(income_sources) > 0
+        # Cashflow events are part of the declared plan (fire-master#17). Skip
+        # conversion events (property sale proceeds, vests): this single-pool
+        # model already carries those assets in net worth at book value.
+        total_months = (end_date.year - today.year) * 12 + (end_date.month - today.month) + 1
+        cf_by_month, _ = build_cashflow_schedule(
+            cashflow_events, today, total_months, skip=self._single_pool_event_skip(config),
+        )
+        has_income_events = any(
+            amt > 0 for entries in cf_by_month.values() for _, amt in entries
+        )
+
+        # Income comes from the DECLARED plan (income sources + cashflow events)
+        # whenever one exists. The trailing-12-month transaction income is a
+        # fallback for a blank-slate config only — held flat to retirement it
+        # overstates any plan whose income steps down first (fire-master#17).
+        use_sources = len(income_sources) > 0 or has_income_events
 
         net_worth = current_nw_cents
         monthly_spending_base = (annual_spending_cents + spending_adj_cents) / 12
@@ -557,13 +712,24 @@ class FireProjectionsEngine:
                     if current >= pension_start:
                         monthly_income += int(config.pension_monthly)
             else:
-                # Pre-retirement: full income, flat real
+                # Pre-retirement: full income, flat real. The what-if income
+                # change applies to whichever income model is in force.
                 if use_sources:
                     monthly_income = self._income_at_month(
                         income_sources, current, retirement_date, years_elapsed, inflation
-                    )
+                    ) + income_adj_cents / 12
                 else:
                     monthly_income = (annual_income_cents + income_adj_cents) / 12
+
+            # Cashflow events (dollars, signed, probability-weighted) → cents.
+            # Income events add to income, expense events to spending, so the
+            # chart's income/spending series show them.
+            for _label, amount in cf_by_month.get(month_idx, ()):
+                cents = int(round(amount * 100))
+                if cents >= 0:
+                    monthly_income += cents
+                else:
+                    monthly_spending += -cents
 
             # Net savings (pre-retirement) or withdrawal (post-retirement)
             monthly_savings = monthly_income - monthly_spending
@@ -676,11 +842,20 @@ class FireProjectionsEngine:
         savings_data = await spending_engine.get_savings_rate(months=6)
         savings_rate_score = savings_rate_component(savings_data.average_rate) * 0.2
 
-        # Income stability (15%) — check if income sources are configured
+        # Income stability (15%) — share of the DECLARED plan that is stable.
+        # Income sources by type, plus recurring income cashflow events active
+        # now (a monthly event is by construction a stable stream; fire-master#17
+        # — an event-based plan used to score 0). Nothing declared → neutral 50.
         sources = await self._get_income_sources()
+        cashflow_events = await self._get_cashflow_events()
         stable_types = {"salary", "rental", "pension", "social_security"}
         stable_income = sum(s.annual_amount for s in sources if s.income_type.value in stable_types)
-        total_income = sum(s.annual_amount for s in sources) if sources else 1
+        total_income = sum(s.annual_amount for s in sources)
+        for _cf, amt in self._recurring_events_active_now(cashflow_events, date.today()):
+            if amt > 0:
+                annual_cents = amt * 12 * 100
+                stable_income += annual_cents
+                total_income += annual_cents
         income_stability = (stable_income / total_income * 100 if total_income > 0 else 50) * 0.15
 
         # Expense stability (10%) — low variance in monthly spending
@@ -1100,61 +1275,26 @@ class FireProjectionsEngine:
         total_months = int((end_age - current_age) * 12)
         ira_b_monthly_growth = ira_growth_rate / 12
 
-        # Load cashflow events for injection into projection
-        cf_result = await self.db.execute(
-            select(CashflowEvent).where(
-                CashflowEvent.status.in_(["planned", "confirmed"]),
-            )
-        )
-        cashflow_events = cf_result.scalars().all()
-
-        # Build month-offset → events lookup
-        # cf_by_month drives income/expense math for every month an event fires.
-        # cf_labels_by_month tags label-worthy occurrences only (one-offs + start
-        # month of recurrings). Without this split, recurring events stamp a label
-        # onto every month they're active and crowd out one-off events' markers.
+        # Load cashflow events for injection into projection.
         # A generic property sale "owns" its property: suppress any legacy
         # cashflow event it replaces (e.g. a planned "… Sale Proceeds" event)
         # so proceeds aren't double-counted AND no phantom event label/marker
         # renders for money that never lands. Opt-in per sale via
         # "suppress_cashflow_match"; only active when generic sales are on.
-        def _sale_suppresses(label: str) -> bool:
+        cashflow_events = await self._get_cashflow_events()
+
+        def _sale_suppresses(cf: CashflowEvent) -> bool:
             return use_generic_sales and any(
                 (s.get("suppress_cashflow_match") or "")
-                and (s.get("suppress_cashflow_match") or "").lower() in label.lower()
+                and (s.get("suppress_cashflow_match") or "").lower() in cf.name.lower()
                 for s in property_sales
             )
 
-        cf_by_month: dict[int, list[tuple[str, float]]] = {}
-        cf_labels_by_month: dict[int, list[str]] = {}
-        for cf in cashflow_events:
-            if _sale_suppresses(cf.name):
-                continue
-            sign = 1.0 if cf.event_type == "income" else -1.0
-            amount = cf.amount_cents / 100.0 * sign * cf.probability
-            # CALENDAR-month offset (Jul 27, 2026): int(days/30.44) pulled events into
-            # the wrong month (an Aug-12 event 16 days out landed in "July"), inflating
-            # the bridge chart's first point and desyncing from Runway's calendar months.
-            raw_offset = (cf.date.year - today.year) * 12 + (cf.date.month - today.month)
-
-            if cf.is_recurring and cf.recurrence == "monthly":
-                start_offset = max(0, raw_offset)  # clamp to today: only remaining occurrences
-                end_offset = total_months
-                if cf.end_date:
-                    cal_end = (cf.end_date.year - today.year) * 12 + (cf.end_date.month - today.month)
-                    end_offset = min(end_offset, max(0, cal_end))
-                if end_offset <= 0:
-                    continue  # recurring window is entirely in the past
-                for mo in range(start_offset, end_offset):
-                    cf_by_month.setdefault(mo, []).append((cf.name, amount))
-                cf_labels_by_month.setdefault(start_offset, []).append(cf.name)
-            else:
-                # A one-off event dated before today already happened — don't pull it
-                # forward to month 0 (that would double-count e.g. a finished severance).
-                if raw_offset < 0:
-                    continue
-                cf_by_month.setdefault(raw_offset, []).append((cf.name, amount))
-                cf_labels_by_month.setdefault(raw_offset, []).append(cf.name)
+        # cf_by_month drives income/expense math for every month an event fires;
+        # cf_labels_by_month tags label-worthy occurrences only (see helper).
+        cf_by_month, cf_labels_by_month = build_cashflow_schedule(
+            cashflow_events, today, total_months, skip=_sale_suppresses,
+        )
 
         # Build income source schedule (non-salary, by month offset from today)
         def _source_income_at_month(m: int) -> float:
@@ -1623,10 +1763,23 @@ class FireProjectionsEngine:
         config = await self.get_effective_config()
         breakdown = await self._compute_net_worth_breakdown()
         sources = await self._get_income_sources()
+        cashflow_events = await self._get_cashflow_events()
         annual_spending_cents = await self._get_annual_spending(config)
         today = date.today()
 
         monthly_burn = annual_spending_cents / 12.0 / 100.0
+
+        # Recurring cashflow events active THIS month are part of the "now"
+        # snapshot (fire-master#17): income events join the streams (temp when
+        # they carry an end_date), expense events add to burn — same layering
+        # the Runway page applies on top of trailing burn. One-offs stay in
+        # upcoming_events; a flat runway division has no place for a lump.
+        active_recurring = [
+            (cf, amt) for cf, amt in self._recurring_events_active_now(cashflow_events, today)
+        ]
+        for cf, amt in active_recurring:
+            if amt < 0:
+                monthly_burn += -amt
 
         # SEPP/RRSP from config (inactive unless configured)
         sepp_cfg = (config.custom_assumptions or {}).get("sepp", {})
@@ -1663,6 +1816,17 @@ class FireProjectionsEngine:
                 temp_income += mo
             else:
                 ongoing_income += mo
+            ci += 1
+        for cf, amt in active_recurring:
+            if amt <= 0:
+                continue
+            is_temp = cf.end_date is not None
+            label = f"{cf.name} (temp)" if is_temp else cf.name
+            streams.append(IncomeStream(label=label, monthly=round(amt, 0), color=colors[ci % len(colors)]))
+            if is_temp:
+                temp_income += amt
+            else:
+                ongoing_income += amt
             ci += 1
 
         # IRA streams (if started)

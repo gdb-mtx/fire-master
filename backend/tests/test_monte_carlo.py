@@ -34,9 +34,12 @@ def frozen_today_mc():
 
 
 @contextmanager
-def _mc_env(config, *, net_worth=1_500_000.0, spending_cents=15_300_000, income_sources=()):
+def _mc_env(config, *, net_worth=1_500_000.0, spending_cents=15_300_000, income_sources=(), events=()):
     """Patch every DB touchpoint the MC engine reaches through its sub-engines."""
     with ExitStack() as stack:
+        stack.enter_context(patch.object(
+            FireProjectionsEngine, "_get_cashflow_events",
+            AsyncMock(return_value=list(events))))
         stack.enter_context(patch.object(
             FireProjectionsEngine, "get_effective_config",
             AsyncMock(return_value=config)))
@@ -233,6 +236,9 @@ class TestIncomeTiming:
                 AsyncMock(return_value=15_300_000)))
             stack.enter_context(patch.object(
                 FireProjectionsEngine, "_get_income_sources",
+                AsyncMock(return_value=[])))
+            stack.enter_context(patch.object(
+                FireProjectionsEngine, "_get_cashflow_events",
                 AsyncMock(return_value=[])))
             stack.enter_context(patch.object(
                 NetWorthEngine, "calculate_current",

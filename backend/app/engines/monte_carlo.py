@@ -25,6 +25,17 @@ dates, growth_rate, per-source retirement cutoff, and the active scenario.
 Income now comes from the shared _income_at_month() helper against the
 EFFECTIVE config, same as project_lifetime.
 
+Third history note (fire-master#16, fixed 2026-09-09): the engine never read
+CashflowEvent, so a plan expressed as dated events (the only way to model two
+earners claiming SS at different ages) simulated a zero-income household.
+Events now flow through the shared build_cashflow_schedule(), collapsed to
+net dollars per year. Conversion events (property-sale proceeds, vests) are
+skipped: this single-pool model already holds those assets at book value.
+
+Known limit: one undifferentiated portfolio — no 59½ gate, no taxable-first
+waterfall, no SEPP — so it cannot measure sequence risk inside a bridge.
+A pool-aware Monte Carlo is a separate piece of work.
+
 Overrides via fire_config.custom_assumptions["monte_carlo"]:
   return_std (0.16), inflation_std (0.015), correlation (-0.25).
 Nominal return mean and inflation mean come from the base config
@@ -43,7 +54,11 @@ from datetime import date
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.engines.fire_projections import _spending_multiplier
+from app.engines.fire_projections import (
+    _spending_multiplier,
+    build_cashflow_schedule,
+    cashflow_by_year,
+)
 from app.schemas.tax import MonteCarloResponse, PercentileCurvePoint
 
 logger = logging.getLogger(__name__)
@@ -124,6 +139,7 @@ class MonteCarloEngine:
         annual_spending_cents = await fire_engine._get_annual_spending(config)
         annual_spending = annual_spending_cents / 100  # flat REAL
         income_sources = await fire_engine._get_income_sources()
+        cashflow_events = await fire_engine._get_cashflow_events()
 
         retirement_date = fire_engine._get_retirement_date(config)
         today = date.today()
@@ -184,6 +200,14 @@ class MonteCarloEngine:
                 )
             income_by_year.append(year_cents / 100)
 
+        # Cashflow events: same schedule the projection engines use, net
+        # signed dollars per year (probability-weighted, flat real).
+        cf_by_month, _ = build_cashflow_schedule(
+            cashflow_events, today, total_years * 12,
+            skip=fire_engine._single_pool_event_skip(config),
+        )
+        events_by_year = cashflow_by_year(cf_by_month, total_years)
+
         # Starting age for spending-phase lookup
         start_age = fire_engine._compute_age(config, today) if config.date_of_birth else 30
 
@@ -214,7 +238,7 @@ class MonteCarloEngine:
                 if yr >= pension_start_year:
                     yr_income += pension_annual
 
-                net_cash = yr_income - yr_spending
+                net_cash = yr_income - yr_spending + events_by_year[yr]
                 nw_val = nw_val * (1 + r_real) + net_cash
                 yearly_nw.append(round(nw_val, 2))
 
@@ -268,6 +292,10 @@ class MonteCarloEngine:
                 "return_model": f"lognormal gross growth, median {mu_nom:.2%} nominal, sigma {sigma:.2%}",
                 "inflation_model": f"normal, mean {mu_i:.2%}, sigma {sigma_i:.2%}, corr {rho:+.2f} with returns",
                 "real_return": "(1+r_nom)/(1+inflation) - 1 per year",
+                "cashflow_events": (
+                    f"{len(cashflow_events)} planned/confirmed events applied "
+                    "(probability-weighted; conversion events skipped — assets already in net worth)"
+                ),
                 "seed": seed,
             },
         )
