@@ -189,7 +189,17 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
       .map((p) => ({
         ...p,
         month: (p.month ?? 0) + 1,
-        net: p.income + p.ira_draw + p.rrsp_draw + p.cash_interest - p.expenses,
+        // Mirrors the engine's net line: pool draws that reach cash, minus the
+        // RMD excess that was redeposited to taxable instead of spent.
+        net:
+          p.income +
+          p.ira_draw -
+          (p.rmd_redeposit ?? 0) +
+          p.rrsp_draw +
+          (p.taxable_draw ?? 0) +
+          (p.roth_draw ?? 0) +
+          p.cash_interest -
+          p.expenses,
       }));
     if (shifted.length === 0) return shifted;
     if (currentCash == null) return shifted;
@@ -606,6 +616,7 @@ export default function RetirementPage() {
         ...p,
         cash: Math.max(0, p.cash), // clamp for stacked areas
         taxable: Math.max(0, p.taxable ?? 0), // clamp for stacked areas
+        roth: Math.max(0, p.roth ?? 0),
         annual_spending: p.expenses * 12,
       })),
     [wealthProjection],
@@ -896,6 +907,10 @@ export default function RetirementPage() {
                         <stop offset="0%" stopColor="#2aa6b8" stopOpacity={0.9} />
                         <stop offset="100%" stopColor="#2aa6b8" stopOpacity={0.5} />
                       </linearGradient>
+                      <linearGradient id="gradRoth" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#5b8c3a" stopOpacity={0.9} />
+                        <stop offset="100%" stopColor="#5b8c3a" stopOpacity={0.5} />
+                      </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(42,42,62,0.5)" />
                     <XAxis
@@ -922,6 +937,7 @@ export default function RetirementPage() {
                           ira_sepp: "IRA-A (SEPP)",
                           cash: "Cash (bridge)",
                           taxable: "Taxable brokerage",
+                          roth: "Roth (tax-free)",
                           total: "Total",
                           annual_spending: "Annual Spending",
                         };
@@ -934,9 +950,10 @@ export default function RetirementPage() {
                     {/* Milestone markers */}
                     {wealthMarkers}
 
-                    {/* Stacked areas: IRA-B + Taxable (bottom, stable), IRA-A, RRSP, Cash, Illiquid, RE (top, has discontinuities) */}
+                    {/* Stacked areas: IRA-B + Taxable + Roth (bottom, stable), IRA-A, RRSP, Cash, Illiquid, RE (top, has discontinuities) */}
                     <Area type="monotone" dataKey="ira_growth" stackId="wealth" stroke="var(--blue)" strokeWidth={0} fill="url(#gradIraB)" />
                     <Area type="monotone" dataKey="taxable" stackId="wealth" stroke="#2aa6b8" strokeWidth={0} fill="url(#gradTaxable)" />
+                    <Area type="monotone" dataKey="roth" stackId="wealth" stroke="#5b8c3a" strokeWidth={0} fill="url(#gradRoth)" />
                     <Area type="monotone" dataKey="ira_sepp" stackId="wealth" stroke="var(--purple, #7a6aaa)" strokeWidth={0} fill="url(#gradIraA)" />
                     <Area type="monotone" dataKey="rrsp" stackId="wealth" stroke="var(--pink, #9e4a7a)" strokeWidth={0} fill="url(#gradRRSP)" />
                     <Area type="monotone" dataKey="illiquid" stackId="wealth" stroke="var(--orange, #b06830)" strokeWidth={0} fill="url(#gradIlliquid)" />
@@ -974,6 +991,7 @@ export default function RetirementPage() {
                       { label: "IRA-A (SEPP)", color: "var(--purple, #7a6aaa)" },
                       { label: "IRA-B (growth)", color: "var(--blue)" },
                       { label: "Taxable", color: "#2aa6b8" },
+                      { label: "Roth", color: "#5b8c3a" },
                       { label: "Total", color: "#1a1a1e", dashed: true },
                       { label: "Spending/yr", color: "var(--red)", dashed: true },
                     ].map((l) => (

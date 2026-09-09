@@ -31,6 +31,7 @@ from app.models.goal import Goal
 from app.models.income_source import IncomeSource
 from app.models.net_worth_snapshot import NetWorthSnapshot
 from app.engines.net_worth import NetWorthEngine
+from app.engines.tax_engine import _get_rmd_divisor
 from app.engines.spending import SpendingEngine
 from app.schemas.fire import (
     BridgeStatus,
@@ -951,6 +952,16 @@ class FireProjectionsEngine:
         spending_phase_floor_age = proj_cfg.get("spending_phase_floor_age", 80)  # when no-go starts
         # IRA-B draw behavior
         ira_b_draw_threshold_months = proj_cfg.get("ira_b_draw_threshold_months", 12)  # draw when cash < N months of gap
+        # Required minimum distributions (fire-master#14). From config.rmd_start_age
+        # the IRS Uniform Lifetime minimum is forced out of the tax-deferred IRAs
+        # (IRA-A + IRA-B aggregate, as the IRS aggregates traditional IRAs) whenever
+        # the month's voluntary draws fall short. Same mechanics as the tax
+        # engine's withdrawal planner. Opt out with projection.enforce_rmd = false.
+        # Limitation: the divisor keys off config.date_of_birth — a two-owner
+        # household has one date to give; keying it to the younger owner starts
+        # RMDs later and divides by a larger factor, understating them.
+        enforce_rmd = bool(proj_cfg.get("enforce_rmd", True))
+        rmd_start_age = int(config.rmd_start_age or 73)
 
         # LEGACY ("mortgage_recast") — superseded by property_sales; retained for author
         # back-compat; do not use in new configs. Partial paydown → lower P&I.
@@ -993,7 +1004,28 @@ class FireProjectionsEngine:
         taxable = float(taxable_cfg.get("starting_balance", 0) or 0)
         taxable_rate_m = (taxable_cfg.get("return_rate", 0.065) or 0.0) / 12  # real annual → monthly
         property_sales = (config.custom_assumptions or {}).get("property_sales", []) or []
+        # use_generic_sales gates ONLY the property-sale mechanics (legacy-vs-generic
+        # sale paths, burn deltas, event suppression, markers). It does NOT gate the
+        # drawdown waterfall: a pool is drawable whenever it holds money, however it
+        # was funded (fire-master#12 — it used to, leaving a configured brokerage
+        # unspendable without a property sale).
         use_generic_sales = bool(property_sales)
+
+        # --- Roth / tax-free pool (additive, opt-in; fire-master#13) ---
+        # Same opt-in shape as taxable_pool: custom_assumptions["roth_pool"] =
+        # {starting_balance, return_rate}. This is the only door tax-free money
+        # enters the projection through — tax_free_reserve account balances feed net
+        # worth, not this engine (same as retirement-role accounts vs the SEPP block).
+        # Grows at its own REAL rate (default = the IRA growth rate: same index,
+        # never taxed on the way out). Drawn LAST in the waterfall — a tax-free
+        # dollar is worth more than any other dollar, so it is the last one spent.
+        # No age gate: contribution basis is withdrawable at any age, earnings are
+        # not, and the engine cannot tell them apart — the user decides what balance
+        # to expose here. No RMDs (owner Roth IRAs have none).
+        roth_cfg = (config.custom_assumptions or {}).get("roth_pool", {}) or {}
+        roth = float(roth_cfg.get("starting_balance", 0) or 0)
+        _roth_rate = roth_cfg.get("return_rate")
+        roth_rate_m = (ira_growth_rate if _roth_rate is None else float(_roth_rate)) / 12  # real annual → monthly
         sales_by_month: dict[int, list[dict]] = {}
         generic_sold: dict[str, bool] = {}
         for _s in property_sales:
@@ -1380,45 +1412,91 @@ class FireProjectionsEngine:
             if taxable > 0:
                 taxable *= (1 + taxable_rate_m)
 
+            # --- Roth: grows tax-free at its own real rate ---
+            if roth > 0:
+                roth *= (1 + roth_rate_m)
+
             # --- Drawdown waterfall ---
+            # Order: taxable brokerage → IRA-B (after 59½) → forced RMDs → Roth.
+            # Each step sees only the gap the previous ones left, and a pool is
+            # drawable whenever it holds money — configured starting balance, sale
+            # proceeds, or RMD redeposits alike (no flag gates this block; see
+            # use_generic_sales above, fire-master#12).
+            #
+            # Taxable brokerage is penalty-free at any age → draw it FIRST when cash
+            # is thin (this gap credits RRSP income). IRA-B is drawn only after 59½,
+            # on the residual gap, using the SAME formula as the pre-taxable engine
+            # (it does NOT credit rrsp_draw) so legacy baselines are unaffected.
+            # This is what lets the projection answer "is 72(t)/SEPP still needed?":
+            # with sepp_monthly=0, if taxable covers every pre-59½ gap (cash never
+            # hits zero), it isn't.
             taxable_draw = 0.0
-            if use_generic_sales:
-                # Taxable brokerage is penalty-free at any age → draw it FIRST when cash
-                # is thin (this gap credits RRSP income). IRA-B is drawn only after 59½,
-                # on the residual gap, using the SAME formula as the legacy path (it does
-                # NOT credit rrsp_draw) so non-generic baselines are unaffected. This is
-                # what lets the projection answer "is 72(t)/SEPP still needed?": with
-                # sepp_monthly=0, if taxable covers every pre-59½ gap (cash never hits
-                # zero), it isn't.
-                gap_t = expenses - income - ira_draw - rrsp_draw
-                if gap_t > 0 and cash < gap_t * ira_b_draw_threshold_months and taxable > 0:
-                    taxable_draw = min(gap_t, taxable)
-                    taxable -= taxable_draw
-                if m >= months_to_59_5 and ira_b > 0:
-                    gap_b = expenses - income - ira_draw - taxable_draw
-                    if gap_b > 0 and cash < gap_b * ira_b_draw_threshold_months:
-                        b_draw = min(gap_b, ira_b)
-                        ira_b -= b_draw
-                        ira_draw += b_draw
-            else:
-                if m >= months_to_59_5 and ira_b > 0:
-                    gap = expenses - income - ira_draw
-                    if gap > 0 and cash < gap * ira_b_draw_threshold_months:
-                        # Draw enough to cover this month's gap
-                        b_draw = min(gap, ira_b)
-                        ira_b -= b_draw
-                        ira_draw += b_draw
+            gap_t = expenses - income - ira_draw - rrsp_draw
+            if gap_t > 0 and cash < gap_t * ira_b_draw_threshold_months and taxable > 0:
+                taxable_draw = min(gap_t, taxable)
+                taxable -= taxable_draw
+            if m >= months_to_59_5 and ira_b > 0:
+                gap_b = expenses - income - ira_draw - taxable_draw
+                if gap_b > 0 and cash < gap_b * ira_b_draw_threshold_months:
+                    b_draw = min(gap_b, ira_b)
+                    ira_b -= b_draw
+                    ira_draw += b_draw
+
+            # --- Required minimum distributions (fire-master#14) ---
+            # From rmd_start_age the IRS forces (aggregate traditional IRA balance /
+            # Uniform Lifetime divisor) out per year, whether or not it is needed.
+            # Monthly approximation: balance / divisor / 12, mirroring the tax
+            # engine's planner. When the month's voluntary draws (SEPP + IRA-B gap
+            # draw) already meet it nothing changes; otherwise the shortfall is
+            # forced out of IRA-B first, then IRA-A. Forced money is cash in hand:
+            # it covers whatever gap is still open this month, and the surplus is
+            # NOT spending — it is redeposited (gross) into the taxable brokerage,
+            # where next month's waterfall can draw it. The redeposit rides inside
+            # ira_draw for reporting (it IS a taxable distribution) but is carried
+            # separately as rmd_redeposit so the cash line never counts it.
+            rmd_redeposit = 0.0
+            if enforce_rmd and age >= rmd_start_age:
+                deferred = max(0.0, ira_a) + max(0.0, ira_b)
+                if deferred > 0:
+                    rmd_monthly = deferred / _get_rmd_divisor(int(age)) / 12
+                    if rmd_monthly > ira_draw:
+                        excess = min(rmd_monthly - ira_draw, deferred)
+                        from_b = min(excess, max(0.0, ira_b))
+                        ira_b -= from_b
+                        ira_a -= excess - from_b
+                        if ira_a <= 0 and sepp_monthly and sepp_depletes_age is None and m >= sepp_start_month:
+                            sepp_depletes_age = age  # RMDs finished off IRA-A
+                        gap_open = max(0.0, expenses - income - ira_draw - rrsp_draw - taxable_draw)
+                        ira_draw += excess
+                        rmd_redeposit = max(0.0, excess - gap_open)
+                        taxable += rmd_redeposit
+
+            # --- Roth: last resort on whatever gap survives (fire-master#13) ---
+            roth_draw = 0.0
+            if roth > 0:
+                gap_r = expenses - income - (ira_draw - rmd_redeposit) - rrsp_draw - taxable_draw
+                if gap_r > 0 and cash < gap_r * ira_b_draw_threshold_months:
+                    roth_draw = min(gap_r, roth)
+                    roth -= roth_draw
 
             # Cash repair: negative cash is genuine bridge stress only while
             # no drawable pool exists — nobody runs checking negative for
-            # years beside a funded brokerage. Once the taxable pool has
-            # money, sell enough extra to bring cash back to zero. Pre-rescue
-            # dips (no pool yet) still show, and cash == 0 still trips
-            # cash_zero_month, so the stress signal survives.
-            if use_generic_sales and cash < 0 and taxable > 0:
-                repair = min(-cash, taxable)
+            # years beside a funded brokerage. Once a penalty-free pool has
+            # money (taxable first, then Roth), sell enough extra to bring cash
+            # back to zero. Pre-rescue dips (no pool yet) still show, and
+            # cash == 0 still trips cash_zero_month, so the stress signal survives.
+            # (The repair reaches cash through the net line below, via *_draw.)
+            deficit = -cash if cash < 0 else 0.0
+            if deficit > 0 and taxable > 0:
+                repair = min(deficit, taxable)
                 taxable -= repair
                 taxable_draw += repair
+                deficit -= repair
+            if deficit > 0 and roth > 0:
+                repair = min(deficit, roth)
+                roth -= repair
+                roth_draw += repair
+                deficit -= repair
 
             # --- Net cash flow ---
             # Cash earns tiered returns:
@@ -1433,7 +1511,9 @@ class FireProjectionsEngine:
                 cash_interest = reserve_interest + surplus_interest
             else:
                 cash_interest = max(0, cash) * (savings_rate / 12)
-            net = income + ira_draw + rrsp_draw + taxable_draw + cash_interest - expenses
+            # ira_draw includes any RMD redeposit, which went to taxable, not cash.
+            net = (income + ira_draw - rmd_redeposit + rrsp_draw + taxable_draw
+                   + roth_draw + cash_interest - expenses)
             cash += net
 
             if cash <= 0 and cash_zero_month is None:
@@ -1456,6 +1536,7 @@ class FireProjectionsEngine:
                 ill_val = round(max(0, illiquid), 0)
                 rrsp_val = round(max(0, rrsp_remaining), 0)
                 tax_val = round(max(0, taxable), 0)
+                roth_val = round(max(0, roth), 0)
                 points.append(WealthPoolPoint(
                     date=dt.isoformat(),
                     age=round(age, 1),
@@ -1467,17 +1548,20 @@ class FireProjectionsEngine:
                     illiquid=ill_val,
                     taxable=tax_val,
                     taxable_draw=round(taxable_draw, 0),
-                    total=round(cash + max(0, ira_a) + max(0, ira_b) + rrsp_val + re_val + ill_val + tax_val, 0),
+                    roth=roth_val,
+                    roth_draw=round(roth_draw, 0),
+                    total=round(cash + max(0, ira_a) + max(0, ira_b) + rrsp_val + re_val + ill_val + tax_val + roth_val, 0),
                     income=round(income, 0),
                     expenses=round(expenses, 0),
                     ira_draw=round(ira_draw, 0),
+                    rmd_redeposit=round(rmd_redeposit, 0),
                     rrsp_draw=round(rrsp_draw, 0),
                     cash_interest=round(cash_interest, 0),
                     month=m,
                     event=event_label,
                 ))
 
-            if cash <= 0 and ira_b <= 0 and ira_a <= 0 and taxable <= 0:
+            if cash <= 0 and ira_b <= 0 and ira_a <= 0 and taxable <= 0 and roth <= 0:
                 break
 
         # Key events for chart markers
@@ -1510,12 +1594,17 @@ class FireProjectionsEngine:
             {"month": months_to_59_5, "age": 59.5, "label": "59\u00BD", "color": "#4d8eff"},
             {"month": months_to_ss, "age": float(ss_claim_age), "label": f"SS at {ss_claim_age}", "color": "#00d4aa"},
         ])
+        if enforce_rmd and (ira_a_start or ira_b_start) and current_age < rmd_start_age < end_age:
+            months_to_rmd = max(0, int((dob + relativedelta(years=rmd_start_age) - today).days / 30.44))
+            chart_events.append(
+                {"month": months_to_rmd, "age": float(rmd_start_age), "label": f"RMDs at {rmd_start_age}", "color": "#4d8eff"},
+            )
 
         return WealthPoolProjection(
             points=points,
             events=chart_events,
             cash_zero_month=cash_zero_month,
-            total_at_end=round(cash + max(0, ira_a) + max(0, ira_b) + max(0, rrsp_remaining) + max(0, re_equity) + max(0, illiquid) + max(0, taxable), 0),
+            total_at_end=round(cash + max(0, ira_a) + max(0, ira_b) + max(0, rrsp_remaining) + max(0, re_equity) + max(0, illiquid) + max(0, taxable) + max(0, roth), 0),
             sepp_monthly=sepp_monthly,
             sepp_depletes_age=round(sepp_depletes_age, 1) if sepp_depletes_age else None,
             demo_persona=bool((config.custom_assumptions or {}).get("demo_persona")),

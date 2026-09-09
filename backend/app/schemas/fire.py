@@ -241,10 +241,13 @@ class WealthPoolPoint(BaseModel):
     illiquid: float  # private investments (vesting over time)
     taxable: float = 0  # taxable brokerage pool (e.g. property-sale proceeds compounding at market rate)
     taxable_draw: float = 0  # monthly withdrawal from taxable brokerage to cover cash gap
+    roth: float = 0  # Roth / tax-free pool (custom_assumptions.roth_pool), drawn last
+    roth_draw: float = 0  # monthly withdrawal from the Roth pool to cover cash gap
     total: float  # all pools combined
     income: float  # monthly income (non-IRA)
     expenses: float  # monthly expenses
-    ira_draw: float  # monthly IRA withdrawal
+    ira_draw: float  # monthly IRA withdrawal (SEPP + IRA-B gap draw + any forced RMD)
+    rmd_redeposit: float = 0  # part of ira_draw forced by an RMD and redeposited to taxable (not cash)
     rrsp_draw: float = 0  # monthly RRIF withdrawal
     cash_interest: float = 0  # monthly interest earned
     month: int | None = None  # month offset from start
