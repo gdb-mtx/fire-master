@@ -7,6 +7,8 @@ calculations against published or estimated tax tables.
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from app.engines.tax_engine import TaxEngine
 
 
@@ -120,6 +122,19 @@ class TestCaliforniaTax:
         assert tax_engine._federal_salt_cap(2025, 1_200_000, "married_filing_jointly") == 10_000
         assert tax_engine._federal_salt_cap(2026, 400_000, "married_filing_jointly") == 40_400
         assert tax_engine._federal_salt_cap(2030, 200_000, "married_filing_jointly") == 10_000
+
+    def test_property_tax_growth_is_converted_to_real_dollars(self, tax_engine: TaxEngine):
+        itemized = {
+            "annual_property_tax": 26_568.72,
+            "property_tax_growth_rate": 0.02,
+            "property_tax_base_year": 2026,
+        }
+        assert tax_engine._projected_property_tax(
+            itemized, year=2026, inflation_rate=0.03,
+        ) == 26_568.72
+        assert tax_engine._projected_property_tax(
+            itemized, year=2027, inflation_rate=0.03,
+        ) == pytest.approx(26_568.72 * 1.02 / 1.03)
 
     def test_california_itemized_limit_varies_with_income(self, tax_engine: TaxEngine):
         config = {

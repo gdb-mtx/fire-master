@@ -473,13 +473,18 @@ class TaxEngine:
         state_agi: float,
         tax_config: dict,
         mortgage_interest: float,
+        *,
+        year: int | None = None,
+        inflation_rate: float = 0.0,
     ) -> tuple[float | None, float, float]:
         """Return usable CA itemized deduction, pre-limit total, and limitation."""
         itemized = self._itemized_config(tax_config)
         if not itemized.get("enabled", False) or not self._is_california(tax_config):
             return None, 0.0, 0.0
 
-        property_tax = float(itemized.get("annual_property_tax") or 0.0)
+        property_tax = self._projected_property_tax(
+            itemized, year=year, inflation_rate=inflation_rate,
+        )
         charitable = float(itemized.get("annual_charitable_gifts") or 0.0)
         other_limited = float(itemized.get("annual_other_california") or 0.0)
         unlimited = float(itemized.get("annual_california_unlimited") or 0.0)
@@ -506,13 +511,17 @@ class TaxEngine:
         state_tax_paid: float,
         tax_config: dict,
         mortgage_interest: float,
+        *,
+        inflation_rate: float = 0.0,
     ) -> tuple[float | None, float]:
         """Return federal itemized deductions and the allowed SALT component."""
         itemized = self._itemized_config(tax_config)
         if not itemized.get("enabled", False):
             return None, 0.0
 
-        property_tax = float(itemized.get("annual_property_tax") or 0.0)
+        property_tax = self._projected_property_tax(
+            itemized, year=year, inflation_rate=inflation_rate,
+        )
         charitable = float(itemized.get("annual_charitable_gifts") or 0.0)
         other = float(itemized.get("annual_other_federal") or 0.0)
         salt_paid = property_tax + max(0.0, state_tax_paid)
@@ -523,6 +532,23 @@ class TaxEngine:
             ),
         )
         return mortgage_interest + salt_allowed + charitable + other, salt_allowed
+
+    @staticmethod
+    def _projected_property_tax(
+        itemized_config: dict,
+        *,
+        year: int | None,
+        inflation_rate: float,
+    ) -> float:
+        """Project a nominal property-tax increase in the model's real dollars."""
+        base_amount = float(itemized_config.get("annual_property_tax") or 0.0)
+        if year is None:
+            return base_amount
+        base_year = int(itemized_config.get("property_tax_base_year") or date.today().year)
+        years_elapsed = max(0, year - base_year)
+        nominal_growth = float(itemized_config.get("property_tax_growth_rate") or 0.0)
+        real_growth = (1 + nominal_growth) / (1 + inflation_rate) - 1
+        return base_amount * ((1 + real_growth) ** years_elapsed)
 
     async def _primary_mortgage_balance(self) -> float:
         if self.db is None:
@@ -1302,7 +1328,11 @@ class TaxEngine:
                     mortgage_interest_by_year.get(current_year, (0.0, 0.0))
                 )
                 state_itemized, _, _ = self._state_itemized_deduction(
-                    state_agi, tax_config, state_mortgage_interest,
+                    state_agi,
+                    tax_config,
+                    state_mortgage_interest,
+                    year=current_year,
+                    inflation_rate=inflation,
                 )
                 state_deduction = None
                 state_deduction_method = None
@@ -1334,6 +1364,7 @@ class TaxEngine:
                     state,
                     tax_config,
                     federal_mortgage_interest,
+                    inflation_rate=inflation,
                 )
                 federal_deduction = std_deduction
                 if federal_itemized is not None:
@@ -1371,7 +1402,11 @@ class TaxEngine:
                     mortgage_interest_by_year.get(current_year, (0.0, 0.0))
                 )
                 baseline_state_itemized, _, _ = self._state_itemized_deduction(
-                    baseline_state_agi, tax_config, state_mortgage_interest,
+                    baseline_state_agi,
+                    tax_config,
+                    state_mortgage_interest,
+                    year=current_year,
+                    inflation_rate=inflation,
                 )
                 baseline_state_deduction = None
                 baseline_state_method = None
@@ -1402,6 +1437,7 @@ class TaxEngine:
                     baseline_state,
                     tax_config,
                     federal_mortgage_interest,
+                    inflation_rate=inflation,
                 )
                 baseline_federal_deduction = std_deduction
                 if baseline_federal_itemized is not None:
@@ -1605,6 +1641,7 @@ class TaxEngine:
         deferred_balance = accounts.tax_deferred_balance
         current = window_start
         dynamic_itemized = self._itemized_config(tax_config).get("enabled", False)
+        inflation = config.expected_inflation_rate / 100
         window_years = max(1, window_end.year - window_start.year + 1)
         mortgage_interest_by_year = await self._mortgage_interest_by_year(
             config, tax_config, window_start.year, window_years,
@@ -1636,7 +1673,11 @@ class TaxEngine:
                     mortgage_interest_by_year.get(current.year, (0.0, 0.0))
                 )
                 state_itemized, _, _ = self._state_itemized_deduction(
-                    income, tax_config, state_mortgage_interest,
+                    income,
+                    tax_config,
+                    state_mortgage_interest,
+                    year=current.year,
+                    inflation_rate=inflation,
                 )
                 state_deduction = None
                 state_method = None
@@ -1665,6 +1706,7 @@ class TaxEngine:
                     state_tax,
                     tax_config,
                     federal_mortgage_interest,
+                    inflation_rate=inflation,
                 )
                 federal_deduction = std_deduction
                 if federal_itemized is not None:
@@ -1817,7 +1859,11 @@ class TaxEngine:
         )
         state_itemized, state_itemized_before_limit, state_itemized_limitation = (
             self._state_itemized_deduction(
-                state_agi, tax_config, state_mortgage_interest,
+                state_agi,
+                tax_config,
+                state_mortgage_interest,
+                year=current_year,
+                inflation_rate=config.expected_inflation_rate / 100,
             )
         )
         state_deduction = None
@@ -1849,6 +1895,7 @@ class TaxEngine:
             state_tax,
             tax_config,
             federal_mortgage_interest,
+            inflation_rate=config.expected_inflation_rate / 100,
         )
         federal_deduction = std_deduction
         federal_deduction_method = self._get_federal_deduction_method(tax_config)
@@ -1975,6 +2022,8 @@ class TaxEngine:
             scenario_state_agi,
             tax_config,
             base["state_mortgage_interest"],
+            year=date.today().year,
+            inflation_rate=config.expected_inflation_rate / 100,
         )
         scenario_state_deduction = None
         scenario_state_method = None
@@ -2006,6 +2055,7 @@ class TaxEngine:
             scenario_state,
             tax_config,
             base["federal_mortgage_interest"],
+            inflation_rate=config.expected_inflation_rate / 100,
         )
         scenario_federal_deduction = std_deduction
         if scenario_federal_itemized is not None:

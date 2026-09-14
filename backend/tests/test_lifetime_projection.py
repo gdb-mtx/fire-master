@@ -11,6 +11,7 @@ Two regressions pinned here:
   real compounding. The flat-flow tests fail loudly against nominal code.
 """
 
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -44,6 +45,31 @@ def test_mortgage_payment_expires_in_payoff_year(base_fire_config):
     assert _annual_spending_with_mortgage(
         220_000, 1.0, base_fire_config, 2052,
     ) == pytest.approx(151_723.12)
+
+
+def test_property_tax_grows_two_percent_nominal_in_real_projection(base_fire_config):
+    current_year = date.today().year
+    base_fire_config.expected_inflation_rate = 3.0
+    base_fire_config.custom_assumptions = {
+        "tax": {
+            "itemized_deductions": {
+                "enabled": True,
+                "annual_property_tax": 20_000,
+                "property_tax_growth_rate": 0.02,
+                "property_tax_base_year": current_year,
+            },
+        },
+    }
+
+    next_year_tax = 20_000 * 1.02 / 1.03
+    assert _annual_spending_with_mortgage(
+        100_000, 1.0, base_fire_config, current_year + 1,
+    ) == pytest.approx(80_000 + next_year_tax)
+    # Property tax is contractual rather than discretionary, so retirement
+    # spending-phase reductions apply only to the other $80K.
+    assert _annual_spending_with_mortgage(
+        100_000, 0.75, base_fire_config, current_year + 1,
+    ) == pytest.approx(60_000 + next_year_tax)
 
 
 def _patch_common(config, *, net_worth=1_500_000.0, spending_cents=15_300_000,

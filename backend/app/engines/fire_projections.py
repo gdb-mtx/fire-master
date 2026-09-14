@@ -91,6 +91,21 @@ def _primary_mortgage_terms(config: FireConfig) -> tuple[float, float, date | No
     return monthly_payment, annual_rate, payoff_date
 
 
+def _property_tax_for_year(config: FireConfig, year: int) -> tuple[float, float]:
+    """Return base and projected property tax in real dollars."""
+    tax = (config.custom_assumptions or {}).get("tax", {}) or {}
+    itemized = tax.get("itemized_deductions", {}) or {}
+    if not itemized.get("enabled", False):
+        return 0.0, 0.0
+    base_amount = float(itemized.get("annual_property_tax") or 0.0)
+    base_year = int(itemized.get("property_tax_base_year") or date.today().year)
+    nominal_growth = float(itemized.get("property_tax_growth_rate") or 0.0)
+    inflation = (config.expected_inflation_rate or 0.0) / 100
+    real_growth = (1 + nominal_growth) / (1 + inflation) - 1
+    projected = base_amount * ((1 + real_growth) ** max(0, year - base_year))
+    return base_amount, projected
+
+
 def _annual_spending_with_mortgage(
     base_annual: float,
     spending_multiplier: float,
@@ -104,14 +119,20 @@ def _annual_spending_with_mortgage(
     stays fixed in real dollars until its final scheduled payment.
     """
     monthly_payment, _rate, payoff_date = _primary_mortgage_terms(config)
-    if monthly_payment <= 0 or payoff_date is None:
-        return base_annual * spending_multiplier
-    active_months = sum(
-        1 for month in range(1, 13)
-        if dt_lib.date(year, month, 1) <= payoff_date
+    property_tax_base, property_tax_projected = _property_tax_for_year(config, year)
+    mortgage_base = monthly_payment * 12 if monthly_payment > 0 and payoff_date else 0.0
+    active_months = 0
+    if mortgage_base:
+        active_months = sum(
+            1 for month in range(1, 13)
+            if dt_lib.date(year, month, 1) <= payoff_date
+        )
+    other_annual = max(0.0, base_annual - mortgage_base - property_tax_base)
+    return (
+        other_annual * spending_multiplier
+        + monthly_payment * active_months
+        + property_tax_projected
     )
-    other_annual = max(0.0, base_annual - monthly_payment * 12)
-    return other_annual * spending_multiplier + monthly_payment * active_months
 
 
 def _monthly_spending_with_mortgage(
@@ -122,11 +143,23 @@ def _monthly_spending_with_mortgage(
 ) -> float:
     """Monthly counterpart to ``_annual_spending_with_mortgage``."""
     monthly_payment, _rate, payoff_date = _primary_mortgage_terms(config)
-    if monthly_payment <= 0 or payoff_date is None:
-        return base_monthly * spending_multiplier
-    other_monthly = max(0.0, base_monthly - monthly_payment)
-    active_payment = monthly_payment if target_date.replace(day=1) <= payoff_date else 0.0
-    return other_monthly * spending_multiplier + active_payment
+    property_tax_base, property_tax_projected = _property_tax_for_year(
+        config, target_date.year,
+    )
+    mortgage_base = monthly_payment if monthly_payment > 0 and payoff_date else 0.0
+    other_monthly = max(
+        0.0, base_monthly - mortgage_base - property_tax_base / 12,
+    )
+    active_payment = (
+        monthly_payment
+        if mortgage_base and target_date.replace(day=1) <= payoff_date
+        else 0.0
+    )
+    return (
+        other_monthly * spending_multiplier
+        + active_payment
+        + property_tax_projected / 12
+    )
 
 
 # Retirement spending phases (go-go / slow-go / no-go)

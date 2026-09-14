@@ -53,6 +53,7 @@ export default function FireConfigPage() {
     state_itemized_deduction: "",
     dynamic_itemized_enabled: false,
     annual_property_tax: "",
+    property_tax_growth_rate: "2",
     annual_charitable_gifts: "",
     annual_other_federal: "",
     annual_other_california: "",
@@ -132,6 +133,7 @@ export default function FireConfigPage() {
         state_itemized_deduction: (tax?.state_itemized_deduction as number)?.toString() || "",
         dynamic_itemized_enabled: (itemized?.enabled as boolean) || false,
         annual_property_tax: (itemized?.annual_property_tax as number)?.toString() || "",
+        property_tax_growth_rate: itemized?.property_tax_growth_rate != null ? ((itemized.property_tax_growth_rate as number) * 100).toString() : "2",
         annual_charitable_gifts: (itemized?.annual_charitable_gifts as number)?.toString() || "",
         annual_other_federal: (itemized?.annual_other_federal as number)?.toString() || "",
         annual_other_california: (itemized?.annual_other_california as number)?.toString() || "",
@@ -209,6 +211,8 @@ export default function FireConfigPage() {
         itemized_deductions: {
           enabled: form.dynamic_itemized_enabled,
           annual_property_tax: pf(form.annual_property_tax, 0),
+          property_tax_growth_rate: pf(form.property_tax_growth_rate, 2) / 100,
+          property_tax_base_year: new Date().getFullYear(),
           annual_charitable_gifts: pf(form.annual_charitable_gifts, 0),
           annual_other_federal: pf(form.annual_other_federal, 0),
           annual_other_california: pf(form.annual_other_california, 0),
@@ -570,6 +574,11 @@ export default function FireConfigPage() {
                 <div>
                   <label className={labelCls}>Annual Property Tax ($)</label>
                   <input type="number" min={0} value={form.annual_property_tax} onChange={(e) => setForm(f => ({ ...f, annual_property_tax: e.target.value }))} placeholder="Property tax only" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Property Tax Growth (% nominal)</label>
+                  <input type="number" min={0} step="0.1" value={form.property_tax_growth_rate} onChange={(e) => setForm(f => ({ ...f, property_tax_growth_rate: e.target.value }))} className={inputCls} />
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-1">2% follows the normal Proposition 13 assessment cap.</p>
                 </div>
                 <div>
                   <label className={labelCls}>Annual Charitable Gifts ($)</label>
