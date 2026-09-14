@@ -698,6 +698,12 @@ class TaxEngine:
 
             # Spending: flat in real terms (constant purchasing power)
             spending_need = annual_need
+            if (
+                is_retired
+                and config.healthcare_monthly_cost
+                and age < (config.medicare_start_age or 65)
+            ):
+                spending_need += config.healthcare_monthly_cost * 12 / 100
 
             # Income from sources (SS, pension, rental, etc.). Each type
             # bucket tracks ALL income (it offsets spending need either way)

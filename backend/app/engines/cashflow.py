@@ -11,7 +11,7 @@ from app.models.account import Account
 from app.models.cashflow_event import CashflowEvent
 from app.models.category_mapping import CategoryMapping
 from app.models.fire_config import FireConfig
-from app.models.income_source import IncomeSource
+from app.models.income_source import IncomeSource, projection_annual_amount_cents
 from app.models.transaction import Transaction
 from app.schemas.cashflow import MonthlyProjectionPoint, RunwayResponse
 
@@ -118,7 +118,7 @@ class CashflowEngine:
             if src.income_type.value in ("salary", "bonus", "side_hustle"):
                 if retirement_date and current_date >= retirement_date and not src.end_date:
                     continue
-            monthly = src.annual_amount / 12
+            monthly = projection_annual_amount_cents(src) / 12
             # growth_rate is a NOMINAL raise — deflate to real before compounding
             if src.growth_rate and years_from_start > 0:
                 real_growth = (1 + src.growth_rate / 100) / (1 + inflation_pct / 100) - 1

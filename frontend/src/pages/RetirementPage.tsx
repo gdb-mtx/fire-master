@@ -7,6 +7,7 @@ import {
   useFireNumber,
   useFireReadiness,
   useFireTimeline,
+  useIncomeSources,
   useMilestones,
   useScenarios,
   useSpendingSensitivity,
@@ -590,6 +591,13 @@ export default function RetirementPage() {
   const { data: milestones } = useMilestones();
   const { data: bridge } = useBridgeStatus();
   const { data: sensitivity } = useSpendingSensitivity();
+  const { data: incomeSources } = useIncomeSources();
+  const grossEmploymentIncome = (incomeSources ?? [])
+    .filter((source) => ["salary", "bonus", "side_hustle"].includes(source.income_type))
+    .reduce((total, source) => total + source.annual_amount, 0);
+  const projectedEmploymentIncome = (incomeSources ?? [])
+    .filter((source) => ["salary", "bonus", "side_hustle"].includes(source.income_type))
+    .reduce((total, source) => total + source.projection_annual_amount, 0);
 
   // Spending sensitivity state — ephemeral, not persisted
   const [baseOverride, setBaseOverride] = useState<number | null>(null);
@@ -748,13 +756,13 @@ export default function RetirementPage() {
             label="Cash Runway"
             value={bridge?.cash_runway_months != null ? `${bridge.cash_runway_months}mo` : "—"}
             color={(bridge?.cash_runway_months ?? 0) > 12 ? "var(--green)" : (bridge?.cash_runway_months ?? 0) > 6 ? "var(--yellow)" : "var(--red)"}
-            sub={bridge ? `${fmtCompact(bridge.monthly_deficit)}/mo deficit` : undefined}
+            sub={bridge ? `if work stopped · ${fmtCompact(bridge.monthly_deficit)}/mo` : undefined}
           />
           <StatCard
-            label="FIRE Number"
+            label="Portfolio Target"
             value={fmtCompact(fireNum.fire_number)}
             color="var(--text-primary)"
-            sub={`${fireNum.safe_withdrawal_rate}% SWR`}
+            sub={`${fireNum.safe_withdrawal_rate}% withdrawal rate · ${fmtCompact(fireNum.annual_spending)}/yr`}
           />
           <StatCard
             label="Accessible Net Worth"
@@ -788,6 +796,30 @@ export default function RetirementPage() {
           />
         </div>
 
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4 text-xs text-[var(--text-secondary)] space-y-1">
+          <p>
+            <span className="text-[var(--text-primary)] font-medium">How the target works:</span>{" "}
+            {fmt(fireNum.annual_spending)} annual outflow ÷ {fireNum.safe_withdrawal_rate}%.
+            This does not credit future Social Security or assume you spend the portfolio to zero.
+          </p>
+          <p>
+            Pre-retirement compensation: {fmt(grossEmploymentIncome)} gross; the projection uses{" "}
+            {fmt(projectedEmploymentIncome)}/year of observed after-withholding cash flow, including
+            retirement contributions. RSU compensation is included once, and employment income stops
+            at retirement.
+          </p>
+          {fireNum.lifetime_spend_down_number != null && (
+            <p>
+              The lower spend-down estimate is {fmt(fireNum.lifetime_spend_down_number)}; it assumes
+              Social Security, declining spending after 70, and principal depletion by life expectancy.
+            </p>
+          )}
+          <p className="text-[var(--yellow)]">
+            Income taxes are not added automatically. Your annual spending target must include the
+            taxes you expect to pay; the Tax page estimates withdrawal taxes separately.
+          </p>
+        </div>
+
         {/* FIRE Progress Bar — Accessible */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
@@ -818,7 +850,8 @@ export default function RetirementPage() {
                 { label: "Liquid", value: breakdown.liquid, color: "var(--green)" },
                 { label: "Retirement", value: breakdown.retirement, color: "var(--blue)" },
                 { label: "Real Estate", value: breakdown.real_estate_equity, color: "var(--yellow)" },
-                { label: "Private Venture", value: breakdown.illiquid_private, color: "var(--orange, #b06830)" },
+                { label: "Education / 529", value: breakdown.education ?? 0, color: "var(--orange, #b06830)" },
+                { label: "Private / Illiquid", value: breakdown.illiquid_private, color: "#a855f7" },
                 { label: "Other", value: breakdown.other, color: "#6b7280" },
               ]
                 .filter((b) => Math.abs(b.value) >= 100)

@@ -317,8 +317,11 @@ export default function FireConfigPage() {
             </div>
           </div>
           <div className="mt-4">
-            <label className={labelCls}>Target Annual Spending ($ — leave blank to use actual trailing 12mo)</label>
+            <label className={labelCls}>Target Annual Retirement Outflow ($)</label>
             <input type="number" value={form.target_annual_spending} onChange={(e) => setForm(f => ({ ...f, target_annual_spending: e.target.value }))} placeholder="Auto-computed from spending data" className={inputCls} />
+            <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+              Include expected income taxes. Extra pre-Medicare healthcare below is added separately.
+            </p>
           </div>
         </div>
 
@@ -533,7 +536,14 @@ export default function FireConfigPage() {
                     {src.end_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">ends {src.end_date}</span>}
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="text-sm font-mono text-[var(--green)]">{formatCurrency(src.annual_amount)}/yr</span>
+                    <div className="text-right">
+                      <div className="text-sm font-mono text-[var(--green)]">{formatCurrency(src.annual_amount)}/yr gross</div>
+                      {src.projection_annual_amount !== src.annual_amount && (
+                        <div className="text-[10px] text-[var(--text-secondary)]">
+                          {formatCurrency(src.projection_annual_amount)}/yr used for cash-flow projections
+                        </div>
+                      )}
+                    </div>
                     <button onClick={() => deleteIncome.mutate(src.id)} className="text-xs text-[var(--text-secondary)] hover:text-[var(--red)] transition-colors">&times;</button>
                   </div>
                 </div>

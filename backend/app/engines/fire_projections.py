@@ -29,7 +29,7 @@ from app.models.cashflow_event import CashflowEvent
 from app.models.fire_config import FireConfig
 from app.models.fire_scenario import FireScenario
 from app.models.goal import Goal
-from app.models.income_source import IncomeSource
+from app.models.income_source import IncomeSource, projection_annual_amount_cents
 from app.models.net_worth_snapshot import NetWorthSnapshot
 from app.engines.net_worth import NetWorthEngine
 from app.engines.tax_engine import _get_rmd_divisor
@@ -91,6 +91,7 @@ RETIREMENT_ROLES = {"retirement_core", "retirement_bridge", "retirement_suppleme
 RE_ASSET_ROLES = {"primary_residence", "sell_candidate", "income_producing"}
 RE_LIABILITY_ROLES = {"primary_mortgage", "sell_with_property"}
 ILLIQUID_ROLES = {"illiquid_private"}
+EDUCATION_ROLES = {"education_restricted"}
 
 
 def _spending_multiplier(age: float) -> float:
@@ -287,6 +288,7 @@ class FireProjectionsEngine:
         retirement = 0
         re_equity = 0
         illiquid = 0
+        education = 0
         other = 0
 
         for acct in accounts:
@@ -301,6 +303,8 @@ class FireProjectionsEngine:
                 re_equity += bal
             elif role in ILLIQUID_ROLES:
                 illiquid += bal
+            elif role in EDUCATION_ROLES:
+                education += bal
             elif role == "system":
                 continue  # exclude system accounts (e.g., Net Worth History)
             else:
@@ -311,13 +315,16 @@ class FireProjectionsEngine:
             retirement=_cents_to_dollars(retirement),
             real_estate_equity=_cents_to_dollars(re_equity),
             illiquid_private=_cents_to_dollars(illiquid),
+            education=_cents_to_dollars(education),
             other=_cents_to_dollars(other),
         )
 
     async def compute_fire_number(self) -> FireNumberResponse:
-        """Compute FIRE number using draw-down-to-target-legacy strategy.
+        """Compute a conventional SWR target plus a spend-down comparison.
 
-        Year-by-year PV of net withdrawals, accounting for:
+        The headline target is planned annual outflow divided by the configured
+        safe withdrawal rate.  A separate year-by-year present-value estimate
+        shows the lower draw-down-to-target-legacy result, accounting for:
         - SS/pension starting at specific ages (not day 1 of retirement)
         - Spending phases (go-go / slow-go / no-go reduction with age)
         - Target legacy as terminal value
@@ -342,9 +349,15 @@ class FireProjectionsEngine:
         # Years in retirement
         retirement_age = config.target_retirement_age or 55
         years_in_retirement = config.life_expectancy - retirement_age
+        healthcare_annual_cents = 0
+        if (
+            config.healthcare_monthly_cost
+            and retirement_age < (config.medicare_start_age or 65)
+        ):
+            healthcare_annual_cents = config.healthcare_monthly_cost * 12
 
         if years_in_retirement <= 0 or real_return <= 0:
-            fire_number_cents = annual_spending_cents * max(1, years_in_retirement)
+            lifetime_spend_down_cents = annual_spending_cents * max(1, years_in_retirement)
         else:
             # Income start ages (only count if configured)
             ss_start_age = config.social_security_start_age if config.social_security_monthly else None
@@ -357,18 +370,20 @@ class FireProjectionsEngine:
             # Only count sources WITHOUT an end_date — they persist through retirement.
             # Sources with end_date (severance, unemployment, temp rental) are temporary.
             continuing_annual = sum(
-                s.annual_amount for s in income_sources
+                projection_annual_amount_cents(s) for s in income_sources
                 if s.income_type.value not in ("salary", "bonus", "side_hustle")
                 and s.end_date is None
             )
 
             # Year-by-year PV of net withdrawals
-            fire_number_cents = 0
+            lifetime_spend_down_cents = 0
             for yr in range(years_in_retirement):
                 age = retirement_age + yr
 
                 # Spending adjusted for retirement phase
                 yr_spending = annual_spending_cents * _spending_multiplier(age)
+                if age < (config.medicare_start_age or 65):
+                    yr_spending += healthcare_annual_cents
 
                 # Post-retirement income at this age
                 yr_income = continuing_annual
@@ -380,12 +395,23 @@ class FireProjectionsEngine:
                 net_withdrawal = max(0, yr_spending - yr_income)
 
                 # Discount to retirement date (geometric real return)
-                fire_number_cents += int(net_withdrawal / ((1 + real_return) ** yr))
+                lifetime_spend_down_cents += int(net_withdrawal / ((1 + real_return) ** yr))
 
             # PV of target legacy
             legacy_cents = config.target_legacy or 0
             if legacy_cents > 0:
-                fire_number_cents += int(legacy_cents / ((1 + real_return) ** years_in_retirement))
+                lifetime_spend_down_cents += int(
+                    legacy_cents / ((1 + real_return) ** years_in_retirement)
+                )
+
+        # The headline target is the transparent, conventional FIRE calculation:
+        # planned annual outflow / withdrawal rate.  It deliberately does not
+        # credit uncertain future Social Security or assume the portfolio reaches
+        # zero at life expectancy.  Pre-Medicare healthcare is configured as an
+        # extra cost, so include it conservatively in the perpetual outflow.
+        planning_outflow_cents = annual_spending_cents + healthcare_annual_cents
+        withdrawal_rate = max((config.safe_withdrawal_rate or 0) / 100.0, 0.0001)
+        fire_number_cents = int(planning_outflow_cents / withdrawal_rate)
 
         current_nw_cents = _dollars_to_cents(nw.net_worth)
         gap_cents = fire_number_cents - current_nw_cents
@@ -399,7 +425,11 @@ class FireProjectionsEngine:
 
         return FireNumberResponse(
             fire_number=_cents_to_dollars(fire_number_cents),
-            annual_spending=_cents_to_dollars(annual_spending_cents),
+            annual_spending=_cents_to_dollars(planning_outflow_cents),
+            base_annual_spending=_cents_to_dollars(annual_spending_cents),
+            healthcare_annual=_cents_to_dollars(healthcare_annual_cents),
+            lifetime_spend_down_number=_cents_to_dollars(lifetime_spend_down_cents),
+            taxes_included=False,
             safe_withdrawal_rate=config.safe_withdrawal_rate,
             current_net_worth=nw.net_worth,
             gap=_cents_to_dollars(gap_cents),
@@ -546,7 +576,7 @@ class FireProjectionsEngine:
                 if retirement_date and current_date >= retirement_date and not src.end_date:
                     continue
 
-            monthly = src.annual_amount / 12
+            monthly = projection_annual_amount_cents(src) / 12
 
             # growth_rate is a NOMINAL raise — deflate to real before compounding
             if src.growth_rate and years_from_start > 0:
@@ -1296,19 +1326,28 @@ class FireProjectionsEngine:
             cashflow_events, today, total_months, skip=_sale_suppresses,
         )
 
-        # Build income source schedule (non-salary, by month offset from today)
+        # Build the declared income schedule. Employment income continues until
+        # the configured retirement date; recurring retirement income continues
+        # according to each source's own date window.
+        retirement_date = self._get_retirement_date(config)
+
         def _source_income_at_month(m: int) -> float:
-            """Monthly non-salary income from active sources at month offset m."""
+            """Monthly income from active sources at month offset m."""
             target = today + relativedelta(months=m)
             total = 0.0
             for src in sources:
-                if src.income_type.value in ("salary", "bonus", "side_hustle"):
+                if (
+                    src.income_type.value in ("salary", "bonus", "side_hustle")
+                    and retirement_date
+                    and target >= retirement_date
+                    and not src.end_date
+                ):
                     continue
                 if src.start_date and target < src.start_date:
                     continue
                 if src.end_date and target > src.end_date:
                     continue
-                monthly = src.annual_amount / 12.0 / 100.0  # cents to dollars/mo
+                monthly = projection_annual_amount_cents(src) / 12.0 / 100.0
                 # Apply occupancy haircut to matched rental sources (every rental
                 # source when occupancy_source_match is empty)
                 if (src.income_type.value == "rental"
@@ -1808,7 +1847,7 @@ class FireProjectionsEngine:
                 continue
             if src.end_date and today > src.end_date:
                 continue
-            mo = src.annual_amount / 12.0 / 100.0
+            mo = projection_annual_amount_cents(src) / 12.0 / 100.0
             is_temp = src.end_date is not None
             label = f"{src.name} (temp)" if is_temp else src.name
             streams.append(IncomeStream(label=label, monthly=round(mo, 0), color=colors[ci % len(colors)]))

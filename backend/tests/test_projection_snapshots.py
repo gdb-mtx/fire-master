@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.engines.fire_projections import FireProjectionsEngine
+from app.models.enums import IncomeType
 from app.models.fire_config import FireConfig
 from app.schemas.fire import NetWorthBreakdown
 from tests.conftest import (
@@ -64,6 +65,52 @@ def _make_engine(
     mock_db.execute = AsyncMock(side_effect=[account_result, cf_result])
 
     return engine
+
+
+class TestProjectionIncome:
+    @pytest.mark.asyncio
+    async def test_social_security_uses_main_amount_and_age_once(self, frozen_today):
+        config = _make_fire_config(target_annual_spending=0)
+        config.social_security_monthly = 100_000
+        config.social_security_start_age = 53
+        config.custom_assumptions = {
+            "projection": {"ss_claim_age": 62, "ss_early_reduction": 0.10},
+        }
+        breakdown = NetWorthBreakdown(
+            liquid=20_000, retirement=0, real_estate_equity=0,
+            illiquid_private=0, other=0,
+        )
+        engine = _make_engine(config, breakdown, [], [])
+
+        result = await engine.project_wealth_pools(end_age=54)
+
+        assert any(point.age >= 53 and point.income == 1_000 for point in result.points)
+        assert all(point.income != 100 for point in result.points)
+
+    @pytest.mark.asyncio
+    async def test_salary_flows_until_configured_retirement_date(self, frozen_today):
+        config = _make_fire_config(target_annual_spending=12_000_000)
+        config.target_retirement_age = 53
+        config.healthcare_monthly_cost = None
+        config.social_security_monthly = None
+        config.custom_assumptions = {}
+        salary = MagicMock()
+        salary.name = "Household take-home pay"
+        salary.income_type = IncomeType.SALARY
+        salary.annual_amount = 12_000_000
+        salary.start_date = None
+        salary.end_date = None
+        salary.growth_rate = None
+        breakdown = NetWorthBreakdown(
+            liquid=20_000, retirement=0, real_estate_equity=0,
+            illiquid_private=0, other=0,
+        )
+        engine = _make_engine(config, breakdown, [], [], [salary])
+
+        result = await engine.project_wealth_pools(end_age=54, bridge_months=12)
+
+        assert result.points[0].income == 10_000
+        assert any(point.age >= 53 and point.income == 0 for point in result.points)
 
 
 # ---------------------------------------------------------------------------

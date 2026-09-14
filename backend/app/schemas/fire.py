@@ -132,6 +132,23 @@ class IncomeSourceResponse(BaseModel):
     def monthly_amount(self) -> float:
         return self.annual_amount_cents / 100 / 12
 
+    @computed_field
+    @property
+    def projection_annual_amount_cents(self) -> int:
+        custom_data = self.custom_data or {}
+        net_amount = custom_data.get("net_annual_amount")
+        if net_amount is not None and not isinstance(net_amount, bool):
+            try:
+                return int(round(float(net_amount)))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return self.annual_amount_cents
+
+    @computed_field
+    @property
+    def projection_annual_amount(self) -> float:
+        return self.projection_annual_amount_cents / 100
+
     model_config = {"from_attributes": True}
 
     @classmethod
@@ -214,12 +231,17 @@ class NetWorthBreakdown(BaseModel):
     retirement: float  # 401k, IRAs, RRSP, Roth
     real_estate_equity: float  # property values net of mortgages
     illiquid_private: float  # locked private investments
+    education: float = 0  # 529 and other education-restricted assets
     other: float  # vehicles, depreciating assets
 
 
 class FireNumberResponse(BaseModel):
     fire_number: float
     annual_spending: float
+    base_annual_spending: float | None = None
+    healthcare_annual: float = 0
+    lifetime_spend_down_number: float | None = None
+    taxes_included: bool = False
     safe_withdrawal_rate: float
     current_net_worth: float
     gap: float

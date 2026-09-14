@@ -60,6 +60,32 @@ async def test_fire_number_executes_and_is_positive(base_fire_config, frozen_tod
     assert 0 <= result.progress_pct
 
 
+async def test_fire_number_uses_withdrawal_rate_and_extra_healthcare(
+    base_fire_config, frozen_today, net_worth_breakdown,
+):
+    """The headline is an auditable SWR target, not the lower spend-to-zero PV."""
+    config = base_fire_config
+    config.safe_withdrawal_rate = 3.0
+    config.target_retirement_age = 52
+    config.medicare_start_age = 65
+    config.healthcare_monthly_cost = 100_000  # $1,000/mo extra
+    engine = _lifetime_engine()
+    patches = _patch_common(config, spending_cents=12_000_000) + [
+        patch.object(FireProjectionsEngine, "_compute_net_worth_breakdown",
+                     AsyncMock(return_value=net_worth_breakdown)),
+    ]
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        result = await engine.compute_fire_number()
+
+    assert result.annual_spending == 132_000
+    assert result.fire_number == 4_400_000
+    assert result.lifetime_spend_down_number != result.fire_number
+    assert result.taxes_included is False
+
+
 async def test_lifetime_spending_is_flat_real(base_fire_config, frozen_today):
     """Same-phase retirement spending must be IDENTICAL across years — the
     real-terms signature (nominal code inflated it ~3%/yr)."""

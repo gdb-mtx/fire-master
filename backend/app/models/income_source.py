@@ -43,3 +43,24 @@ class IncomeSource(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+def projection_annual_amount_cents(source: IncomeSource) -> int:
+    """Return the amount of an income source that is actually investable.
+
+    ``annual_amount`` remains the gross amount used by the tax engine.  A
+    source may optionally carry ``custom_data.net_annual_amount`` when gross
+    compensation and observed take-home cash flow differ.  Projection engines
+    use that override so payroll taxes and withholding are not counted as
+    money available to spend or invest.
+    """
+    custom_data = getattr(source, "custom_data", None)
+    if not isinstance(custom_data, dict):
+        return int(source.annual_amount)
+    net_amount = custom_data.get("net_annual_amount")
+    if net_amount is not None and not isinstance(net_amount, bool):
+        try:
+            return int(round(float(net_amount)))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return int(source.annual_amount)

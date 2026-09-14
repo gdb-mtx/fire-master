@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.engines.fire_projections import (
     ILLIQUID_ROLES,
+    EDUCATION_ROLES,
     LIQUID_ROLES,
     RE_ASSET_ROLES,
     RE_LIABILITY_ROLES,
@@ -38,6 +39,7 @@ VALID_FIRE_ROLES = {
     "real_estate_assets": sorted(RE_ASSET_ROLES),
     "real_estate_liabilities": sorted(RE_LIABILITY_ROLES),
     "illiquid": sorted(ILLIQUID_ROLES),
+    "education": sorted(EDUCATION_ROLES),
     # Volatile assets (crypto etc.) — counted in net worth, deliberately NOT cash
     # and NOT bridge fuel (Jul 27 decision): inert in projections, like illiquid.
     "speculative": sorted(SPECULATIVE_ROLES),

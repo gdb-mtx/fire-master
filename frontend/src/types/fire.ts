@@ -30,6 +30,8 @@ export interface IncomeSource {
   annual_amount_cents: number;
   annual_amount: number;
   monthly_amount: number;
+  projection_annual_amount_cents: number;
+  projection_annual_amount: number;
   frequency: string;
   start_date: string | null;
   end_date: string | null;
@@ -70,12 +72,17 @@ export interface NetWorthBreakdown {
   retirement: number;
   real_estate_equity: number;
   illiquid_private: number;
+  education: number;
   other: number;
 }
 
 export interface FireNumber {
   fire_number: number;
   annual_spending: number;
+  base_annual_spending: number | null;
+  healthcare_annual: number;
+  lifetime_spend_down_number: number | null;
+  taxes_included: boolean;
   safe_withdrawal_rate: number;
   current_net_worth: number;
   gap: number;

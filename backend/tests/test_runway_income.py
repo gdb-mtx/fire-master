@@ -27,6 +27,7 @@ def _src(name, annual_cents, income_type=IncomeType.OTHER, start=None, end=None,
     s.end_date = end
     s.growth_rate = growth
     s.is_active = True
+    s.custom_data = None
     return s
 
 
@@ -55,6 +56,16 @@ class TestEnginesAgree:
 
 
 class TestDeclaredRules:
+    def test_net_projection_override_does_not_use_gross_income(self):
+        source = _src("Gross salary", 1_200_000_00, IncomeType.SALARY)
+        source.custom_data = {"net_annual_amount": 823_669_04}
+
+        projected = CashflowEngine.modeled_income_for_month(
+            [source], date(2026, 8, 1), None,
+        )
+
+        assert projected == int(823_669_04 / 12)
+
     def test_taper_on_end_date(self):
         # retirement=None so the undated salary persists and cancels out of the diff
         aug = CashflowEngine.modeled_income_for_month(SOURCES, date(2026, 8, 1), None)

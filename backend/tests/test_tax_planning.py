@@ -256,6 +256,7 @@ class TestRothConversionPlan:
 
 class TestWithdrawalSequence:
     async def test_waterfall_order_taxable_first(self, base_fire_config, frozen_today_tax):
+        base_fire_config.healthcare_monthly_cost = None
         engine = _make_planning_engine(taxable=800_000, deferred=400_000, roth=200_000)
         with _patch_config(base_fire_config):
             plan = await engine.optimize_withdrawal_sequence(
@@ -273,6 +274,7 @@ class TestWithdrawalSequence:
         assert y1.capital_gains_income == pytest.approx(y1.from_taxable * 0.4)
 
     async def test_depletion_cascades(self, base_fire_config, frozen_today_tax):
+        base_fire_config.healthcare_monthly_cost = None
         engine = _make_planning_engine(taxable=150_000, deferred=300_000, roth=500_000)
         with _patch_config(base_fire_config):
             plan = await engine.optimize_withdrawal_sequence(
@@ -360,7 +362,10 @@ class TestWithdrawalSequence:
         yield compounds. Cash-only plan, $170K vs $60K flat spending —
         year 2's partial draw pins the behavior exactly."""
         # Default: real yield 0 → cash balance just depletes
-        config = _make_fire_config(target_annual_spending=6_000_000)  # $60K
+        config = _make_fire_config(
+            target_annual_spending=6_000_000,
+            healthcare_monthly_cost=None,
+        )  # $60K
         engine = _make_planning_engine(cash=170_000)
         with _patch_config(config):
             plan = await engine.optimize_withdrawal_sequence(
@@ -374,7 +379,10 @@ class TestWithdrawalSequence:
         assert y0.after_tax_income == pytest.approx(y0.from_cash - y0.total_tax)
 
         # Configured +2% REAL yield (HYSA above inflation) → compounds
-        config2 = _make_fire_config(target_annual_spending=6_000_000)
+        config2 = _make_fire_config(
+            target_annual_spending=6_000_000,
+            healthcare_monthly_cost=None,
+        )
         config2.custom_assumptions["tax"] = {
             **config2.custom_assumptions["tax"], "cash_yield_rate": 0.02,
         }

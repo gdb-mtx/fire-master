@@ -493,6 +493,16 @@ export default function TaxPlanningPage() {
           </Link>
         </div>
 
+        <div className="bg-[var(--bg-card)] border border-[var(--yellow)] rounded-lg p-4 text-xs text-[var(--text-secondary)]">
+          <span className="font-medium text-[var(--text-primary)]">Tax scope:</span>{" "}
+          this page classifies only spendable cash, brokerage, traditional-retirement,
+          Roth, and HSA accounts. It excludes your home and 529s. Withdrawal-plan taxes
+          are estimates shown alongside the plan; they are not deducted from projected
+          balances. Gross employment sources feed the current-income tax cards; when a
+          separate after-withholding amount is available, forward cash-flow projections
+          use that amount instead.
+        </div>
+
         {/* Stat Cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard
