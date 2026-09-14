@@ -529,6 +529,10 @@ export default function TaxPlanningPage() {
           sources feed the current-income tax cards; when a
           separate after-withholding amount is available, forward cash-flow projections
           use that amount instead.
+          {brackets.state_tax_method === "california_progressive_2025" && (
+            <> California uses the published 2025 progressive brackets and deduction,
+              excludes Social Security, adds the 1% tax above $1 million, and includes 2026 wage SDI.</>
+          )}
         </div>
 
         {/* Stat Cards */}
@@ -537,7 +541,7 @@ export default function TaxPlanningPage() {
             label="Total Tax"
             value={fmt(brackets.total_tax)}
             color="var(--yellow)"
-            sub={`Federal ${fmt(brackets.federal_tax)} + State ${fmt(brackets.state_tax)}`}
+            sub={`Federal ${fmt(brackets.federal_tax)} + ${brackets.state || "State"} ${fmt(brackets.state_tax)}`}
           />
           <StatCard
             label="Effective Rate"
@@ -711,7 +715,9 @@ export default function TaxPlanningPage() {
                   <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.gross_income)}</span>
                 </div>
                 <div className="flex justify-between text-xs">
-                  <span className="text-[var(--text-secondary)]">Standard Deduction</span>
+                  <span className="text-[var(--text-secondary)]">
+                    Federal {brackets.federal_deduction_method === "itemized" ? "Itemized Deductions" : "Standard Deduction"}
+                  </span>
                   <span className="font-mono text-[var(--green)]">-{fmt(brackets.standard_deduction)}</span>
                 </div>
                 <div className="flex justify-between text-xs">
@@ -719,6 +725,37 @@ export default function TaxPlanningPage() {
                   <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.taxable_income)}</span>
                 </div>
               </div>
+
+              {brackets.state_tax_method === "california_progressive_2025" && (
+                <div className="mt-3 pt-3 border-t border-[var(--border)] space-y-1.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-[var(--text-secondary)]">CA Taxable Income</span>
+                    <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.state_taxable_income)}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-[var(--text-secondary)]">
+                      CA {brackets.state_deduction_method === "itemized" ? "Itemized Deductions" : "Standard Deduction"}
+                    </span>
+                    <span className="font-mono text-[var(--green)]">-{fmt(brackets.state_standard_deduction)}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-[var(--text-secondary)]">CA Income Tax</span>
+                    <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.state_income_tax)}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-[var(--text-secondary)]">CA SDI on Wages</span>
+                    <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.state_payroll_tax)}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
+                      CA Marginal <span className="font-mono text-[var(--yellow)]">{fmtPct(brackets.state_marginal_rate)}</span>
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
+                      CA Effective <span className="font-mono text-[var(--green)]">{fmtPct(brackets.state_effective_rate)}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Account Balances by Tax Treatment */}

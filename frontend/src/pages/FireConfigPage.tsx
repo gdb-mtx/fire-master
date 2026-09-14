@@ -47,6 +47,10 @@ export default function FireConfigPage() {
     household_size: "1",
     cost_basis_pct: "60",
     state_of_residence: "",
+    federal_deduction_method: "standard",
+    federal_itemized_deduction: "",
+    state_deduction_method: "standard",
+    state_itemized_deduction: "",
     // Projection assumptions (stored in custom_assumptions.projection)
     // ALL RATES ARE REAL (after inflation, in today's dollars)
     surplus_investment_rate: "4",
@@ -113,6 +117,10 @@ export default function FireConfigPage() {
         household_size: (tax?.household_size as number)?.toString() || "1",
         cost_basis_pct: (tax?.cost_basis_pct as number) != null ? ((tax!.cost_basis_pct as number) * 100).toString() : "60",
         state_of_residence: (tax?.state as string) || "",
+        federal_deduction_method: (tax?.federal_deduction_method as string) || "standard",
+        federal_itemized_deduction: (tax?.federal_itemized_deduction as number)?.toString() || "",
+        state_deduction_method: (tax?.state_deduction_method as string) || "standard",
+        state_itemized_deduction: (tax?.state_itemized_deduction as number)?.toString() || "",
         // Projection assumptions — read from saved config or use defaults
         surplus_investment_rate: proj?.surplus_investment_rate != null ? ((proj.surplus_investment_rate as number) * 100).toString() : "4",
         cash_reserve_months: (proj?.cash_reserve_months as number)?.toString() || "12",
@@ -173,6 +181,14 @@ export default function FireConfigPage() {
         cost_basis_pct: pf(form.cost_basis_pct, 60) / 100,
         state: form.state_of_residence || null,
         state_tax_rate: form.state_tax_rate ? parseFloat(form.state_tax_rate) : null,
+        federal_deduction_method: form.federal_deduction_method,
+        federal_itemized_deduction: form.federal_itemized_deduction
+          ? parseFloat(form.federal_itemized_deduction)
+          : null,
+        state_deduction_method: form.state_deduction_method,
+        state_itemized_deduction: form.state_itemized_deduction
+          ? parseFloat(form.state_itemized_deduction)
+          : null,
       },
       projection: {
         surplus_investment_rate: pf(form.surplus_investment_rate, 4) / 100,
@@ -463,8 +479,41 @@ export default function FireConfigPage() {
               <input type="text" value={form.state_of_residence} onChange={(e) => setForm(f => ({ ...f, state_of_residence: e.target.value }))} placeholder="CA" maxLength={2} className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>State Tax Rate %</label>
-              <input type="number" step="0.01" value={form.state_tax_rate} onChange={(e) => setForm(f => ({ ...f, state_tax_rate: e.target.value }))} placeholder="5.0" className={inputCls} />
+              <label className={labelCls}>
+                {form.state_of_residence.trim().toUpperCase() === "CA" ? "California Tax Model" : "State Tax Rate %"}
+              </label>
+              {form.state_of_residence.trim().toUpperCase() === "CA" ? (
+                <div className={`${inputCls} text-[var(--text-secondary)]`}>Progressive (automatic)</div>
+              ) : (
+                <input type="number" step="0.01" value={form.state_tax_rate} onChange={(e) => setForm(f => ({ ...f, state_tax_rate: e.target.value }))} placeholder="5.0" className={inputCls} />
+              )}
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+                {form.state_of_residence.trim().toUpperCase() === "CA"
+                  ? "Uses published CA brackets, the CA deduction, millionaire surtax, and wage SDI. The saved flat rate is ignored."
+                  : "Flat-rate fallback for states without a built-in schedule."}
+              </p>
+            </div>
+            <div>
+              <label className={labelCls}>Federal Deduction Method</label>
+              <select value={form.federal_deduction_method} onChange={(e) => setForm(f => ({ ...f, federal_deduction_method: e.target.value }))} className={inputCls}>
+                <option value="standard">Standard deduction</option>
+                <option value="itemized">Itemized deduction</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>Federal Itemized Deductions ($/year)</label>
+              <input type="number" min={0} value={form.federal_itemized_deduction} onChange={(e) => setForm(f => ({ ...f, federal_itemized_deduction: e.target.value }))} disabled={form.federal_deduction_method !== "itemized"} placeholder="From Schedule A" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>{form.state_of_residence.trim().toUpperCase() === "CA" ? "California Deduction Method" : "State Deduction Method"}</label>
+              <select value={form.state_deduction_method} onChange={(e) => setForm(f => ({ ...f, state_deduction_method: e.target.value }))} className={inputCls}>
+                <option value="standard">Standard deduction</option>
+                <option value="itemized">Itemized deduction</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>{form.state_of_residence.trim().toUpperCase() === "CA" ? "California Itemized Deductions ($/year)" : "State Itemized Deductions ($/year)"}</label>
+              <input type="number" min={0} value={form.state_itemized_deduction} onChange={(e) => setForm(f => ({ ...f, state_itemized_deduction: e.target.value }))} disabled={form.state_deduction_method !== "itemized"} placeholder="From state return" className={inputCls} />
             </div>
             <div>
               <label className={labelCls}>Federal Marginal Rate %</label>

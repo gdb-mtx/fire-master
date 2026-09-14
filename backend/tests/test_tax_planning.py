@@ -256,6 +256,29 @@ class TestRothConversionPlan:
 # ---------------------------------------------------------------------------
 
 class TestWithdrawalSequence:
+    async def test_california_excludes_social_security(self, base_fire_config, frozen_today_tax):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.target_annual_spending = 4_000_000
+        base_fire_config.custom_assumptions["tax"] = {
+            **base_fire_config.custom_assumptions["tax"],
+            "state": "CA",
+            "filing_status": "married_filing_jointly",
+        }
+        social_security = _income_source(
+            "Social Security", IncomeType.SOCIAL_SECURITY, 50_000,
+        )
+        engine = _make_planning_engine(income_sources=[social_security])
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.state_tax == 0
+        assert year.from_taxable == 0
+        assert year.from_deferred == 0
+
     async def test_tax_deferred_withdrawals_are_grossed_up_to_fund_tax(
         self, base_fire_config, frozen_today_tax,
     ):

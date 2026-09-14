@@ -50,13 +50,24 @@ class BracketAnalysisResponse(BaseModel):
     filing_status: str
     gross_income: float
     standard_deduction: float
+    federal_deduction_method: str = "standard"
     taxable_income: float
     federal_tax: float
     federal_brackets: list[BracketDetail]
     federal_effective_rate: float
     federal_marginal_rate: float
     state_tax: float
+    state: str = ""
+    state_gross_income: float = 0
     state_rate: float
+    state_tax_method: str = "flat_rate"
+    state_taxable_income: float = 0
+    state_standard_deduction: float = 0
+    state_deduction_method: str = "standard"
+    state_income_tax: float = 0
+    state_payroll_tax: float = 0
+    state_effective_rate: float = 0
+    state_marginal_rate: float = 0
     fica_tax: float
     total_tax: float
     overall_effective_rate: float

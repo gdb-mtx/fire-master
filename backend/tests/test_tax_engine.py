@@ -1,7 +1,7 @@
 """Tax engine unit tests — pure math, zero DB dependency.
 
-Tests federal brackets, LTCG, FICA, and bracket room calculations against
-known-good values derived from 2026 estimated IRS tables.
+Tests federal and California brackets, LTCG, FICA, and bracket room
+calculations against published or estimated tax tables.
 """
 
 from app.engines.tax_engine import TaxEngine
@@ -50,6 +50,67 @@ class TestFederalTax:
         result = tax_engine.compute_federal_tax(300_000, "single")
         assert result.marginal_rate == 0.35
         assert result.total_federal_tax > 70_000
+
+
+# ---------------------------------------------------------------------------
+# California income tax
+# ---------------------------------------------------------------------------
+
+class TestCaliforniaTax:
+    def test_mfj_progressive_brackets_and_state_deduction(self, tax_engine: TaxEngine):
+        result = tax_engine.compute_configured_state_tax(
+            250_000,
+            {"state": "CA", "filing_status": "married_filing_jointly"},
+        )
+
+        assert result.method == "california_progressive_2025"
+        assert result.standard_deduction == 11_412
+        assert result.taxable_income == 238_588
+        assert result.income_tax == 15_065.96
+        assert result.payroll_tax == 0
+        assert result.marginal_rate == 0.093
+
+    def test_millionaire_surtax_and_uncapped_sdi(self, tax_engine: TaxEngine):
+        result = tax_engine.compute_configured_state_tax(
+            1_200_000,
+            {"state": "California", "filing_status": "married_filing_jointly"},
+            earned_income=1_200_000,
+        )
+
+        assert result.income_tax == 112_728.60
+        assert result.payroll_tax == 15_600
+        assert result.total_tax == 128_328.60
+        assert result.marginal_rate == 0.123  # 11.3% bracket + 1% surtax
+
+    def test_separate_federal_and_california_itemized_deductions(self, tax_engine: TaxEngine):
+        config = {
+            "state": "CA",
+            "filing_status": "married_filing_jointly",
+            "federal_deduction_method": "itemized",
+            "federal_itemized_deduction": 75_000,
+            "state_deduction_method": "itemized",
+            "state_itemized_deduction": 50_000,
+        }
+
+        assert tax_engine._get_standard_deduction(config) == 75_000
+        state = tax_engine.compute_configured_state_tax(250_000, config)
+        assert state.deduction_method == "itemized"
+        assert state.standard_deduction == 50_000
+        assert state.taxable_income == 200_000
+
+    def test_non_california_preserves_flat_rate_fallback(self, tax_engine: TaxEngine):
+        result = tax_engine.compute_configured_state_tax(
+            100_000,
+            {
+                "state": "UT",
+                "state_tax_rate": 4.4,
+                "filing_status": "single",
+            },
+        )
+
+        assert result.method == "flat_rate"
+        assert result.taxable_income == 84_300
+        assert result.total_tax == 3_709.20
 
 
 # ---------------------------------------------------------------------------

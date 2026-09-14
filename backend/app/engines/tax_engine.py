@@ -63,6 +63,42 @@ DEFAULT_STANDARD_DEDUCTION = {
     "married_filing_jointly": 31_400,
 }
 
+# California Franchise Tax Board 2025 published schedules. The projection is
+# expressed in today's dollars, so these thresholds stay fixed just like the
+# federal brackets above. California taxes capital gains as ordinary income.
+CA_BRACKETS_2025: dict[str, list[dict]] = {
+    "single": [
+        {"rate": 0.01, "up_to": 11_079},
+        {"rate": 0.02, "up_to": 26_264},
+        {"rate": 0.04, "up_to": 41_452},
+        {"rate": 0.06, "up_to": 57_542},
+        {"rate": 0.08, "up_to": 72_724},
+        {"rate": 0.093, "up_to": 371_479},
+        {"rate": 0.103, "up_to": 445_771},
+        {"rate": 0.113, "up_to": 742_953},
+        {"rate": 0.123, "up_to": float("inf")},
+    ],
+    "married_filing_jointly": [
+        {"rate": 0.01, "up_to": 22_158},
+        {"rate": 0.02, "up_to": 52_528},
+        {"rate": 0.04, "up_to": 82_904},
+        {"rate": 0.06, "up_to": 115_084},
+        {"rate": 0.08, "up_to": 145_448},
+        {"rate": 0.093, "up_to": 742_958},
+        {"rate": 0.103, "up_to": 891_542},
+        {"rate": 0.113, "up_to": 1_485_906},
+        {"rate": 0.123, "up_to": float("inf")},
+    ],
+}
+
+CA_STANDARD_DEDUCTION_2025 = {
+    "single": 5_706,
+    "married_filing_jointly": 11_412,
+}
+CA_BEHAVIORAL_HEALTH_SURTAX_THRESHOLD = 1_000_000
+CA_BEHAVIORAL_HEALTH_SURTAX_RATE = 0.01
+CA_SDI_RATE_2026 = 0.013
+
 # Long-term capital gains brackets (2026 estimates)
 LTCG_BRACKETS: dict[str, list[dict]] = {
     "single": [
@@ -164,6 +200,20 @@ class TaxBreakdown:
     total_federal_tax: float
     effective_rate: float
     marginal_rate: float
+
+
+@dataclass
+class StateTaxBreakdown:
+    """State income/payroll tax details for the configured residence."""
+    taxable_income: float
+    income_tax: float
+    payroll_tax: float
+    total_tax: float
+    effective_rate: float
+    marginal_rate: float
+    standard_deduction: float
+    deduction_method: str
+    method: str
 
 
 @dataclass
@@ -298,8 +348,19 @@ class TaxEngine:
             "filing_status": "single",
             "state": "UT",
             "state_tax_rate": config.state_tax_rate or 4.65,
+            # Optional state-specific overrides. California automatically uses
+            # the published progressive schedule when state is CA.
+            "state_brackets": None,
+            "state_standard_deduction": None,
+            "state_deduction_method": "standard",
+            "state_itemized_deduction": None,
+            "state_surtax_threshold": None,
+            "state_surtax_rate": None,
+            "state_payroll_tax_rate": None,
             "brackets": None,  # will use DEFAULT_BRACKETS
             "standard_deduction": None,  # will use DEFAULT_STANDARD_DEDUCTION
+            "federal_deduction_method": "standard",
+            "federal_itemized_deduction": None,
             "household_size": 1,
             "cost_basis_pct": 0.60,  # estimated % of taxable balance that is cost basis (not taxed)
             # Assumed marginal rate on future RMDs, used to estimate Roth
@@ -325,11 +386,47 @@ class TaxEngine:
         return DEFAULT_BRACKETS.get(status, DEFAULT_BRACKETS["single"])
 
     def _get_standard_deduction(self, tax_config: dict) -> float:
-        """Get standard deduction for filing status."""
-        if tax_config.get("standard_deduction"):
-            return tax_config["standard_deduction"]
+        """Get the configured federal deduction (legacy name retained)."""
         status = tax_config.get("filing_status", "single")
-        return DEFAULT_STANDARD_DEDUCTION.get(status, DEFAULT_STANDARD_DEDUCTION["single"])
+        configured_standard = tax_config.get("standard_deduction")
+        standard = (
+            float(configured_standard)
+            if configured_standard is not None
+            else DEFAULT_STANDARD_DEDUCTION.get(
+                status, DEFAULT_STANDARD_DEDUCTION["single"],
+            )
+        )
+        itemized = tax_config.get("federal_itemized_deduction")
+        method = tax_config.get("federal_deduction_method", "standard")
+        if itemized is not None and method == "itemized":
+            return max(0.0, float(itemized))
+        if itemized is not None and method == "greater_of":
+            return max(standard, float(itemized))
+        return standard
+
+    def _get_federal_deduction_method(self, tax_config: dict) -> str:
+        """Describe which configured federal deduction is actually in use."""
+        method = tax_config.get("federal_deduction_method", "standard")
+        itemized = tax_config.get("federal_itemized_deduction")
+        if itemized is not None and method == "greater_of":
+            status = tax_config.get("filing_status", "single")
+            configured_standard = tax_config.get("standard_deduction")
+            standard = (
+                float(configured_standard)
+                if configured_standard is not None
+                else DEFAULT_STANDARD_DEDUCTION.get(
+                    status, DEFAULT_STANDARD_DEDUCTION["single"],
+                )
+            )
+            return "itemized" if float(itemized) > standard else "standard"
+        if itemized is not None and method == "itemized":
+            return "itemized"
+        return "standard"
+
+    @staticmethod
+    def _is_california(tax_config: dict) -> bool:
+        state = str(tax_config.get("state") or "").strip().upper()
+        return state in {"CA", "CALIFORNIA"}
 
     # -----------------------------------------------------------------------
     # Core tax computations (pure functions, no DB)
@@ -381,8 +478,134 @@ class TaxEngine:
         )
 
     def compute_state_tax(self, taxable_income: float, state_rate: float) -> float:
-        """Compute state income tax (flat rate, e.g., Utah 4.65%)."""
+        """Compute a flat state tax for states without a modeled schedule."""
         return round(max(0, taxable_income) * state_rate / 100, 2)
+
+    def compute_configured_state_tax(
+        self,
+        state_agi: float,
+        tax_config: dict,
+        *,
+        earned_income: float = 0.0,
+        extra_deduction: float = 0.0,
+    ) -> StateTaxBreakdown:
+        """Compute state tax using a progressive CA model or flat fallback.
+
+        California uses its own standard deduction, taxes capital gains as
+        ordinary income, excludes Social Security before this method is called,
+        and adds the 1% Behavioral Health Services Tax above $1 million of
+        California taxable income. Employee SDI is included for earned income.
+        """
+        filing_status = tax_config.get("filing_status", "single")
+
+        if self._is_california(tax_config):
+            brackets = tax_config.get("state_brackets") or CA_BRACKETS_2025.get(
+                filing_status, CA_BRACKETS_2025["single"],
+            )
+            configured_standard = tax_config.get("state_standard_deduction")
+            standard_deduction = (
+                float(configured_standard)
+                if configured_standard is not None
+                else CA_STANDARD_DEDUCTION_2025.get(
+                    filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                )
+            )
+            deduction = standard_deduction
+            deduction_method = "standard"
+            itemized = tax_config.get("state_itemized_deduction")
+            configured_method = tax_config.get("state_deduction_method", "standard")
+            if itemized is not None and configured_method == "itemized":
+                deduction = max(0.0, float(itemized))
+                deduction_method = "itemized"
+            elif itemized is not None and configured_method == "greater_of":
+                deduction = max(standard_deduction, float(itemized))
+                deduction_method = (
+                    "itemized" if float(itemized) > standard_deduction else "standard"
+                )
+            taxable_income = max(
+                0.0, state_agi - deduction - extra_deduction,
+            )
+
+            income_tax = 0.0
+            marginal_rate = brackets[0]["rate"] if brackets else 0.0
+            previous_ceiling = 0.0
+            remaining = taxable_income
+            for bracket in brackets:
+                bracket_width = bracket["up_to"] - previous_ceiling
+                income_in_bracket = min(remaining, bracket_width)
+                if income_in_bracket > 0:
+                    income_tax += income_in_bracket * bracket["rate"]
+                    marginal_rate = bracket["rate"]
+                remaining -= income_in_bracket
+                previous_ceiling = bracket["up_to"]
+                if remaining <= 0:
+                    break
+
+            configured_threshold = tax_config.get("state_surtax_threshold")
+            surtax_threshold = (
+                float(configured_threshold)
+                if configured_threshold is not None
+                else CA_BEHAVIORAL_HEALTH_SURTAX_THRESHOLD
+            )
+            configured_surtax_rate = tax_config.get("state_surtax_rate")
+            surtax_rate = (
+                float(configured_surtax_rate)
+                if configured_surtax_rate is not None
+                else CA_BEHAVIORAL_HEALTH_SURTAX_RATE
+            )
+            surtax = max(0.0, taxable_income - surtax_threshold) * surtax_rate
+            if taxable_income > surtax_threshold:
+                marginal_rate += surtax_rate
+
+            configured_payroll_rate = tax_config.get("state_payroll_tax_rate")
+            payroll_rate = (
+                float(configured_payroll_rate)
+                if configured_payroll_rate is not None
+                else CA_SDI_RATE_2026
+            )
+            payroll_tax = max(0.0, earned_income) * payroll_rate
+            income_tax = round(income_tax + surtax, 2)
+            payroll_tax = round(payroll_tax, 2)
+            total_tax = round(income_tax + payroll_tax, 2)
+            return StateTaxBreakdown(
+                taxable_income=round(taxable_income, 2),
+                income_tax=income_tax,
+                payroll_tax=payroll_tax,
+                total_tax=total_tax,
+                effective_rate=round(total_tax / state_agi, 4) if state_agi > 0 else 0.0,
+                marginal_rate=round(marginal_rate, 4),
+                standard_deduction=deduction,
+                deduction_method=deduction_method,
+                method="california_progressive_2025",
+            )
+
+        standard_deduction = self._get_standard_deduction(tax_config)
+        deduction = standard_deduction
+        deduction_method = "standard"
+        itemized = tax_config.get("state_itemized_deduction")
+        configured_method = tax_config.get("state_deduction_method", "standard")
+        if itemized is not None and configured_method == "itemized":
+            deduction = max(0.0, float(itemized))
+            deduction_method = "itemized"
+        elif itemized is not None and configured_method == "greater_of":
+            deduction = max(standard_deduction, float(itemized))
+            deduction_method = (
+                "itemized" if float(itemized) > standard_deduction else "standard"
+            )
+        taxable_income = max(0.0, state_agi - deduction - extra_deduction)
+        state_rate = float(tax_config.get("state_tax_rate") or 0.0)
+        total_tax = self.compute_state_tax(taxable_income, state_rate)
+        return StateTaxBreakdown(
+            taxable_income=round(taxable_income, 2),
+            income_tax=total_tax,
+            payroll_tax=0.0,
+            total_tax=total_tax,
+            effective_rate=round(total_tax / state_agi, 4) if state_agi > 0 else 0.0,
+            marginal_rate=round(state_rate / 100, 4) if taxable_income > 0 else 0.0,
+            standard_deduction=deduction,
+            deduction_method=deduction_method,
+            method="flat_rate",
+        )
 
     def compute_effective_rate(
         self, gross_income: float, federal_tax: float, state_tax: float,
@@ -681,7 +904,6 @@ class TaxEngine:
         config = await fire_engine.get_effective_config(scenario_id)
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
-        state_rate = tax_config["state_tax_rate"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
         cost_basis_pct = tax_config.get("cost_basis_pct", 0.60)
@@ -905,9 +1127,15 @@ class TaxEngine:
                     capital_gains, taxable_total, filing_status,
                 )
                 federal = federal_breakdown.total_federal_tax + gains_tax
-                state = self.compute_state_tax(
-                    ordinary + capital_gains - std_deduction, state_rate,
-                )
+                state_agi = ordinary + capital_gains
+                if self._is_california(tax_config):
+                    # California excludes Social Security benefits entirely.
+                    state_agi -= taxable_ss * 0.85
+                state = self.compute_configured_state_tax(
+                    state_agi,
+                    tax_config,
+                    earned_income=taxable_earned,
+                ).total_tax
                 fica = self.compute_fica(taxable_earned, filing_status)
                 return ordinary, federal, state, fica, federal + state + fica
 
@@ -924,9 +1152,14 @@ class TaxEngine:
                 baseline_federal = self.compute_federal_tax(
                     baseline_taxable, filing_status, brackets,
                 ).total_federal_tax
-                baseline_state = self.compute_state_tax(
-                    baseline_ordinary - std_deduction, state_rate,
-                )
+                baseline_state_agi = baseline_ordinary
+                if self._is_california(tax_config):
+                    baseline_state_agi -= taxable_ss * 0.85
+                baseline_state = self.compute_configured_state_tax(
+                    baseline_state_agi,
+                    tax_config,
+                    earned_income=taxable_earned,
+                ).total_tax
                 baseline_fica = self.compute_fica(taxable_earned, filing_status)
                 prepaid_tax = baseline_federal + baseline_state + baseline_fica
 
@@ -1076,7 +1309,6 @@ class TaxEngine:
         config = await fire_engine.get_effective_config(scenario_id)
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
-        state_rate = tax_config["state_tax_rate"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
 
@@ -1155,7 +1387,18 @@ class TaxEngine:
             tax_with = self.compute_federal_tax(total_taxable, filing_status, brackets)
             tax_without = self.compute_federal_tax(taxable_baseline, filing_status, brackets)
             conversion_tax = tax_with.total_federal_tax - tax_without.total_federal_tax
-            conversion_tax += self.compute_state_tax(conversion, state_rate)
+            if self._is_california(tax_config):
+                state_with = self.compute_configured_state_tax(
+                    baseline_income + conversion, tax_config,
+                ).total_tax
+                state_without = self.compute_configured_state_tax(
+                    baseline_income, tax_config,
+                ).total_tax
+                conversion_tax += state_with - state_without
+            else:
+                conversion_tax += self.compute_state_tax(
+                    conversion, tax_config["state_tax_rate"],
+                )
 
             cumulative_converted += conversion
             total_tax += conversion_tax
@@ -1214,7 +1457,6 @@ class TaxEngine:
         config = await fire_engine.get_effective_config()
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
-        state_rate = tax_config["state_tax_rate"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
         household_size = tax_config.get("household_size", 1)
@@ -1240,7 +1482,20 @@ class TaxEngine:
 
         taxable_income = max(0, total_income - std_deduction)
         federal = self.compute_federal_tax(taxable_income, filing_status, brackets)
-        state_tax = self.compute_state_tax(taxable_income, state_rate)
+        state_agi = total_income
+        if self._is_california(tax_config):
+            state_agi -= sum(
+                _prorated_annual_for_year(s, current_year)
+                for s in income_sources
+                if s.income_type.value == "social_security"
+                and s.is_active and s.is_taxable
+            )
+        state_breakdown = self.compute_configured_state_tax(
+            state_agi,
+            tax_config,
+            earned_income=earned_income,
+        )
+        state_tax = state_breakdown.total_tax
         fica = self.compute_fica(earned_income, filing_status)
         room = self.get_bracket_room(taxable_income, filing_status, brackets)
         effective = self.compute_effective_rate(total_income, federal.total_federal_tax, state_tax, fica)
@@ -1264,13 +1519,24 @@ class TaxEngine:
             "filing_status": filing_status,
             "gross_income": round(total_income, 2),
             "standard_deduction": std_deduction,
+            "federal_deduction_method": self._get_federal_deduction_method(tax_config),
             "taxable_income": round(taxable_income, 2),
             "federal_tax": federal.total_federal_tax,
             "federal_brackets": federal.brackets,
             "federal_effective_rate": federal.effective_rate,
             "federal_marginal_rate": federal.marginal_rate,
             "state_tax": state_tax,
-            "state_rate": state_rate,
+            "state": str(tax_config.get("state") or "").upper(),
+            "state_gross_income": round(state_agi, 2),
+            "state_rate": round(state_breakdown.marginal_rate * 100, 2),
+            "state_tax_method": state_breakdown.method,
+            "state_taxable_income": state_breakdown.taxable_income,
+            "state_standard_deduction": state_breakdown.standard_deduction,
+            "state_deduction_method": state_breakdown.deduction_method,
+            "state_income_tax": state_breakdown.income_tax,
+            "state_payroll_tax": state_breakdown.payroll_tax,
+            "state_effective_rate": state_breakdown.effective_rate,
+            "state_marginal_rate": state_breakdown.marginal_rate,
             "fica_tax": fica,
             "total_tax": round(federal.total_federal_tax + state_tax + fica, 2),
             "overall_effective_rate": effective,
@@ -1328,7 +1594,6 @@ class TaxEngine:
         config = await fire_engine.get_effective_config()
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
-        state_rate = tax_config["state_tax_rate"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
 
@@ -1337,8 +1602,20 @@ class TaxEngine:
         scenario_taxable = max(0, scenario_income - scenario_deductions)
 
         scenario_federal = self.compute_federal_tax(scenario_taxable, filing_status, brackets)
-        scenario_state = self.compute_state_tax(scenario_taxable, state_rate)
-        scenario_total = scenario_federal.total_federal_tax + scenario_state
+        scenario_state_agi = (
+            base["state_gross_income"] + extra_income + roth_conversion
+        )
+        scenario_state_income_tax = self.compute_configured_state_tax(
+            scenario_state_agi,
+            tax_config,
+            extra_deduction=extra_deduction,
+        ).income_tax
+        scenario_state = scenario_state_income_tax + base["state_payroll_tax"]
+        # Roth conversions and the generic extra-income input are not treated
+        # as wages, so current FICA/SDI carry through rather than increasing.
+        scenario_total = (
+            scenario_federal.total_federal_tax + scenario_state + base["fica_tax"]
+        )
 
         base_total = base["total_tax"]
 
