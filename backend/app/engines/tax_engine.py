@@ -1261,7 +1261,7 @@ class TaxEngine:
             taxable_other = 0.0
             taxable_state_wages = 0.0
             gross_non_withdrawal_income = 0.0
-            has_prepaid_tax_source = False
+            prepaid_withholding = 0.0
 
             for src in income_sources:
                 # Day-prorated contribution for this calendar year (an ended
@@ -1290,7 +1290,13 @@ class TaxEngine:
                     and isinstance(custom_data, dict)
                     and custom_data.get("net_annual_amount") is not None
                 ):
-                    has_prepaid_tax_source = True
+                    # The gross-minus-projected-cash difference is the amount
+                    # already withheld from this source. The former boolean
+                    # treatment credited the household with its ENTIRE tax
+                    # bill whenever even one source had a net-cash override,
+                    # including taxes attributable to overlapping gross-only
+                    # sources. That made mixed income phases far too rosy.
+                    prepaid_withholding += max(0.0, annual - annual_cash)
 
                 if src.income_type.value == "social_security":
                     ss_income += annual_cash
@@ -1502,74 +1508,12 @@ class TaxEngine:
                 fica = self.compute_fica(taxable_earned, filing_status)
                 return ordinary, federal, state, fica, federal + state + fica
 
-            # A source with an explicit net cash-flow amount represents money
-            # after payroll withholding. Its baseline income tax is displayed,
-            # but must not be funded a second time from the portfolio.
-            prepaid_tax = 0.0
-            if has_prepaid_tax_source:
-                baseline_ordinary = (
-                    taxable_earned + taxable_ss * 0.85
-                    + taxable_pension + taxable_other
-                )
-                baseline_state_agi = baseline_ordinary
-                if self._is_california(tax_config):
-                    baseline_state_agi -= taxable_ss * 0.85
-                federal_mortgage_interest, state_mortgage_interest = (
-                    mortgage_interest_by_year.get(current_year, (0.0, 0.0))
-                )
-                baseline_state_itemized, _, _ = self._state_itemized_deduction(
-                    baseline_state_agi,
-                    tax_config,
-                    state_mortgage_interest,
-                    year=current_year,
-                    inflation_rate=inflation,
-                )
-                baseline_state_deduction = None
-                baseline_state_method = None
-                if baseline_state_itemized is not None:
-                    state_standard = (
-                        float(tax_config["state_standard_deduction"])
-                        if tax_config.get("state_standard_deduction") is not None
-                        else CA_STANDARD_DEDUCTION_2025.get(
-                            filing_status, CA_STANDARD_DEDUCTION_2025["single"],
-                        )
-                    )
-                    baseline_state_deduction, baseline_state_method = self._select_deduction(
-                        tax_config.get("state_deduction_method", "greater_of"),
-                        state_standard,
-                        baseline_state_itemized,
-                    )
-                baseline_state_breakdown = self.compute_configured_state_tax(
-                    baseline_state_agi,
-                    tax_config,
-                    earned_income=taxable_state_wages,
-                    deduction_override=baseline_state_deduction,
-                    deduction_method_override=baseline_state_method,
-                )
-                baseline_state = baseline_state_breakdown.total_tax
-                baseline_federal_itemized, _ = self._federal_itemized_deduction(
-                    current_year,
-                    baseline_ordinary,
-                    baseline_state,
-                    tax_config,
-                    federal_mortgage_interest,
-                    inflation_rate=inflation,
-                )
-                baseline_federal_deduction = std_deduction
-                if baseline_federal_itemized is not None:
-                    baseline_federal_deduction = self._select_deduction(
-                        tax_config.get("federal_deduction_method", "greater_of"),
-                        self._get_federal_standard_deduction(tax_config),
-                        baseline_federal_itemized,
-                    )[0]
-                baseline_taxable = max(
-                    0, baseline_ordinary - baseline_federal_deduction,
-                )
-                baseline_federal = self.compute_federal_tax(
-                    baseline_taxable, filing_status, brackets,
-                ).total_federal_tax
-                baseline_fica = self.compute_fica(taxable_earned, filing_status)
-                prepaid_tax = baseline_federal + baseline_state + baseline_fica
+            # An explicit projected-cash amount is net of withholding. Credit
+            # only the dollars actually removed from that source, rather than
+            # declaring the household's whole computed liability prepaid.
+            # Any calculated liability above the implied withholding remains
+            # an outflow; excess withholding is conservatively not refunded.
+            prepaid_tax = prepaid_withholding
 
             # Fixed-point gross-up: taxes on an extra traditional withdrawal
             # themselves require another (smaller) withdrawal. Iterate until

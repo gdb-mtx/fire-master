@@ -268,6 +268,8 @@ export function useUpdateFireConfig() {
       patchJSON<FireConfig>(`${BASE}/fire/config`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["retirement"] });
+      queryClient.invalidateQueries({ queryKey: ["tax"] });
     },
   });
 }
@@ -365,6 +367,8 @@ export function useCreateIncomeSource() {
       postJSON<IncomeSource>(`${BASE}/fire/income`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["retirement"] });
+      queryClient.invalidateQueries({ queryKey: ["tax"] });
     },
   });
 }
@@ -376,6 +380,8 @@ export function useUpdateIncomeSource() {
       putJSON<IncomeSource>(`${BASE}/fire/income/${id}`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["retirement"] });
+      queryClient.invalidateQueries({ queryKey: ["tax"] });
     },
   });
 }
@@ -387,6 +393,8 @@ export function useDeleteIncomeSource() {
       fetchJSON(`${BASE}/fire/income/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["retirement"] });
+      queryClient.invalidateQueries({ queryKey: ["tax"] });
     },
   });
 }

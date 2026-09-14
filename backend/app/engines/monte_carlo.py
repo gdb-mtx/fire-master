@@ -243,6 +243,19 @@ class MonteCarloEngine:
         )
         events_by_year = cashflow_by_year(cf_by_month, total_years)
 
+        # The simulation runs in rolling 12-month periods beginning today,
+        # while the tax plan is keyed to calendar years. Allocate each annual
+        # tax bill across its months before collapsing it into projection
+        # years. Applying all of the current calendar year's tax to year 0
+        # front-loaded a full tax bill even when only a few months remained.
+        tax_funding_by_projection_year: list[float] = []
+        for yr in range(total_years):
+            projected_tax = 0.0
+            for m in range(12):
+                current = today + relativedelta(months=yr * 12 + m)
+                projected_tax += tax_funding_by_year.get(current.year, 0.0) / 12
+            tax_funding_by_projection_year.append(projected_tax)
+
         # Starting age for spending-phase lookup
         start_age = fire_engine._compute_age(config, today) if config.date_of_birth else 30
 
@@ -284,7 +297,7 @@ class MonteCarloEngine:
                     yr_spending += (
                         _healthcare_monthly_cents_at_age(config, age) * 12 / 100
                     )
-                yr_spending += tax_funding_by_year.get(today.year + yr, 0.0)
+                yr_spending += tax_funding_by_projection_year[yr]
 
                 # Income: flat real, from the shared per-year precompute
                 yr_income = income_by_year[yr]

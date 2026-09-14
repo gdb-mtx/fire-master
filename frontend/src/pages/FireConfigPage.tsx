@@ -765,7 +765,8 @@ export default function FireConfigPage() {
           <p className="text-xs text-[var(--text-secondary)] mb-4">
             Use dated phases to model a future pay cut: give the current phase an end date,
             then add the lower-income phase with the following start date. Gross income feeds
-            the tax page; projected cash flow is what the retirement forecasts can invest.
+            the tax calculation. If you enter observed take-home cash, the difference from gross
+            is credited as tax already withheld. Leave it equal to gross to calculate tax separately.
           </p>
 
           {/* Existing sources */}
@@ -784,7 +785,7 @@ export default function FireConfigPage() {
                       <div className="text-sm font-mono text-[var(--green)]">{formatCurrency(src.annual_amount)}/yr gross</div>
                       {src.projection_annual_amount !== src.annual_amount && (
                         <div className="text-[10px] text-[var(--text-secondary)]">
-                          {formatCurrency(src.projection_annual_amount)}/yr used for cash-flow projections
+                          {formatCurrency(src.projection_annual_amount)}/yr cash available; difference treated as withholding
                         </div>
                       )}
                     </div>
@@ -818,8 +819,8 @@ export default function FireConfigPage() {
               <input type="number" value={incomeForm.annual_amount} onChange={(e) => setIncomeForm(f => ({ ...f, annual_amount: e.target.value }))} placeholder="0" className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>Projected Cash Flow ($)</label>
-              <input type="number" value={incomeForm.projection_annual_amount} onChange={(e) => setIncomeForm(f => ({ ...f, projection_annual_amount: e.target.value }))} placeholder="Defaults to gross" className={inputCls} />
+              <label className={labelCls}>Cash Available to Projection ($)</label>
+              <input type="number" value={incomeForm.projection_annual_amount} onChange={(e) => setIncomeForm(f => ({ ...f, projection_annual_amount: e.target.value }))} placeholder="Equal to gross = calculate tax separately" className={inputCls} />
             </div>
             <div>
               <label className={labelCls}>Start Date</label>

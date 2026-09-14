@@ -37,7 +37,7 @@ def frozen_today_mc():
 @contextmanager
 def _mc_env(
     config, *, net_worth=1_500_000.0, spending_cents=15_300_000,
-    income_sources=(), events=(), accounts=None,
+    income_sources=(), events=(), accounts=None, tax_funding_by_year=None,
 ):
     """Patch every DB touchpoint the MC engine reaches through its sub-engines."""
     if accounts is None:
@@ -67,6 +67,10 @@ def _mc_env(
         stack.enter_context(patch.object(
             TaxEngine, "get_accounts_by_tax_treatment",
             AsyncMock(return_value=accounts)))
+        if tax_funding_by_year is not None:
+            stack.enter_context(patch.object(
+                FireProjectionsEngine, "_get_tax_funding_by_year",
+                AsyncMock(return_value=tax_funding_by_year)))
         yield
 
 
@@ -233,6 +237,32 @@ class TestDepletion:
 
         assert result.success_rate == 0
         assert result.percentile_curves[1].p50 < 0
+
+    async def test_calendar_year_taxes_are_aligned_to_rolling_projection_year(
+        self, frozen_today_mc,
+    ):
+        config = _make_fire_config(
+            social_security_monthly=0,
+            healthcare_monthly_cost=None,
+            expected_annual_return=0,
+            expected_inflation_rate=0,
+            custom_assumptions={
+                "monte_carlo": {"return_std": 0, "inflation_std": 0},
+                "sepp": {"sepp_monthly": 0},
+            },
+        )
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            config,
+            net_worth=100_000,
+            spending_cents=0,
+            tax_funding_by_year={2026: 120_000, 2027: 0},
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        # Apr-Dec is nine of the twelve months in calendar 2026. Jan-Mar 2027
+        # carries no tax, so the first rolling projection year funds $90K.
+        assert result.percentile_curves[1].p50 == pytest.approx(10_000, abs=1)
 
     async def test_sepp_only_unlocks_configured_payment(
         self, base_fire_config, frozen_today_mc,

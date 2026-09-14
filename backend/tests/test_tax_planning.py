@@ -433,7 +433,7 @@ class TestWithdrawalSequence:
         assert year.taxes_funded == pytest.approx(year.total_tax, abs=0.02)
         assert year.net_spendable == pytest.approx(year.spending_need, abs=0.05)
 
-    async def test_net_salary_withholding_is_not_funded_twice(
+    async def test_net_salary_credits_only_implied_withholding(
         self, base_fire_config, frozen_today_tax,
     ):
         base_fire_config.healthcare_monthly_cost = None
@@ -441,7 +441,7 @@ class TestWithdrawalSequence:
         base_fire_config.target_retirement_age = 60
         base_fire_config.custom_assumptions["tax"]["fund_taxes_from_withdrawals"] = True
         salary = _income_source("Gross salary", IncomeType.SALARY, 200_000)
-        salary.custom_data = {"net_annual_amount": 15_000_000}
+        salary.custom_data = {"net_annual_amount": 19_000_000}
         engine = _make_planning_engine(deferred=1_000_000, income_sources=[salary])
 
         with _patch_config(base_fire_config):
@@ -451,8 +451,32 @@ class TestWithdrawalSequence:
 
         year = plan.years[0]
         assert year.from_deferred == 0
-        assert year.taxes_funded == 0
-        assert year.net_spendable == pytest.approx(150_000)
+        assert year.taxes_funded == pytest.approx(year.total_tax - 10_000, abs=0.02)
+        assert year.net_spendable == pytest.approx(190_000 - year.taxes_funded, abs=0.05)
+
+    async def test_one_net_source_does_not_prepay_tax_for_another_source(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.target_annual_spending = 12_000_000
+        base_fire_config.target_retirement_age = 60
+        base_fire_config.custom_assumptions["tax"]["fund_taxes_from_withdrawals"] = True
+        net_salary = _income_source("Net salary", IncomeType.SALARY, 200_000)
+        net_salary.custom_data = {"net_annual_amount": 15_000_000}
+        gross_bonus = _income_source("Gross bonus", IncomeType.BONUS, 200_000)
+        engine = _make_planning_engine(
+            deferred=1_000_000,
+            income_sources=[net_salary, gross_bonus],
+        )
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.taxes_funded == pytest.approx(year.total_tax - 50_000, abs=0.02)
+        assert year.taxes_funded > 0
 
     async def test_waterfall_order_taxable_first(self, base_fire_config, frozen_today_tax):
         base_fire_config.healthcare_monthly_cost = None
