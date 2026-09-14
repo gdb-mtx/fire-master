@@ -1,12 +1,12 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 # Install system dependencies for asyncpg and psycopg2
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Pin the build tool instead of executing whatever `latest` points to.
+COPY --from=ghcr.io/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500 /uv /uvx /bin/
 
 WORKDIR /app/backend
 
@@ -16,11 +16,12 @@ WORKDIR /app/backend
 # (no-bind-mount) docker-compose.public.yml needs for its first-run demo seed.
 # A root .dockerignore keeps the rest of the repo (frontend, .git, venvs, secrets) out.
 
-# Copy dependency files first for layer caching
-COPY backend/pyproject.toml backend/uv.lock* ./
+# The lockfile is required: image builds must use the dependency graph reviewed
+# and committed with this source tree.
+COPY backend/pyproject.toml backend/uv.lock ./
 
-# Install dependencies
-RUN uv sync --frozen --no-dev 2>/dev/null || uv sync
+# Never fall back to resolving a new dependency graph during an image build.
+RUN uv sync --frozen --no-dev
 
 # Application code into /app/backend, plus the seed scripts and config the demo seed
 # reads. scripts/seed_*.py expect <repo>/backend as a sibling dir — here that's

@@ -3,7 +3,7 @@
 # Most users should run `docker compose up` (see README "Quick start").
 # This runs Postgres/Redis in Docker but the backend, Celery worker, and frontend
 # directly on the host via uv/npm, for fast hot-reload during development.
-# Requires: uv, Node 18+, bash (macOS/Linux/WSL2). Usage: ./scripts/start.sh
+# Requires: uv, Node 22.22+, bash (macOS/Linux/WSL2). Usage: ./scripts/start.sh
 
 set -e
 

@@ -100,7 +100,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.prod
     image: firemaster-frontend-prod:local
-    # No host port: only Caddy reaches frontend:80.
+    # No host port: only Caddy reaches the unprivileged nginx listener on frontend:8080.
     depends_on:
       - backend
     restart: unless-stopped

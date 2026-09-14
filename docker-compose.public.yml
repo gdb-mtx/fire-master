@@ -33,8 +33,7 @@
 services:
   postgres:
     image: postgres:16-alpine
-    ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    # Internal only: the containerized app does not need a host database port.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-firemaster}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-firemaster}
@@ -49,8 +48,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "${REDIS_HOST_PORT:-6379}:6379"
+    # Internal only: Redis has no password and must not be published to the host.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -80,7 +78,7 @@ services:
   backend:
     image: ghcr.io/gdb-mtx/firemaster-backend:latest
     ports:
-      - "${BACKEND_HOST_PORT:-8000}:8000"
+      - "127.0.0.1:${BACKEND_HOST_PORT:-8000}:8000"
     volumes:
       - ./backend/.env:/app/backend/.env   # runtime secrets (see header); NOT env_file
       - monarch_session:/data              # persists the Monarch session across restarts; shared with celery
@@ -145,7 +143,7 @@ services:
   frontend:
     image: ghcr.io/gdb-mtx/firemaster-frontend:latest
     ports:
-      - "${FRONTEND_HOST_PORT:-5173}:5173"
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-5173}:5173"
     environment:
       # The Vite dev server proxies /api SERVER-SIDE (inside this container), so it must
       # reach the backend by service name, not localhost.

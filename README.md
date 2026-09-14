@@ -77,6 +77,9 @@ first launch.
 
 > **First run pulls prebuilt multi-arch images from GHCR (~30–60s)**; subsequent `docker compose up` is faster still.
 > (No prebuilt image yet, or offline? `docker compose up --build` builds locally instead.) To update later: `docker compose pull && docker compose up -d`.
+> Published ports bind to `127.0.0.1` by default, so the database, queue, API, and UI are not
+> reachable from other devices on your network. Do not remove that binding or expose this stack
+> directly to the internet.
 > A `migrate` container that shows `Exited (0)` is normal — it applied migrations + seeded the demo, then quit.
 > If `:5432`/`:6379`/`:8000`/`:5173` are already taken, set e.g.
 > `BACKEND_HOST_PORT=8001 FRONTEND_HOST_PORT=5174` before the command. Operational details,
@@ -106,7 +109,7 @@ account enrichment, property rules, and your first FIRE config — in
 ### Contributor / native dev (optional)
 
 Prefer to run the backend and frontend **directly on your machine** for fast hot-reload? That
-path still exists. It needs [uv](https://docs.astral.sh/uv/) and Node 18+ in addition to Docker
+path still exists. It needs [uv](https://docs.astral.sh/uv/) and Node 22.22+ in addition to Docker
 (which still provides Postgres/Redis), and a bash shell (macOS/Linux/WSL2):
 
 ```bash
@@ -115,6 +118,25 @@ path still exists. It needs [uv](https://docs.astral.sh/uv/) and Node 18+ in add
 ```
 
 Both paths share the same database, so you can switch between them freely.
+
+### Build only from your checkout
+
+For a higher-assurance local install, use the local-build overlay. It gives the images distinct
+local names, refuses registry pulls at runtime, requires both dependency lockfiles, and builds
+the exact source currently checked out. The frontend is compiled into a minimal nginx runtime;
+Node, npm, source files, and development dependencies are not present in the running container:
+
+```bash
+touch backend/.env
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml pull postgres redis
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml build --pull
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml run --rm --no-deps backend uv run python -m app.setup
+docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml up --pull never
+```
+
+Run `touch` and setup only on first install. Subsequent starts need only the final command; rebuild
+after reviewing and checking out an update. The standalone base keeps Postgres and Redis entirely
+inside the container network and publishes the web UI and API on localhost only.
 
 ## What's inside
 
@@ -139,7 +161,8 @@ on the native path).
 ## Troubleshooting
 
 - **`Docker daemon is not running`** — start Docker Desktop first and wait for it to finish launching.
-- **Port already in use** — the stack publishes 5432, 6379, 8000, 5173. Remap any of them with the
+- **Port already in use** — the development stack publishes 5432, 6379, 8000, and 5173 on
+  `127.0.0.1` only. Remap any of them with the
   `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT` / `BACKEND_HOST_PORT` / `FRONTEND_HOST_PORT` env vars,
   e.g. `BACKEND_HOST_PORT=8001 docker compose up`.
 - **`migrate` container shows `Exited (0)`** — that's normal; it ran migrations and quit. See

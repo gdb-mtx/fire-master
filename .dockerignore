@@ -36,5 +36,6 @@ frontend/
 .env
 .env.*
 **/.monarch_session
+**/.mm/**
 **/*.log
 **/.DS_Store
