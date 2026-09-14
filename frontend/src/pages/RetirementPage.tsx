@@ -908,6 +908,11 @@ export default function RetirementPage() {
                 </div>
               )}
             </div>
+            <p className="text-[11px] text-[var(--text-secondary)] mb-3">
+              Employment income stops automatically at your retirement date. Total wealth includes
+              home equity and can rise while cash or brokerage balances are being spent whenever
+              investment growth and mortgage paydown exceed withdrawals.
+            </p>
             {wealthProjection && wealthChartData.length > 0 ? (
               <>
                 <div {...wealthWrapperProps}>

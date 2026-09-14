@@ -67,6 +67,15 @@ def _make_engine(
     return engine
 
 
+def _account(role: str, dollars: float, *, is_asset: bool = True):
+    account = MagicMock()
+    account.fire_role = role
+    account.current_balance = round(dollars * 100)
+    account.is_asset = is_asset
+    account.include_in_net_worth = True
+    return account
+
+
 class TestProjectionIncome:
     @pytest.mark.asyncio
     async def test_social_security_uses_main_amount_and_age_once(self, frozen_today):
@@ -165,8 +174,8 @@ class TestKeepBothOptimized:
     @pytest.mark.asyncio
     async def test_final_wealth(self, engine, frozen_today):
         result = await engine.project_wealth_pools(end_age=82)
-        assert abs(result.total_at_end - 2_370_000) < TOLERANCE, (
-            f"Keep Both total_at_end={result.total_at_end:.0f}, expected ~2,370,000"
+        assert abs(result.total_at_end - 2_265_000) < TOLERANCE, (
+            f"Keep Both total_at_end={result.total_at_end:.0f}, expected ~2,265,000"
         )
 
     @pytest.mark.asyncio
@@ -332,8 +341,8 @@ class TestSpendingOverride:
         engine_2 = _make_engine(config, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources)
         result_default = await engine_2.project_wealth_pools(end_age=82)
 
-        assert abs(result_default.total_at_end - 2_370_000) < TOLERANCE, (
-            f"Default run after override: {result_default.total_at_end:.0f}, expected ~2,370,000"
+        assert abs(result_default.total_at_end - 2_265_000) < TOLERANCE, (
+            f"Default run after override: {result_default.total_at_end:.0f}, expected ~2,265,000"
         )
 
 

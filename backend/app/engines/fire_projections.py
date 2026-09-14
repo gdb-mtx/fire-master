@@ -1218,6 +1218,11 @@ class FireProjectionsEngine:
         today = date.today()
         dob = config.date_of_birth
         current_age = self._compute_age(config, today)
+        default_real_return = (
+            (1 + config.expected_annual_return / 100)
+            / (1 + config.expected_inflation_rate / 100)
+            - 1
+        )
 
         # SEPP / IRA-split assumptions from custom_assumptions (inactive unless configured)
         # ALL RATES ARE REAL (after inflation) — see projection config block below.
@@ -1226,7 +1231,10 @@ class FireProjectionsEngine:
         ira_b_start = sepp_cfg.get("ira_b_balance", 0)
         sepp_monthly = sepp_cfg.get("sepp_monthly", 0)
         sepp_start_month = sepp_cfg.get("sepp_start_month", 0)
-        ira_growth_rate = sepp_cfg.get("ira_growth_rate", 0.06)  # 6% real — investment return assumption (distinct from SEPP's 5% IRS amortization rate)
+        # Unless explicitly overridden for a scenario, every invested pool uses
+        # the main nominal-return assumption converted to real terms. The old
+        # 6-6.5% real defaults materially overstated long-run wealth.
+        ira_growth_rate = sepp_cfg.get("ira_growth_rate", default_real_return)
 
         # LEGACY ("miami_sale") — superseded by custom_assumptions["property_sales"];
         # retained for author back-compat; do not use in new configs.
@@ -1359,7 +1367,9 @@ class FireProjectionsEngine:
         # "property_sales" key — keep byte-for-byte behavior.
         taxable_cfg = (config.custom_assumptions or {}).get("taxable_pool", {})
         taxable = float(taxable_cfg.get("starting_balance", 0) or 0)
-        taxable_rate_m = (taxable_cfg.get("return_rate", 0.065) or 0.0) / 12  # real annual → monthly
+        taxable_rate_m = (
+            taxable_cfg.get("return_rate", default_real_return) or 0.0
+        ) / 12  # real annual → monthly
         property_sales = (config.custom_assumptions or {}).get("property_sales", []) or []
         # use_generic_sales gates ONLY the property-sale mechanics (legacy-vs-generic
         # sale paths, burn deltas, event suppression, markers). It does NOT gate the
