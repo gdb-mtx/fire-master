@@ -225,6 +225,8 @@ class MonteCarloResponse(BaseModel):
     percentile_curves: list[PercentileCurvePoint]
     worst_final_nw: float
     best_final_nw: float
+    starting_spendable_assets: float = 0
+    excluded_non_spendable_assets: float = 0
     # Model disclosure (additive; frontend tolerates absence)
     assumptions: dict | None = None
 

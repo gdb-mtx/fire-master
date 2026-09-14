@@ -220,4 +220,7 @@ export interface MonteCarloResult {
   percentile_curves: PercentileCurvePoint[];
   worst_final_nw: number;
   best_final_nw: number;
+  starting_spendable_assets: number;
+  excluded_non_spendable_assets: number;
+  assumptions?: Record<string, unknown> | null;
 }

@@ -627,8 +627,8 @@ class FireProjectionsEngine:
 
     def _single_pool_event_skip(self, config: FireConfig) -> Callable[[CashflowEvent], bool]:
         """Skip predicate for engines that model ONE undifferentiated net worth
-        (project_lifetime, Monte Carlo). Their starting balance already holds
-        every asset at book value, so a CONVERSION event — a property sale's
+        (currently project_lifetime). Its starting balance already holds every
+        asset at book value, so a CONVERSION event — a property sale's
         proceeds, a private-investment vest — must not be added on top (that
         would count the asset twice). project_wealth_pools partitions those
         assets out and handles the conversion itself; single-pool models drop

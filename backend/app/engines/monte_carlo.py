@@ -4,10 +4,10 @@ REAL-TERMS frame, consistent with project_wealth_pools: the portfolio
 compounds at a stochastic REAL return, and spending/income/SS stay FLAT in
 today's dollars (constant purchasing power; COLA offsets inflation).
 
-Per-year draw:
+Per-year market draw:
   z_r, z_o ~ N(0,1) independent;  z_i = rho*z_r + sqrt(1-rho^2)*z_o
-  r_nom = exp(ln(1+mu_nom) + sigma*z_r) - 1     (lognormal gross growth —
-          median-calibrated: the median path compounds at exactly mu_nom)
+  r_nom = exp(ln(1+mu_nom) - sigma^2/2 + sigma*z_r) - 1
+          (lognormal gross growth calibrated so its arithmetic mean is mu_nom)
   infl  = max(-0.99, mu_i + sigma_i*z_i)         (normal, floored)
   r_real = (1+r_nom)/(1+infl) - 1
 
@@ -25,16 +25,12 @@ dates, growth_rate, per-source retirement cutoff, and the active scenario.
 Income now comes from the shared _income_at_month() helper against the
 EFFECTIVE config, same as project_lifetime.
 
-Third history note (fire-master#16, fixed 2026-09-09): the engine never read
-CashflowEvent, so a plan expressed as dated events (the only way to model two
-earners claiming SS at different ages) simulated a zero-income household.
-Events now flow through the shared build_cashflow_schedule(), collapsed to
-net dollars per year. Conversion events (property-sale proceeds, vests) are
-skipped: this single-pool model already holds those assets at book value.
-
-Known limit: one undifferentiated portfolio — no 59½ gate, no taxable-first
-waterfall, no SEPP — so it cannot measure sequence risk inside a bridge.
-A pool-aware Monte Carlo is a separate piece of work.
+The simulation is pool-aware: success is funded only by cash, taxable,
+traditional-retirement, Roth, and HSA balances. Home equity, 529s, private
+assets, and speculative holdings do not silently fund spending. Traditional
+accounts are age-gated unless Rule of 55 or SEPP is configured. Positive
+cash-flow events can make an excluded asset spendable when a planned sale or
+vest actually occurs.
 
 Overrides via fire_config.custom_assumptions["monte_carlo"]:
   return_std (0.16), inflation_std (0.015), correlation (-0.25).
@@ -91,7 +87,11 @@ def _draw_year(
     z_i = rho * z_r + math.sqrt(1.0 - rho * rho) * z_o
 
     if sigma > 0:
-        r_nom = math.exp(math.log(1.0 + mu_nom) + sigma * z_r) - 1.0
+        # Calibrate the lognormal so E[r_nom] == mu_nom. Centering log returns
+        # directly on log(1+mu_nom) makes the arithmetic mean too high by the
+        # volatility drag term and materially overstates long horizons.
+        log_mean = math.log(1.0 + mu_nom) - (sigma ** 2) / 2
+        r_nom = math.exp(log_mean + sigma * z_r) - 1.0
     else:
         r_nom = mu_nom
     if sigma_i > 0:
@@ -131,13 +131,23 @@ class MonteCarloEngine:
         """
         from app.engines.fire_projections import FireProjectionsEngine
         from app.engines.net_worth import NetWorthEngine
+        from app.engines.tax_engine import TaxEngine
 
         fire_engine = FireProjectionsEngine(self.db)
         config = await fire_engine.get_effective_config(scenario_id)
         nw_engine = NetWorthEngine(self.db)
         nw = await nw_engine.calculate_current()
+        tax_engine = TaxEngine(self.db)
+        accounts = await tax_engine.get_accounts_by_tax_treatment()
 
-        current_nw = nw.net_worth  # dollars
+        starting_cash = accounts.already_taxed_balance
+        starting_taxable = accounts.taxable_balance
+        starting_deferred = accounts.tax_deferred_balance
+        starting_roth = accounts.tax_free_balance
+        starting_spendable = (
+            starting_cash + starting_taxable + starting_deferred + starting_roth
+        )
+        excluded_non_spendable = max(0.0, nw.net_worth - starting_spendable)
         annual_spending_cents = await fire_engine._get_annual_spending(config)
         annual_spending = annual_spending_cents / 100  # flat REAL
         income_sources = await fire_engine._get_income_sources()
@@ -168,19 +178,37 @@ class MonteCarloEngine:
         sigma = mc_cfg.get("return_std", DEFAULT_RETURN_STD)
         sigma_i = mc_cfg.get("inflation_std", DEFAULT_INFLATION_STD)
         rho = mc_cfg.get("correlation", DEFAULT_CORRELATION)
+        assumptions = config.custom_assumptions or {}
+        projection_cfg = assumptions.get("projection", {}) or {}
+        tax_cfg = tax_engine._get_tax_config(config)
+        cash_real_yield = float(tax_cfg.get("cash_yield_rate", 0.0) or 0.0)
+        cash_reserve_months = max(
+            0.0, float(projection_cfg.get("cash_reserve_months", 12) or 0),
+        )
+        penalty_free_age = float(assumptions.get("penalty_free_age", 59.5))
+        rule_of_55_eligible = bool(assumptions.get("rule_of_55_eligible", False))
+        sepp_monthly = float(
+            (assumptions.get("sepp", {}) or {}).get("sepp_monthly", 0) or 0,
+        )
 
         # Social Security and pension (annual dollars, FLAT REAL — COLA
         # offsets inflation, mirroring project_wealth_pools).
+        has_ss_source = any(
+            source.income_type.value == "social_security" for source in income_sources
+        )
         ss_annual = 0.0
-        if config.social_security_monthly:
+        if config.social_security_monthly and not has_ss_source:
             ss_annual = config.social_security_monthly * 12 / 100
         ss_start_year = 0
         if config.date_of_birth:
             ss_start_date = config.date_of_birth + relativedelta(years=config.social_security_start_age)
             ss_start_year = max(0, ss_start_date.year - today.year)
 
+        has_pension_source = any(
+            source.income_type.value == "pension" for source in income_sources
+        )
         pension_annual = 0.0
-        if config.pension_monthly:
+        if config.pension_monthly and not has_pension_source:
             pension_annual = config.pension_monthly * 12 / 100
         pension_start_year = 0
         if config.pension_start_age and config.date_of_birth:
@@ -206,10 +234,12 @@ class MonteCarloEngine:
             income_by_year.append(year_cents / 100)
 
         # Cashflow events: same schedule the projection engines use, net
-        # signed dollars per year (probability-weighted, flat real).
+        # signed dollars per year (probability-weighted, flat real). Unlike the
+        # old total-net-worth model, asset-conversion events are kept: home or
+        # private equity is excluded initially and only becomes spendable when
+        # the configured sale/vest occurs.
         cf_by_month, _ = build_cashflow_schedule(
             cashflow_events, today, total_years * 12,
-            skip=fire_engine._single_pool_event_skip(config),
         )
         events_by_year = cashflow_by_year(cf_by_month, total_years)
 
@@ -221,12 +251,23 @@ class MonteCarloEngine:
         # Run simulations (all values in real dollars)
         runs: list[SimulationRun] = []
         for _ in range(n_runs):
-            nw_val = current_nw
-            yearly_nw: list[float] = [current_nw]
+            cash = starting_cash
+            taxable = starting_taxable
+            deferred = starting_deferred
+            roth = starting_roth
+            yearly_nw: list[float] = [starting_spendable]
             money_lasted = True
 
             for yr in range(total_years):
                 r_real, _infl = _draw_year(rng, mu_nom, sigma, mu_i, sigma_i, rho)
+
+                # Only invested, spendable accounts receive the stochastic
+                # market return. Home equity, 529s, private assets, and other
+                # non-spendable balances are not part of this solvency test.
+                taxable = max(0.0, taxable * (1 + r_real))
+                deferred = max(0.0, deferred * (1 + r_real))
+                roth = max(0.0, roth * (1 + r_real))
+                cash = max(0.0, cash * (1 + cash_real_yield))
 
                 age = start_age + yr
                 is_retired = yr >= years_to_retirement
@@ -252,19 +293,75 @@ class MonteCarloEngine:
                 if yr >= pension_start_year:
                     yr_income += pension_annual
 
-                net_cash = yr_income - yr_spending + events_by_year[yr]
-                nw_val = nw_val * (1 + r_real) + net_cash
-                yearly_nw.append(round(nw_val, 2))
+                event_cashflow = events_by_year[yr]
+                net_cash = yr_income - yr_spending + event_cashflow
+                if net_cash >= 0:
+                    cash += net_cash
+                    # Keep the configured operating reserve in cash; invest
+                    # additional savings into the taxable bridge pool so they
+                    # experience the same sequence risk as the portfolio.
+                    reserve = max(
+                        0.0,
+                        max(0.0, yr_spending - yr_income - max(0.0, event_cashflow))
+                        * cash_reserve_months / 12,
+                    )
+                    if cash > reserve:
+                        taxable += cash - reserve
+                        cash = reserve
+                    remaining_need = 0.0
+                else:
+                    remaining_need = -net_cash
+                    reserve = remaining_need * cash_reserve_months / 12
 
-                if nw_val < 0:
+                    cash_above_reserve = max(0.0, cash - reserve)
+                    draw = min(remaining_need, cash_above_reserve)
+                    cash -= draw
+                    remaining_need -= draw
+
+                    draw = min(remaining_need, taxable)
+                    taxable -= draw
+                    remaining_need -= draw
+
+                    traditional_accessible = age >= penalty_free_age or (
+                        rule_of_55_eligible and age >= 55
+                    )
+                    # A 72(t)/SEPP election makes only its scheduled payment
+                    # available, not the household's entire deferred balance.
+                    deferred_limit = (
+                        deferred if traditional_accessible else sepp_monthly * 12
+                    )
+                    if deferred_limit > 0:
+                        draw = min(remaining_need, deferred, deferred_limit)
+                        deferred -= draw
+                        remaining_need -= draw
+
+                    # Roth contribution basis is not tracked separately. Treat
+                    # the aggregate Roth/HSA bucket as locked before 59½ rather
+                    # than optimistically assuming every dollar is accessible.
+                    if age >= penalty_free_age:
+                        draw = min(remaining_need, roth)
+                        roth -= draw
+                        remaining_need -= draw
+
+                    draw = min(remaining_need, cash)
+                    cash -= draw
+                    remaining_need -= draw
+
+                portfolio_value = cash + taxable + deferred + roth
+                if remaining_need > 0.01:
                     money_lasted = False
-                    # Pad remaining years with the breach value
+                    # A negative point represents the unfunded annual need. In
+                    # a bridge failure, locked retirement assets may still
+                    # exist but cannot legally fund spending in that year.
+                    portfolio_value = -remaining_need
+                    yearly_nw.append(round(portfolio_value, 2))
                     for _ in range(yr + 1, total_years):
-                        yearly_nw.append(round(nw_val, 2))
+                        yearly_nw.append(round(portfolio_value, 2))
                     break
+                yearly_nw.append(round(portfolio_value, 2))
 
             runs.append(SimulationRun(
-                final_net_worth=round(nw_val, 2),
+                final_net_worth=round(yearly_nw[-1], 2),
                 money_lasted=money_lasted,
                 yearly_net_worths=yearly_nw,
             ))
@@ -301,14 +398,24 @@ class MonteCarloEngine:
             percentile_curves=curves,
             worst_final_nw=round(finals[0], 2),
             best_final_nw=round(finals[-1], 2),
+            starting_spendable_assets=round(starting_spendable, 2),
+            excluded_non_spendable_assets=round(excluded_non_spendable, 2),
             assumptions={
                 "frame": "real (today's dollars); spending/income/SS flat real",
-                "return_model": f"lognormal gross growth, median {mu_nom:.2%} nominal, sigma {sigma:.2%}",
+                "return_model": f"lognormal gross growth, mean {mu_nom:.2%} nominal, sigma {sigma:.2%}",
                 "inflation_model": f"normal, mean {mu_i:.2%}, sigma {sigma_i:.2%}, corr {rho:+.2f} with returns",
                 "real_return": "(1+r_nom)/(1+inflation) - 1 per year",
+                "success": "cash, taxable, and age-accessible retirement assets fund every modeled year",
+                "early_access": "traditional accounts are age-gated; SEPP access is capped at the configured annual payment; Roth/HSA is conservatively locked before 59.5 because contribution basis is unavailable",
+                "excluded_assets": "home equity, 529s, private investments, and speculative assets unless a dated conversion event makes them spendable",
+                "taxes": (
+                    "projected federal and state taxes included from the expected-path withdrawal schedule; taxes are not recalculated within each random path"
+                    if tax_cfg.get("fund_taxes_from_withdrawals", False)
+                    else "withdrawal taxes are not added to spending"
+                ),
                 "cashflow_events": (
                     f"{len(cashflow_events)} planned/confirmed events applied "
-                    "(probability-weighted; conversion events skipped — assets already in net worth)"
+                    "(probability-weighted, including configured asset conversions)"
                 ),
                 "seed": seed,
             },

@@ -4,26 +4,14 @@ import {
   useBracketAnalysis,
   useWithdrawalPlan,
   useRothConversionPlan,
-  useMonteCarlo,
   useSeppCalculator,
   useFireConfig,
   useUpdateFireConfig,
 } from "../api/queries";
 import type { SeppParams } from "../api/queries";
 import Layout from "../components/Layout";
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-  ReferenceLine,
-} from "recharts";
 import type { BracketDetail } from "../types/tax";
-import { formatCurrency as fmt, fmtCompact, fmtAxis, fmtPct } from "../utils/formatting";
-import { TOOLTIP_STYLE } from "../utils/theme";
+import { formatCurrency as fmt, fmtCompact, fmtPct } from "../utils/formatting";
 
 // ---------------------------------------------------------------------------
 // Shared components
@@ -461,27 +449,8 @@ export default function TaxPlanningPage() {
   const { data: brackets, isLoading: loadingBrackets } = useBracketAnalysis();
   const { data: withdrawal } = useWithdrawalPlan(30);
   const { data: roth } = useRothConversionPlan(0.22);
-  const { data: monteCarlo, isLoading: loadingMC } = useMonteCarlo(1000);
 
-  const isLoading = loadingBrackets || loadingMC;
-
-  // Monte Carlo fan chart data — transform percentile curves for Recharts
-  const fanChartData = useMemo(() => {
-    if (!monteCarlo?.percentile_curves) return [];
-    return monteCarlo.percentile_curves.map((p) => ({
-      age: Math.round(p.age),
-      p10: p.p10,
-      p25: p.p25,
-      p50: p.p50,
-      p75: p.p75,
-      p90: p.p90,
-      // Bands for stacking: each band = difference between adjacent percentiles
-      band_10_25: Math.max(0, p.p25 - p.p10),
-      band_25_50: Math.max(0, p.p50 - p.p25),
-      band_50_75: Math.max(0, p.p75 - p.p50),
-      band_75_90: Math.max(0, p.p90 - p.p75),
-    }));
-  }, [monteCarlo]);
+  const isLoading = loadingBrackets;
 
   if (isLoading || !brackets) {
     return (
@@ -492,13 +461,6 @@ export default function TaxPlanningPage() {
       </Layout>
     );
   }
-
-  const successColor =
-    (monteCarlo?.success_rate ?? 0) >= 85
-      ? "var(--green)"
-      : (monteCarlo?.success_rate ?? 0) >= 70
-        ? "var(--yellow)"
-        : "var(--red)";
 
   return (
     <Layout>
@@ -536,7 +498,7 @@ export default function TaxPlanningPage() {
         </div>
 
         {/* Stat Cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <StatCard
             label="Total Tax"
             value={fmt(brackets.total_tax)}
@@ -555,132 +517,12 @@ export default function TaxPlanningPage() {
             color="var(--blue)"
             sub={`Until ${brackets.bracket_room.next_rate ? fmtPct(brackets.bracket_room.next_rate) : "top"} bracket`}
           />
-          <StatCard
-            label="Monte Carlo"
-            value={monteCarlo ? `${monteCarlo.success_rate}%` : "—"}
-            color={successColor}
-            sub={monteCarlo ? `${monteCarlo.total_runs.toLocaleString()} simulations` : "Loading..."}
-          />
         </div>
 
-        {/* Two-column: Monte Carlo + Brackets */}
+        {/* Tax detail cards */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Monte Carlo Fan Chart */}
-          <div className="lg:col-span-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-medium text-[var(--text-secondary)]">
-                Monte Carlo Simulation
-              </h3>
-              {monteCarlo && (
-                <div className="flex items-center gap-2">
-                  <span
-                    className="text-lg font-bold font-mono"
-                    style={{ color: successColor }}
-                  >
-                    {monteCarlo.success_rate}%
-                  </span>
-                  <span className="text-xs text-[var(--text-secondary)]">success</span>
-                </div>
-              )}
-            </div>
-
-            {fanChartData.length > 0 ? (
-              <>
-                <ResponsiveContainer width="100%" height={380}>
-                  <AreaChart
-                    data={fanChartData}
-                    margin={{ top: 10, right: 10, left: 10, bottom: 0 }}
-                  >
-                    <defs>
-                      <linearGradient id="gradBand10" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#b04a56" stopOpacity={0.25} />
-                        <stop offset="100%" stopColor="#b04a56" stopOpacity={0.05} />
-                      </linearGradient>
-                      <linearGradient id="gradBand25" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#a07d1a" stopOpacity={0.25} />
-                        <stop offset="100%" stopColor="#a07d1a" stopOpacity={0.05} />
-                      </linearGradient>
-                      <linearGradient id="gradBand50" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#2e8b6e" stopOpacity={0.3} />
-                        <stop offset="100%" stopColor="#2e8b6e" stopOpacity={0.05} />
-                      </linearGradient>
-                      <linearGradient id="gradBand75" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#3d6e9e" stopOpacity={0.25} />
-                        <stop offset="100%" stopColor="#3d6e9e" stopOpacity={0.05} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(42,42,62,0.5)" />
-                    <XAxis
-                      dataKey="age"
-                      stroke="#5c5c6a"
-                      tick={{ fontSize: 11, fill: "#5c5c6a" }}
-                      tickFormatter={(v) => `${v}`}
-                    />
-                    <YAxis
-                      stroke="#5c5c6a"
-                      tick={{ fontSize: 11, fill: "#5c5c6a" }}
-                      tickFormatter={fmtAxis}
-                      width={65}
-                    />
-                    <Tooltip
-                      {...TOOLTIP_STYLE}
-                      labelFormatter={(age) => `Age ${age}`}
-                      formatter={(value, name) => {
-                        const labels: Record<string, string> = {
-                          p10: "10th %ile",
-                          p25: "25th %ile",
-                          p50: "Median",
-                          p75: "75th %ile",
-                          p90: "90th %ile",
-                        };
-                        return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
-                      }}
-                    />
-                    <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.6} />
-
-                    {/* Stacked bands: base = p10, then bands on top */}
-                    <Area type="monotone" dataKey="p10" stackId="fan" stroke="none" fill="url(#gradBand10)" />
-                    <Area type="monotone" dataKey="band_10_25" stackId="fan" stroke="none" fill="url(#gradBand10)" />
-                    <Area type="monotone" dataKey="band_25_50" stackId="fan" stroke="none" fill="url(#gradBand25)" />
-                    <Area type="monotone" dataKey="band_50_75" stackId="fan" stroke="none" fill="url(#gradBand50)" />
-                    <Area type="monotone" dataKey="band_75_90" stackId="fan" stroke="none" fill="url(#gradBand75)" />
-
-                    {/* Median line */}
-                    <Area type="monotone" dataKey="p50" stackId="none" stroke="var(--green)" strokeWidth={2} fill="none" dot={false} />
-                  </AreaChart>
-                </ResponsiveContainer>
-
-                {/* Percentile summary row */}
-                {monteCarlo && (
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4 pt-4 border-t border-[var(--border)]">
-                    {[
-                      { label: "Worst 10%", value: monteCarlo.percentile_10, color: "var(--red)" },
-                      { label: "25th %ile", value: monteCarlo.percentile_25, color: "var(--yellow)" },
-                      { label: "Median", value: monteCarlo.percentile_50, color: "var(--green)" },
-                      { label: "75th %ile", value: monteCarlo.percentile_75, color: "var(--blue)" },
-                      { label: "Best 10%", value: monteCarlo.percentile_90, color: "var(--blue)" },
-                    ].map((p) => (
-                      <div key={p.label} className="text-center">
-                        <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
-                          {p.label}
-                        </span>
-                        <div className="text-sm font-mono font-bold mt-0.5" style={{ color: p.color }}>
-                          {fmtCompact(p.value)}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="flex items-center justify-center h-[380px] text-[var(--text-secondary)] text-sm">
-                {loadingMC ? "Running simulations..." : "Configure FIRE settings to run Monte Carlo."}
-              </div>
-            )}
-          </div>
-
           {/* Bracket Visualization + ACA */}
-          <div className="space-y-6">
+          <div className="lg:col-span-3 grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
               <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-4">
                 Federal Tax Brackets

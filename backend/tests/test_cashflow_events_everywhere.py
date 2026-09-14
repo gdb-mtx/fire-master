@@ -12,7 +12,8 @@ _recurring_events_active_now() helpers. These tests pin:
 - the schedule expansion rules (calendar offsets, recurrence phase, inclusive
   end month, past one-offs dropped, skip predicate);
 - kirvin's reproduction: an events-only plan in Monte Carlo at zero
-  volatility must match the same plan expressed as an IncomeSource;
+  volatility must match the same plan expressed as an IncomeSource, and a
+  dated conversion makes an otherwise excluded asset spendable;
 - project_lifetime uses the declared plan (no trailing-income fallback when
   events exist) and skips conversion events it already holds at book value;
 - bridge status counts recurring events active this month;
@@ -33,6 +34,7 @@ from app.engines.fire_projections import (
 )
 from app.engines.monte_carlo import MonteCarloEngine
 from app.engines.net_worth import NetWorthEngine
+from app.engines.tax_engine import AccountsByTaxTreatment
 from app.models.cashflow_event import CashflowEvent
 from app.models.enums import IncomeType
 from app.models.income_source import IncomeSource
@@ -143,16 +145,21 @@ class TestMonteCarloEvents:
         assert r_nothing.success_rate == 0.0  # the pre-fix answer for the event plan
         assert "events applied" in r_events.assumptions["cashflow_events"]
 
-    async def test_conversion_events_are_skipped(self, frozen_today_mc):
-        """A vest / sale event converts an asset already in net worth — a
-        single-pool model must not add it on top."""
+    async def test_conversion_events_make_excluded_assets_spendable(self, frozen_today_mc):
+        """The pool-aware model excludes private assets initially, then makes
+        their proceeds spendable only when the configured vest occurs."""
         engine = MonteCarloEngine(db=None)
         vest = _event("Startup A vests", "income", 50_000_000, date(2028, 4, 1))
-        with _mc_env(self._cfg(), net_worth=1_000_000.0, events=[vest]):
+        taxable = MagicMock(current_balance=100_000_000)
+        accounts = AccountsByTaxTreatment(taxable=[taxable])
+        with _mc_env(
+            self._cfg(), net_worth=1_500_000.0, accounts=accounts, events=[vest],
+        ):
             r_vest = await engine.run_simulation(n_runs=5, seed=1)
-        with _mc_env(self._cfg(), net_worth=1_000_000.0):
+        with _mc_env(self._cfg(), net_worth=1_500_000.0, accounts=accounts):
             r_none = await engine.run_simulation(n_runs=5, seed=1)
-        assert r_vest.percentile_50 == r_none.percentile_50
+        assert r_vest.excluded_non_spendable_assets == 500_000
+        assert r_vest.percentile_50 > r_none.percentile_50
 
 
 # ---------------------------------------------------------------------------

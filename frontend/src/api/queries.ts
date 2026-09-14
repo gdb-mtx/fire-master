@@ -518,11 +518,11 @@ export function useRothConversionPlan(targetBracket: number = 0.22) {
   });
 }
 
-export function useMonteCarlo(runs: number = 1000) {
+export function useMonteCarlo(runs: number = 1000, seed: number = 42) {
   return useQuery({
-    queryKey: ["tax", "monte-carlo", runs],
+    queryKey: ["retirement", "monte-carlo", runs, seed],
     queryFn: () =>
-      fetchJSON<MonteCarloResult>(`${BASE}/tax/monte-carlo?runs=${runs}`),
+      fetchJSON<MonteCarloResult>(`${BASE}/tax/monte-carlo?runs=${runs}&seed=${seed}`),
   });
 }
 

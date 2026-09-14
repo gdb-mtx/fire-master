@@ -8,6 +8,7 @@ import {
   useFireTimeline,
   useIncomeSources,
   useMilestones,
+  useMonteCarlo,
   useScenarios,
   useSpendingSensitivity,
   useWealthProjection,
@@ -420,6 +421,7 @@ export default function RetirementPage() {
   const { data: bridge } = useBridgeStatus();
   const { data: sensitivity } = useSpendingSensitivity();
   const { data: incomeSources } = useIncomeSources();
+  const { data: monteCarlo, isLoading: loadingMC } = useMonteCarlo(1000);
   const grossEmploymentIncome = (incomeSources ?? [])
     .filter((source) => ["salary", "bonus", "side_hustle"].includes(source.income_type))
     .reduce((total, source) => total + source.annual_amount, 0);
@@ -458,6 +460,22 @@ export default function RetirementPage() {
       })),
     [wealthProjection],
   );
+
+  const fanChartData = useMemo(() => {
+    if (!monteCarlo?.percentile_curves) return [];
+    return monteCarlo.percentile_curves.map((p) => ({
+      age: Math.round(p.age),
+      p10: p.p10,
+      p25: p.p25,
+      p50: p.p50,
+      p75: p.p75,
+      p90: p.p90,
+      band_10_25: Math.max(0, p.p25 - p.p10),
+      band_25_50: Math.max(0, p.p50 - p.p25),
+      band_50_75: Math.max(0, p.p75 - p.p50),
+      band_75_90: Math.max(0, p.p90 - p.p75),
+    }));
+  }, [monteCarlo]);
 
   const wealthMarkerGroups = useMemo<EventMarkerGroup[]>(() => {
     if (!wealthProjection || wealthChartData.length === 0) return [];
@@ -504,6 +522,12 @@ export default function RetirementPage() {
   const breakdown = fireNum.net_worth_breakdown;
   const accessibleNW = fireNum.accessible_net_worth;
   const accessiblePct = fireNum.accessible_progress_pct;
+  const successColor =
+    (monteCarlo?.success_rate ?? 0) >= 90
+      ? "var(--green)"
+      : (monteCarlo?.success_rate ?? 0) >= 75
+        ? "var(--yellow)"
+        : "var(--red)";
 
   return (
     <Layout>
@@ -889,6 +913,90 @@ export default function RetirementPage() {
               </div>
             )}
           </div>
+
+        {/* Pool-aware Monte Carlo */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
+          <div className="flex items-start justify-between gap-4 mb-2">
+            <div>
+              <h3 className="text-sm font-medium text-[var(--text-secondary)]">
+                Retirement Monte Carlo
+              </h3>
+              <p className="text-[11px] text-[var(--text-secondary)] mt-1 max-w-3xl">
+                Success means cash, taxable investments, and age-accessible retirement accounts
+                fund every modeled year. Home equity, 529s, private investments, and speculative
+                assets are excluded unless a dated sale or vest makes them spendable.
+              </p>
+            </div>
+            {monteCarlo && (
+              <div className="text-right shrink-0">
+                <div className="text-xl font-bold font-mono" style={{ color: successColor }}>
+                  {monteCarlo.success_rate}%
+                </div>
+                <div className="text-[10px] text-[var(--text-secondary)]">
+                  of {monteCarlo.total_runs.toLocaleString()} simulations
+                </div>
+              </div>
+            )}
+          </div>
+
+          {fanChartData.length > 0 ? (
+            <>
+              <ResponsiveContainer width="100%" height={360}>
+                <ComposedChart data={fanChartData} margin={{ top: 10, right: 10, left: 10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(42,42,62,0.5)" />
+                  <XAxis dataKey="age" stroke="#5c5c6a" tick={{ fontSize: 11, fill: "#5c5c6a" }} />
+                  <YAxis stroke="#5c5c6a" tick={{ fontSize: 11, fill: "#5c5c6a" }} tickFormatter={fmtAxis} width={65} />
+                  <Tooltip
+                    {...TOOLTIP_STYLE}
+                    labelFormatter={(age) => `Age ${age}`}
+                    formatter={(value, name) => {
+                      const labels: Record<string, string> = {
+                        p10: "10th percentile",
+                        p50: "Median",
+                        p90: "90th percentile",
+                      };
+                      return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
+                    }}
+                  />
+                  <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.6} />
+                  <Line type="monotone" dataKey="p10" stroke="var(--red)" strokeWidth={1.5} dot={false} />
+                  <Line type="monotone" dataKey="p50" stroke="var(--green)" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="p90" stroke="var(--blue)" strokeWidth={1.5} dot={false} />
+                </ComposedChart>
+              </ResponsiveContainer>
+              {monteCarlo && (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4 pt-4 border-t border-[var(--border)]">
+                    {[
+                      { label: "Starting spendable", value: monteCarlo.starting_spendable_assets, color: "var(--text-primary)" },
+                      { label: "Excluded net assets", value: monteCarlo.excluded_non_spendable_assets, color: "var(--text-secondary)" },
+                      { label: "10th percentile", value: monteCarlo.percentile_10, color: "var(--red)" },
+                      { label: "Median ending", value: monteCarlo.percentile_50, color: "var(--green)" },
+                      { label: "90th percentile", value: monteCarlo.percentile_90, color: "var(--blue)" },
+                    ].map((item) => (
+                      <div key={item.label} className="text-center">
+                        <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">{item.label}</span>
+                        <div className="text-sm font-mono font-bold mt-0.5" style={{ color: item.color }}>
+                          {fmtCompact(item.value)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-3">
+                    The configured return is the long-run arithmetic mean, not the median outcome.
+                    A fixed set of random paths is reused so settings comparisons do not bounce
+                    around. Projected federal and state taxes are included, using the expected-path
+                    withdrawal schedule rather than recalculating taxes inside every random path.
+                  </p>
+                </>
+              )}
+            </>
+          ) : (
+            <div className="flex items-center justify-center h-[360px] text-[var(--text-secondary)] text-sm">
+              {loadingMC ? "Running retirement simulations..." : "Configure FIRE settings to run Monte Carlo."}
+            </div>
+          )}
+        </div>
 
         {/* Milestone Timeline */}
         {milestones && milestones.milestones.length > 0 && (

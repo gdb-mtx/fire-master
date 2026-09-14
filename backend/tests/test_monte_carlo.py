@@ -20,6 +20,7 @@ import pytest
 from app.engines.fire_projections import FireProjectionsEngine, _spending_multiplier
 from app.engines.monte_carlo import MonteCarloEngine, _draw_year
 from app.engines.net_worth import NetWorthEngine
+from app.engines.tax_engine import AccountsByTaxTreatment, TaxEngine
 
 from .conftest import FROZEN_TODAY, _make_fire_config
 
@@ -34,8 +35,19 @@ def frozen_today_mc():
 
 
 @contextmanager
-def _mc_env(config, *, net_worth=1_500_000.0, spending_cents=15_300_000, income_sources=(), events=()):
+def _mc_env(
+    config, *, net_worth=1_500_000.0, spending_cents=15_300_000,
+    income_sources=(), events=(), accounts=None,
+):
     """Patch every DB touchpoint the MC engine reaches through its sub-engines."""
+    if accounts is None:
+        taxable_account = MagicMock(
+            current_balance=round(net_worth * 100),
+            name="Taxable",
+            extra_data={},
+            custom_data={},
+        )
+        accounts = AccountsByTaxTreatment(taxable=[taxable_account])
     with ExitStack() as stack:
         stack.enter_context(patch.object(
             FireProjectionsEngine, "_get_cashflow_events",
@@ -52,6 +64,9 @@ def _mc_env(config, *, net_worth=1_500_000.0, spending_cents=15_300_000, income_
         stack.enter_context(patch.object(
             NetWorthEngine, "calculate_current",
             AsyncMock(return_value=MagicMock(net_worth=net_worth))))
+        stack.enter_context(patch.object(
+            TaxEngine, "get_accounts_by_tax_treatment",
+            AsyncMock(return_value=accounts)))
         yield
 
 
@@ -169,15 +184,14 @@ class TestDrawModel:
         si = math.sqrt(sum((b - mi) ** 2 for b in zi) / n)
         assert cov / (sr * si) == pytest.approx(rho, abs=0.05)
 
-    def test_lognormal_median_calibration(self):
-        """Median gross growth factor equals 1 + mu_nom (z=0 → exactly mu)."""
+    def test_lognormal_mean_calibration(self):
+        """The configured return is the arithmetic mean, not a rosier median."""
         rng = random.Random(9)
-        draws = sorted(
-            _draw_year(rng, 0.07, 0.16, 0.03, 0.0, 0.0)[0] for _ in range(10_001)
-        )
-        median_real = draws[5_000]
-        expected_real = 1.07 / 1.03 - 1
-        assert median_real == pytest.approx(expected_real, abs=0.01)
+        nominal_draws = []
+        for _ in range(100_000):
+            real_return, inflation = _draw_year(rng, 0.07, 0.16, 0.03, 0.0, 0.0)
+            nominal_draws.append((1 + real_return) * (1 + inflation) - 1)
+        assert sum(nominal_draws) / len(nominal_draws) == pytest.approx(0.07, abs=0.002)
 
 
 class TestDepletion:
@@ -189,6 +203,71 @@ class TestDepletion:
         assert result.success_rate == 0.0
         assert result.best_final_nw < 0
         assert len(result.percentile_curves) == TOTAL_YEARS + 1
+
+    async def test_non_spendable_net_worth_does_not_fund_retirement(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        empty_accounts = AccountsByTaxTreatment()
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            base_fire_config,
+            net_worth=2_000_000,
+            spending_cents=3_000_000,
+            accounts=empty_accounts,
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.starting_spendable_assets == 0
+        assert result.excluded_non_spendable_assets == 2_000_000
+        assert result.success_rate == 0
+
+    async def test_locked_deferred_assets_cannot_cover_early_bridge(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        base_fire_config.custom_assumptions["sepp"] = {"sepp_monthly": 0}
+        deferred = MagicMock(current_balance=100_000_000)
+        accounts = AccountsByTaxTreatment(tax_deferred=[deferred])
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(base_fire_config, net_worth=1_000_000, accounts=accounts):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.success_rate == 0
+        assert result.percentile_curves[1].p50 < 0
+
+    async def test_sepp_only_unlocks_configured_payment(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        base_fire_config.custom_assumptions["sepp"] = {"sepp_monthly": 1_000}
+        deferred = MagicMock(current_balance=100_000_000)
+        accounts = AccountsByTaxTreatment(tax_deferred=[deferred])
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            base_fire_config,
+            net_worth=1_000_000,
+            spending_cents=3_000_000,
+            accounts=accounts,
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.success_rate == 0
+        assert result.percentile_curves[1].p50 == pytest.approx(-25_200, abs=1)
+
+    async def test_roth_is_conservatively_locked_before_59_5(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        roth = MagicMock(current_balance=100_000_000)
+        accounts = AccountsByTaxTreatment(tax_free=[roth])
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            base_fire_config,
+            net_worth=1_000_000,
+            spending_cents=3_000_000,
+            accounts=accounts,
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.success_rate == 0
+        assert result.percentile_curves[1].p50 < 0
 
 
 def _make_source(income_type, annual_cents, *, start=None, end=None, growth=None):
@@ -247,6 +326,15 @@ class TestIncomeTiming:
             stack.enter_context(patch.object(
                 NetWorthEngine, "calculate_current",
                 AsyncMock(return_value=MagicMock(net_worth=1_500_000.0))))
+            taxable_account = MagicMock(
+                current_balance=150_000_000,
+                name="Taxable",
+                extra_data={},
+                custom_data={},
+            )
+            stack.enter_context(patch.object(
+                TaxEngine, "get_accounts_by_tax_treatment",
+                AsyncMock(return_value=AccountsByTaxTreatment(taxable=[taxable_account]))))
             await engine.run_simulation(n_runs=10, seed=1, scenario_id=sid)
         eff.assert_awaited_once_with(sid)
 
