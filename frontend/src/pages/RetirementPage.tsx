@@ -433,6 +433,11 @@ function SpendingSensitivityCard({
 
   // Recompute non-housing when user adjusts total budget
   const nonHousing = b ? displayBase - b.primary_property_all_in - b.income_property_cost - b.secondary_property_cost : 0;
+  const mortgagePayoffLabel = b?.primary_property_mortgage_payoff_date
+    ? new Date(`${b.primary_property_mortgage_payoff_date}T12:00:00`).toLocaleDateString(
+        "en-US", { month: "short", year: "numeric" },
+      )
+    : null;
 
   return (
     <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
@@ -489,7 +494,12 @@ function SpendingSensitivityCard({
               <span className="font-mono text-[var(--text-primary)]">${b.primary_property_all_in.toLocaleString()}</span>
             </div>
             <div className="flex justify-between pl-3">
-              <span className="text-[var(--text-secondary)] opacity-60">P&I ${b.primary_property_pi.toLocaleString()} + other ${(b.primary_property_all_in - b.primary_property_pi).toLocaleString()}</span>
+              <span className="text-[var(--text-secondary)] opacity-60">
+                P&amp;I ${b.primary_property_pi.toLocaleString()}
+                {b.primary_property_mortgage_rate_pct > 0 && ` · ${b.primary_property_mortgage_rate_pct}%`}
+                {mortgagePayoffLabel && ` · final payment ${mortgagePayoffLabel}`}
+                {b.primary_property_all_in > b.primary_property_pi && ` + other ${(b.primary_property_all_in - b.primary_property_pi).toLocaleString()}`}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-[var(--text-secondary)]">Income property</span>
@@ -507,6 +517,7 @@ function SpendingSensitivityCard({
             </div>
           </div>
           <div className="mt-3 text-[10px] text-[var(--text-secondary)] opacity-60 leading-relaxed">
+            {mortgagePayoffLabel && <>Mortgage P&amp;I drops from spending after {mortgagePayoffLabel}. </>}
             After primary property sale: −${b.primary_property_all_in.toLocaleString()} +${b.post_sale_rent.toLocaleString()} rent.
             After secondary sells: −${b.secondary_property_cost.toLocaleString()}.
             Healthcare ${healthcare.toLocaleString()}/mo added pre-65, drops at Medicare.

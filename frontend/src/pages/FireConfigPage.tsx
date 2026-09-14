@@ -58,8 +58,8 @@ export default function FireConfigPage() {
     primary_property_purchase_price: "",
     primary_property_agent_fee_pct: "6",
     primary_property_mortgage_pi: "",
-    ss_early_reduction: "70",
-    ss_claim_age: "62",
+    primary_property_mortgage_rate: "",
+    primary_property_mortgage_payoff_date: "",
     spending_phase_slow: "85",
     spending_phase_floor: "75",
     spending_phase_slow_age: "70",
@@ -123,8 +123,8 @@ export default function FireConfigPage() {
         primary_property_purchase_price: (proj?.primary_property_purchase_price as number)?.toString() || "",
         primary_property_agent_fee_pct: proj?.primary_property_agent_fee_pct != null ? ((proj.primary_property_agent_fee_pct as number) * 100).toString() : "6",
         primary_property_mortgage_pi: (proj?.primary_property_mortgage_pi as number)?.toString() || "",
-        ss_early_reduction: proj?.ss_early_reduction != null ? ((proj.ss_early_reduction as number) * 100).toString() : "70",
-        ss_claim_age: (proj?.ss_claim_age as number)?.toString() || "62",
+        primary_property_mortgage_rate: proj?.primary_property_mortgage_rate != null ? ((proj.primary_property_mortgage_rate as number) * 100).toString() : "",
+        primary_property_mortgage_payoff_date: (proj?.primary_property_mortgage_payoff_date as string) || "",
         spending_phase_slow: proj?.spending_phase_slow != null ? ((proj.spending_phase_slow as number) * 100).toString() : "85",
         spending_phase_floor: proj?.spending_phase_floor != null ? ((proj.spending_phase_floor as number) * 100).toString() : "75",
         spending_phase_slow_age: (proj?.spending_phase_slow_age as number)?.toString() || "70",
@@ -186,10 +186,16 @@ export default function FireConfigPage() {
           : null,
         primary_property_agent_fee_pct: pf(form.primary_property_agent_fee_pct, 6) / 100,
         primary_property_mortgage_pi: form.primary_property_mortgage_pi
-          ? parseInt(form.primary_property_mortgage_pi)
+          ? parseFloat(form.primary_property_mortgage_pi)
           : null,
-        ss_early_reduction: pf(form.ss_early_reduction, 70) / 100,
-        ss_claim_age: parseInt(form.ss_claim_age) || 62,
+        primary_property_mortgage_rate: form.primary_property_mortgage_rate
+          ? parseFloat(form.primary_property_mortgage_rate) / 100
+          : null,
+        primary_property_mortgage_payoff_date: form.primary_property_mortgage_payoff_date || null,
+        // Legacy duplicate Social Security controls are deliberately cleared.
+        // The main household amount + start age now drive every projection.
+        ss_early_reduction: null,
+        ss_claim_age: null,
         spending_phase_slow: pf(form.spending_phase_slow, 85) / 100,
         spending_phase_floor: pf(form.spending_phase_floor, 75) / 100,
         spending_phase_slow_age: parseInt(form.spending_phase_slow_age) || 70,
@@ -544,8 +550,17 @@ export default function FireConfigPage() {
             </div>
             <div>
               <label className={labelCls}>Primary Property Mortgage P&amp;I $</label>
-              <input type="number" step="1" value={form.primary_property_mortgage_pi} onChange={(e) => setForm(f => ({ ...f, primary_property_mortgage_pi: e.target.value }))} className={inputCls} />
+              <input type="number" step="0.01" value={form.primary_property_mortgage_pi} onChange={(e) => setForm(f => ({ ...f, primary_property_mortgage_pi: e.target.value }))} className={inputCls} />
               <p className="text-[10px] text-[var(--text-secondary)] mt-1">P&amp;I portion of the all-in monthly cost (removed when mortgage paid off)</p>
+            </div>
+            <div>
+              <label className={labelCls}>Mortgage Rate %</label>
+              <input type="number" step="0.01" value={form.primary_property_mortgage_rate} onChange={(e) => setForm(f => ({ ...f, primary_property_mortgage_rate: e.target.value }))} className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Final Mortgage Payment</label>
+              <input type="date" value={form.primary_property_mortgage_payoff_date} onChange={(e) => setForm(f => ({ ...f, primary_property_mortgage_payoff_date: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">The monthly budget automatically drops after this payment.</p>
             </div>
           </div>
 

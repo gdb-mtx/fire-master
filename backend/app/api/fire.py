@@ -343,8 +343,14 @@ async def spending_sensitivity(
     miami_cfg = ca.get("miami_sale", {})
     pc_cfg = ca.get("park_city", {})
     proj_cfg = ca.get("projection", {})
-    primary_all_in = miami_cfg.get("monthly_cost", 0)
     primary_pi = proj_cfg.get("primary_property_mortgage_pi", 0)
+    primary_all_in = miami_cfg.get("monthly_cost", 0) or primary_pi
+    primary_mortgage_rate_pct = (
+        proj_cfg.get("primary_property_mortgage_rate", 0) or 0
+    ) * 100
+    primary_mortgage_payoff_date = proj_cfg.get(
+        "primary_property_mortgage_payoff_date"
+    )
     income_property_cost = ca.get("sauvie_sale", {}).get("monthly_cost_saved", 0)
     secondary_property_cost = pc_cfg.get("monthly_cost", 0)
     post_sale_rent = miami_cfg.get("post_sale_rent", 0)
@@ -372,6 +378,8 @@ async def spending_sensitivity(
         breakdown=SpendingBreakdown(
             primary_property_all_in=primary_all_in,
             primary_property_pi=primary_pi,
+            primary_property_mortgage_rate_pct=primary_mortgage_rate_pct,
+            primary_property_mortgage_payoff_date=primary_mortgage_payoff_date,
             income_property_cost=income_property_cost,
             secondary_property_cost=secondary_property_cost,
             non_housing=non_housing,

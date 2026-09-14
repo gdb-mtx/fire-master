@@ -14,6 +14,7 @@ Two modeling STRUCTURES remain (do not copy mechanics between them):
   bridge chart, and scenario comparisons.
 """
 
+import datetime as dt_lib
 import logging
 import uuid as uuid_mod
 from copy import deepcopy
@@ -71,6 +72,61 @@ def fmtCompact(value: float) -> str:
 
 def _dollars_to_cents(dollars: float) -> int:
     return int(round(dollars * 100))
+
+
+def _primary_mortgage_terms(config: FireConfig) -> tuple[float, float, date | None]:
+    """Return monthly P&I dollars, annual rate, and contractual payoff date."""
+    projection = (config.custom_assumptions or {}).get("projection", {}) or {}
+    monthly_payment = float(projection.get("primary_property_mortgage_pi") or 0)
+    annual_rate = float(projection.get("primary_property_mortgage_rate") or 0)
+    payoff_raw = projection.get("primary_property_mortgage_payoff_date")
+    payoff_date: date | None = None
+    if isinstance(payoff_raw, dt_lib.date):
+        payoff_date = payoff_raw
+    elif isinstance(payoff_raw, str) and payoff_raw:
+        try:
+            payoff_date = dt_lib.date.fromisoformat(payoff_raw)
+        except ValueError:
+            payoff_date = None
+    return monthly_payment, annual_rate, payoff_date
+
+
+def _annual_spending_with_mortgage(
+    base_annual: float,
+    spending_multiplier: float,
+    config: FireConfig,
+    year: int,
+) -> float:
+    """Apply spending phases while stopping P&I after its maturity month.
+
+    The configured annual budget already contains twelve mortgage payments.
+    Other spending follows the retirement phase multiplier; contractual P&I
+    stays fixed in real dollars until its final scheduled payment.
+    """
+    monthly_payment, _rate, payoff_date = _primary_mortgage_terms(config)
+    if monthly_payment <= 0 or payoff_date is None:
+        return base_annual * spending_multiplier
+    active_months = sum(
+        1 for month in range(1, 13)
+        if dt_lib.date(year, month, 1) <= payoff_date
+    )
+    other_annual = max(0.0, base_annual - monthly_payment * 12)
+    return other_annual * spending_multiplier + monthly_payment * active_months
+
+
+def _monthly_spending_with_mortgage(
+    base_monthly: float,
+    spending_multiplier: float,
+    config: FireConfig,
+    target_date: date,
+) -> float:
+    """Monthly counterpart to ``_annual_spending_with_mortgage``."""
+    monthly_payment, _rate, payoff_date = _primary_mortgage_terms(config)
+    if monthly_payment <= 0 or payoff_date is None:
+        return base_monthly * spending_multiplier
+    other_monthly = max(0.0, base_monthly - monthly_payment)
+    active_payment = monthly_payment if target_date.replace(day=1) <= payoff_date else 0.0
+    return other_monthly * spending_multiplier + active_payment
 
 
 # Retirement spending phases (go-go / slow-go / no-go)
@@ -381,7 +437,17 @@ class FireProjectionsEngine:
                 age = retirement_age + yr
 
                 # Spending adjusted for retirement phase
-                yr_spending = annual_spending_cents * _spending_multiplier(age)
+                retirement_year = (
+                    (config.date_of_birth.year + retirement_age + yr)
+                    if config.date_of_birth
+                    else date.today().year + yr
+                )
+                yr_spending = _dollars_to_cents(_annual_spending_with_mortgage(
+                    _cents_to_dollars(annual_spending_cents),
+                    _spending_multiplier(age),
+                    config,
+                    retirement_year,
+                ))
                 if age < (config.medicare_start_age or 65):
                     yr_spending += healthcare_annual_cents
 
@@ -702,10 +768,15 @@ class FireProjectionsEngine:
             phase = "retirement" if is_retired else "accumulation"
 
             # Monthly spending: flat real (constant purchasing power) with
-            # the retirement phase step-down
-            monthly_spending = monthly_spending_base
-            if is_retired:
-                monthly_spending *= _spending_multiplier(age)
+            # the retirement phase step-down. Mortgage P&I remains fixed until
+            # its contractual payoff, then disappears from the budget.
+            spending_mult = _spending_multiplier(age) if is_retired else 1.0
+            monthly_spending = _dollars_to_cents(_monthly_spending_with_mortgage(
+                _cents_to_dollars(monthly_spending_base),
+                spending_mult,
+                config,
+                current,
+            ))
 
             # Healthcare adjustment
             if config.healthcare_monthly_cost and not is_retired:
@@ -1141,7 +1212,11 @@ class FireProjectionsEngine:
         re_appreciation_rate = proj_cfg.get("re_appreciation_rate", 0.01)  # 1% real (RE historically tracks inflation + ~1%)
         primary_property_purchase_price = proj_cfg.get("primary_property_purchase_price", 0)  # for dynamic sale calc
         primary_property_agent_fee_pct = proj_cfg.get("primary_property_agent_fee_pct", 0.06)  # 6% agent fees
-        primary_property_mortgage_pi = proj_cfg.get("primary_property_mortgage_pi", 0)  # P&I portion of primary-property cost
+        (
+            primary_property_mortgage_pi,
+            primary_property_mortgage_rate,
+            primary_property_mortgage_payoff_date,
+        ) = _primary_mortgage_terms(config)
         primary_property_cost_basis = proj_cfg.get("primary_property_cost_basis", 0)  # cost basis for the LTCG calc
         primary_property_ltcg_rate = proj_cfg.get("primary_property_ltcg_rate", 0.15)  # 15% federal LTCG rate
         # Event-label matchers (configurable; consumed when cashflow events fire)
@@ -1266,8 +1341,12 @@ class FireProjectionsEngine:
         primary_sold = False
         income_prop_sold = False
         primary_mortgage_eliminated = False
+        primary_mortgage_paid_off_naturally = False
 
-        # Real estate equity tracking — partition by fire_role
+        # Real estate equity tracking — partition by fire_role. When complete
+        # primary-mortgage terms are configured, track the gross home value and
+        # amortizing loan separately; otherwise preserve the legacy net-equity
+        # growth path.
         # sell_candidate + sell_with_property = secondary property (sold via cashflow event)
         # primary_residence + primary_mortgage = primary property
         # income_producing = income property
@@ -1277,18 +1356,38 @@ class FireProjectionsEngine:
         re_secondary = 0
         re_primary = 0
         re_income_prop = 0
-        for acct in result.scalars().all():
-            bal = acct.current_balance if acct.is_asset else -acct.current_balance
+        primary_home_value = 0
+        primary_mortgage_balance = 0
+        projection_accounts = list(result.scalars().all())
+        for acct in projection_accounts:
+            bal = acct.current_balance if acct.is_asset else -abs(acct.current_balance)
             role = (acct.fire_role or "").lower().strip()
             if role in ("sell_candidate", "sell_with_property"):
                 re_secondary += bal
-            elif role in ("primary_residence", "primary_mortgage"):
+            elif role == "primary_residence":
                 re_primary += bal
+                if acct.is_asset:
+                    primary_home_value += acct.current_balance
+            elif role == "primary_mortgage":
+                re_primary += bal
+                if not acct.is_asset:
+                    primary_mortgage_balance += abs(acct.current_balance)
             elif role == "income_producing":
                 re_income_prop += bal
         re_secondary = _cents_to_dollars(re_secondary)
         re_primary = _cents_to_dollars(re_primary)
         re_income_prop = _cents_to_dollars(re_income_prop)
+        primary_home_value = _cents_to_dollars(primary_home_value)
+        primary_mortgage_balance = _cents_to_dollars(primary_mortgage_balance)
+        mortgage_terms_configured = bool(
+            primary_home_value > 0
+            and primary_mortgage_balance > 0
+            and primary_property_mortgage_pi > 0
+            and primary_property_mortgage_rate > 0
+            and primary_property_mortgage_payoff_date is not None
+        )
+        if mortgage_terms_configured:
+            re_primary = primary_home_value - primary_mortgage_balance
         re_equity = re_secondary + re_primary + re_income_prop
         secondary_sold = False
         illiquid = breakdown.illiquid_private
@@ -1304,6 +1403,14 @@ class FireProjectionsEngine:
 
         total_months = int((end_age - current_age) * 12)
         ira_b_monthly_growth = ira_growth_rate / 12
+        mortgage_payoff_month = None
+        if mortgage_terms_configured and primary_property_mortgage_payoff_date:
+            mortgage_payoff_month = max(
+                0,
+                (primary_property_mortgage_payoff_date.year - today.year) * 12
+                + primary_property_mortgage_payoff_date.month
+                - today.month,
+            )
 
         # Load cashflow events for injection into projection.
         # A generic property sale "owns" its property: suppress any legacy
@@ -1367,6 +1474,16 @@ class FireProjectionsEngine:
         for m in range(total_months):
             age = current_age + m / 12.0
             dt = today + relativedelta(months=m)
+
+            if (
+                mortgage_payoff_month is not None
+                and m >= mortgage_payoff_month
+                and not primary_sold
+                and not primary_mortgage_eliminated
+            ):
+                primary_mortgage_balance = 0.0
+                primary_mortgage_eliminated = True
+                primary_mortgage_paid_off_naturally = True
 
             # --- Income (non-IRA) ---
             income = _source_income_at_month(m)
@@ -1559,6 +1676,9 @@ class FireProjectionsEngine:
                     # (adjusted by occupancy rate — only lose what we were actually earning)
                     income -= sauvie_monthly_income_lost * rental_occupancy_rate
 
+            if primary_mortgage_paid_off_naturally and use_generic_sales:
+                base_expenses = max(0.0, base_expenses - primary_property_mortgage_pi)
+
             # Spending phases (Blanchett 2013): go-go / slow-go / no-go
             if age >= spending_phase_floor_age:
                 spending_mult = spending_phase_floor   # no-go: 75% default
@@ -1566,7 +1686,17 @@ class FireProjectionsEngine:
                 spending_mult = spending_phase_slow    # slow-go: 85% default
             else:
                 spending_mult = 1.0                    # go-go: 100%
-            expenses = base_expenses * spending_mult
+            if (
+                mortgage_terms_configured
+                and not primary_sold
+                and not primary_mortgage_eliminated
+            ):
+                # P&I is a fixed contractual payment; phase reductions apply
+                # only to the rest of the household budget while it is active.
+                other_expenses = max(0.0, base_expenses - primary_property_mortgage_pi)
+                expenses = other_expenses * spending_mult + primary_property_mortgage_pi
+            else:
+                expenses = base_expenses * spending_mult
 
             # Healthcare costs (pre-Medicare only, not in base spending)
             if healthcare_monthly > 0 and age < medicare_age:
@@ -1701,7 +1831,21 @@ class FireProjectionsEngine:
             # RE appreciation (configurable via projection.re_appreciation_rate)
             re_monthly_appr = re_appreciation_rate / 12
             re_income_prop *= (1 + re_monthly_appr)
-            re_primary *= (1 + re_monthly_appr)
+            if mortgage_terms_configured:
+                if not primary_sold:
+                    primary_home_value *= (1 + re_monthly_appr)
+                    if not primary_mortgage_eliminated and primary_mortgage_balance > 0:
+                        monthly_rate = primary_property_mortgage_rate / 12
+                        interest = primary_mortgage_balance * monthly_rate
+                        principal = max(0.0, primary_property_mortgage_pi - interest)
+                        primary_mortgage_balance = max(
+                            0.0, primary_mortgage_balance - principal,
+                        )
+                    re_primary = primary_home_value - primary_mortgage_balance
+                else:
+                    re_primary = 0.0
+            else:
+                re_primary *= (1 + re_monthly_appr)
             re_secondary *= (1 + re_monthly_appr)
             re_equity = re_income_prop + re_primary + re_secondary
 
@@ -1768,6 +1912,19 @@ class FireProjectionsEngine:
             chart_events.append(
                 {"month": sepp_start_month, "age": round(current_age + sepp_start_month / 12, 1),
                  "label": "SEPP starts", "color": "#4d8eff"},
+            )
+        if (
+            mortgage_payoff_month is not None
+            and mortgage_payoff_month < total_months
+            and not primary_sold
+        ):
+            chart_events.append(
+                {
+                    "month": mortgage_payoff_month,
+                    "age": round(current_age + mortgage_payoff_month / 12, 1),
+                    "label": "Home mortgage paid off",
+                    "color": "#00d4aa",
+                },
             )
         chart_events.extend([
             {"month": months_to_59_5, "age": 59.5, "label": "59\u00BD", "color": "#4d8eff"},

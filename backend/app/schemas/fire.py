@@ -296,6 +296,8 @@ class SpendingBreakdown(BaseModel):
     """What's inside the total monthly budget."""
     primary_property_all_in: float  # P&I + HOA + insurance + utilities
     primary_property_pi: float  # just the mortgage P&I portion
+    primary_property_mortgage_rate_pct: float = 0
+    primary_property_mortgage_payoff_date: str | None = None
     income_property_cost: float  # income-property costs saved when it sells
     secondary_property_cost: float  # secondary-property costs removed when it sells
     non_housing: float  # remainder — groceries, transport, insurance, discretionary

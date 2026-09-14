@@ -653,7 +653,10 @@ class TaxEngine:
         Config comes from get_effective_config (active scenario merged, or
         an explicit scenario_id) — same as the projection engines.
         """
-        from app.engines.fire_projections import FireProjectionsEngine
+        from app.engines.fire_projections import (
+            FireProjectionsEngine,
+            _annual_spending_with_mortgage,
+        )
 
         fire_engine = FireProjectionsEngine(self.db)
         config = await fire_engine.get_effective_config(scenario_id)
@@ -697,7 +700,9 @@ class TaxEngine:
             is_retired = retirement_date and current_date >= retirement_date
 
             # Spending: flat in real terms (constant purchasing power)
-            spending_need = annual_need
+            spending_need = _annual_spending_with_mortgage(
+                annual_need, 1.0, config, current_year,
+            )
             if (
                 is_retired
                 and config.healthcare_monthly_cost

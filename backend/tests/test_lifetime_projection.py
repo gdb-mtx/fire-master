@@ -15,7 +15,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.engines.fire_projections import FireProjectionsEngine
+from app.engines.fire_projections import (
+    FireProjectionsEngine,
+    _annual_spending_with_mortgage,
+)
 from app.engines.net_worth import NetWorthEngine
 
 from .conftest import _make_fire_config
@@ -23,6 +26,24 @@ from .conftest import _make_fire_config
 
 def _lifetime_engine():
     return FireProjectionsEngine(db=None)
+
+
+def test_mortgage_payment_expires_in_payoff_year(base_fire_config):
+    base_fire_config.custom_assumptions = {
+        "projection": {
+            "primary_property_mortgage_pi": 5_689.74,
+            "primary_property_mortgage_rate": 0.025,
+            "primary_property_mortgage_payoff_date": "2051-03-01",
+        },
+    }
+
+    assert _annual_spending_with_mortgage(220_000, 1.0, base_fire_config, 2050) == 220_000
+    assert _annual_spending_with_mortgage(
+        220_000, 1.0, base_fire_config, 2051,
+    ) == pytest.approx(168_792.34)
+    assert _annual_spending_with_mortgage(
+        220_000, 1.0, base_fire_config, 2052,
+    ) == pytest.approx(151_723.12)
 
 
 def _patch_common(config, *, net_worth=1_500_000.0, spending_cents=15_300_000,

@@ -131,6 +131,8 @@ export interface SpendingSensitivityPoint {
 export interface SpendingBreakdown {
   primary_property_all_in: number;
   primary_property_pi: number;
+  primary_property_mortgage_rate_pct: number;
+  primary_property_mortgage_payoff_date: string | null;
   income_property_cost: number;
   secondary_property_cost: number;
   non_housing: number;

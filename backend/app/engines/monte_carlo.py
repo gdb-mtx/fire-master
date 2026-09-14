@@ -55,6 +55,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engines.fire_projections import (
+    _annual_spending_with_mortgage,
     _spending_multiplier,
     build_cashflow_schedule,
     cashflow_by_year,
@@ -227,9 +228,13 @@ class MonteCarloEngine:
                 is_retired = yr >= years_to_retirement
 
                 # Spending: constant purchasing power + retirement phase step-down
-                yr_spending = annual_spending
-                if is_retired:
-                    yr_spending *= _spending_multiplier(age)
+                spending_mult = _spending_multiplier(age) if is_retired else 1.0
+                yr_spending = _annual_spending_with_mortgage(
+                    annual_spending,
+                    spending_mult,
+                    config,
+                    today.year + yr,
+                )
 
                 # Income: flat real, from the shared per-year precompute
                 yr_income = income_by_year[yr]

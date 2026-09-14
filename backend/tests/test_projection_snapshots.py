@@ -112,6 +112,40 @@ class TestProjectionIncome:
         assert result.points[0].income == 10_000
         assert any(point.age >= 53 and point.income == 0 for point in result.points)
 
+    @pytest.mark.asyncio
+    async def test_primary_mortgage_amortizes_and_payment_ends(self, frozen_today):
+        config = _make_fire_config(target_annual_spending=12_000_000)
+        config.healthcare_monthly_cost = None
+        config.social_security_monthly = None
+        config.custom_assumptions = {
+            "projection": {
+                "re_appreciation_rate": 0.0,
+                "primary_property_mortgage_pi": 5_689.74,
+                "primary_property_mortgage_rate": 0.025,
+                "primary_property_mortgage_payoff_date": "2051-03-01",
+                "spending_phase_slow_age": 100,
+                "spending_phase_floor_age": 110,
+            },
+        }
+        accounts = [
+            _account("primary_residence", 2_000_000),
+            _account("primary_mortgage", 1_249_905.13, is_asset=False),
+        ]
+        breakdown = NetWorthBreakdown(
+            liquid=10_000_000, retirement=0, real_estate_equity=750_094.87,
+            illiquid_private=0, other=0,
+        )
+        engine = _make_engine(config, breakdown, accounts, [])
+
+        result = await engine.project_wealth_pools(end_age=79, bridge_months=400)
+        before = next(p for p in result.points if p.date.startswith("2051-02"))
+        after = next(p for p in result.points if p.date.startswith("2051-03"))
+
+        assert before.expenses == 10_000
+        assert after.expenses == pytest.approx(4_310, abs=1)
+        assert after.real_estate == pytest.approx(2_000_000, abs=1)
+        assert any(e["label"] == "Home mortgage paid off" for e in result.events)
+
 
 # ---------------------------------------------------------------------------
 # Snapshot tests
