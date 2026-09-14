@@ -1794,7 +1794,8 @@ class FireProjectionsEngine:
             if healthcare_monthly > 0 and age < medicare_age:
                 expenses += healthcare_monthly
 
-            expenses += tax_funding_by_year.get(dt.year, 0.0) / 12
+            modeled_taxes = tax_funding_by_year.get(dt.year, 0.0) / 12
+            expenses += modeled_taxes
 
             # --- IRA-A: grows + SEPP draws ---
             # IRA-A is invested (same growth rate as IRA-B) but has fixed SEPP withdrawals
@@ -1970,6 +1971,7 @@ class FireProjectionsEngine:
                     total=round(cash + max(0, ira_a) + max(0, ira_b) + rrsp_val + re_val + ill_val + tax_val + roth_val, 0),
                     income=round(income, 0),
                     expenses=round(expenses, 0),
+                    modeled_taxes=round(modeled_taxes, 0),
                     ira_draw=round(ira_draw, 0),
                     rmd_redeposit=round(rmd_redeposit, 0),
                     rrsp_draw=round(rrsp_draw, 0),

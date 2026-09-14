@@ -1110,6 +1110,14 @@ class TaxEngine:
 
         annual_spending_cents = config.target_annual_spending or 12_000_000  # default $120K
         annual_need = annual_spending_cents / 100
+        assumptions = config.custom_assumptions or {}
+        projection_config = assumptions.get("projection", {}) or {}
+        penalty_free_age = float(assumptions.get("penalty_free_age", 59.5))
+        rule_of_55_eligible = bool(assumptions.get("rule_of_55_eligible", False))
+        sepp_monthly = float((assumptions.get("sepp", {}) or {}).get("sepp_monthly", 0) or 0)
+        cash_reserve_months = max(
+            0.0, float(projection_config.get("cash_reserve_months", 12) or 0),
+        )
         # REAL yield on cash — default 0 (cash holds purchasing power at
         # best; set positive for HYSA-parked cash, negative for checking).
         cash_yield = tax_config.get("cash_yield_rate", 0.0)
@@ -1240,9 +1248,25 @@ class TaxEngine:
             from_cash = 0.0
             capital_gains = 0.0
             remaining_need = withdrawal_needed
+            traditional_accessible = (
+                age >= penalty_free_age
+                or (rule_of_55_eligible and age >= 55)
+                or sepp_monthly > 0
+            )
+            cash_reserve = withdrawal_needed / 12 * cash_reserve_months
 
             if remaining_need > 0:
-                # Step 1: Draw from taxable first (preferential capital gains rates)
+                # Spend cash above the configured operating reserve before selling
+                # investments. This also makes accumulated working-year surplus
+                # available to bridge an early retirement.
+                cash_above_reserve = max(0.0, cash_balance - cash_reserve)
+                if cash_above_reserve > 0:
+                    draw = min(remaining_need, cash_above_reserve)
+                    from_cash += draw
+                    cash_balance -= draw
+                    remaining_need -= draw
+
+                # Then use taxable brokerage (preferential capital-gains rates).
                 if taxable_balance > 0 and remaining_need > 0:
                     draw = min(remaining_need, taxable_balance)
                     from_taxable = draw
@@ -1251,24 +1275,25 @@ class TaxEngine:
                     taxable_balance -= draw
                     remaining_need -= draw
 
-                # Step 2: Draw from tax-deferred (ordinary income, fill lower brackets)
-                if deferred_balance > 0 and remaining_need > 0:
+                # Traditional accounts are unavailable before 59½ unless the
+                # household explicitly configured Rule of 55 or a SEPP plan.
+                if traditional_accessible and deferred_balance > 0 and remaining_need > 0:
                     draw = min(remaining_need, deferred_balance)
                     from_deferred = draw
                     deferred_balance -= draw
                     remaining_need -= draw
 
-                # Step 3: Draw from Roth (tax-free, last resort)
+                # Roth is the last invested pool.
                 if roth_balance > 0 and remaining_need > 0:
                     draw = min(remaining_need, roth_balance)
                     from_roth = draw
                     roth_balance -= draw
                     remaining_need -= draw
 
-                # Step 4: Cash/savings as absolute last resort
+                # Finally permit the operating reserve itself to be depleted.
                 if cash_balance > 0 and remaining_need > 0:
                     draw = min(remaining_need, cash_balance)
-                    from_cash = draw
+                    from_cash += draw
                     cash_balance -= draw
                     remaining_need -= draw
 
@@ -1476,13 +1501,20 @@ class TaxEngine:
                     break
 
                 drawn = 0.0
+                cash_above_reserve = max(0.0, cash_balance - cash_reserve)
+                if cash_above_reserve > 0 and extra_needed > 0:
+                    amount = min(extra_needed, cash_above_reserve)
+                    cash_balance -= amount
+                    from_cash += amount
+                    extra_needed -= amount
+                    drawn += amount
                 if taxable_balance > 0 and extra_needed > 0:
                     amount = min(extra_needed, taxable_balance)
                     taxable_balance -= amount
                     from_taxable += amount
                     extra_needed -= amount
                     drawn += amount
-                if deferred_balance > 0 and extra_needed > 0:
+                if traditional_accessible and deferred_balance > 0 and extra_needed > 0:
                     amount = min(extra_needed, deferred_balance)
                     deferred_balance -= amount
                     from_deferred += amount
@@ -1561,6 +1593,10 @@ class TaxEngine:
             total_tax += total_tax_year
             total_withdrawn += from_taxable + from_deferred + from_roth
             total_gross_all_years += total_gross
+
+            # Working-year surplus is future bridge cash, not money that
+            # disappears from the plan after paying this year's expenses.
+            cash_balance += max(0.0, net_spendable - spending_need)
 
             # Grow remaining balances (cash at its own yield, not market return)
             deferred_balance *= (1 + annual_return)

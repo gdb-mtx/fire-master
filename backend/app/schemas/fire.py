@@ -268,7 +268,8 @@ class WealthPoolPoint(BaseModel):
     roth_draw: float = 0  # monthly withdrawal from the Roth pool to cover cash gap
     total: float  # all pools combined
     income: float  # monthly income (non-IRA)
-    expenses: float  # monthly expenses
+    expenses: float  # total monthly outflow (living costs + modeled taxes)
+    modeled_taxes: float = 0  # monthly taxes not already withheld from a net income source
     ira_draw: float  # monthly IRA withdrawal (SEPP + IRA-B gap draw + any forced RMD)
     rmd_redeposit: float = 0  # part of ira_draw forced by an RMD and redeposited to taxable (not cash)
     rrsp_draw: float = 0  # monthly RRIF withdrawal

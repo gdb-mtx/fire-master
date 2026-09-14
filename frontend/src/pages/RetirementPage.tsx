@@ -2,7 +2,6 @@ import { useMemo, useState, useRef, useEffect } from "react";
 import { Link } from "react-router";
 import {
   useActivateScenario,
-  useBridgeProjection,
   useBridgeStatus,
   useFireNumber,
   useFireReadiness,
@@ -19,7 +18,7 @@ import { useEventMarkers } from "../components/charts/EventMarkers";
 import { useIsMobile } from "../hooks/useIsMobile";
 import type { EventMarkerGroup } from "../components/charts/EventMarkers";
 import { TOOLTIP_STYLE } from "../utils/theme";
-import type { Milestone, SpendingSensitivity, WealthPoolProjection } from "../types/fire";
+import type { Milestone, SpendingSensitivity } from "../types/fire";
 import {
   Area,
   XAxis,
@@ -174,174 +173,6 @@ function MilestoneTimeline({ milestones, currentAge }: { milestones: Milestone[]
             </div>
           );
         })}
-      </div>
-    </div>
-  );
-}
-
-function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["points"]; events: WealthPoolProjection["events"]; currentCash?: number }) {
-  const bridgeData = useMemo(() => {
-    // Engine points are END-of-month states. Display month m+1 so x = months
-    // elapsed, and prepend a true t0 ("Now" = today's actual cash) so this chart
-    // opens on the same number as the Runway page.
-    const shifted = points
-      .filter((p) => p.month != null && p.month <= 60)
-      .map((p) => ({
-        ...p,
-        month: (p.month ?? 0) + 1,
-        // Mirrors the engine's net line: pool draws that reach cash, minus the
-        // RMD excess that was redeposited to taxable instead of spent.
-        net:
-          p.income +
-          p.ira_draw -
-          (p.rmd_redeposit ?? 0) +
-          p.rrsp_draw +
-          (p.taxable_draw ?? 0) +
-          (p.roth_draw ?? 0) +
-          p.cash_interest -
-          p.expenses,
-      }));
-    if (shifted.length === 0) return shifted;
-    if (currentCash == null) return shifted;
-    return [
-      { ...shifted[0], month: 0, cash: currentCash, net: 0, income: 0, expenses: 0, event: undefined },
-      ...shifted,
-    ];
-  }, [points, currentCash]);
-
-  if (bridgeData.length === 0) return null;
-
-  const minCash = Math.min(...bridgeData.map((p) => p.cash));
-  const minCashMonth = bridgeData.find((p) => p.cash === minCash);
-  const lastPoint = bridgeData[bridgeData.length - 1];
-
-  // Significant one-time events for markers. Skip month 0-1: near-term
-  // one-off clutter obscures the meaningful bridge-period markers.
-  // Amounts are embedded in the backend label strings (e.g. "Sell Primary
-  // (+$610,000→taxable)") — display verbatim, no parsing.
-  const markerGroups = useMemo<EventMarkerGroup[]>(
-    () =>
-      bridgeData
-        .filter((p) => p.event && (p.month ?? 0) >= 2)
-        .map((p) => ({
-          x: p.month!,
-          y: p.cash,
-          events: p.event!.split("; ").map((label) => ({ label })),
-        })),
-    [bridgeData],
-  );
-
-  const { markers: eventMarkers, overlay: eventOverlay, wrapperProps: chartWrapperProps } =
-    useEventMarkers(markerGroups, {
-      defaultColor: "var(--yellow)",
-      xLabel: (m) => `Month ${m}`,
-    });
-
-  return (
-    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-[var(--text-secondary)]">
-          Bridge Period
-          <span className="ml-2 text-[10px] font-normal">first 60 months</span>
-        </h3>
-        <div className="flex items-center gap-5">
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">Start</span>
-            <span className="text-xs font-mono text-[var(--green)]">{fmtCompact(bridgeData[0]?.cash ?? 0)}</span>
-          </div>
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">Lowest</span>
-            <span className="text-xs font-mono" style={{ color: minCash > 20000 ? "var(--yellow)" : "var(--red)" }}>
-              {fmtCompact(minCash)} <span className="text-[var(--text-secondary)]">mo {minCashMonth?.month}</span>
-            </span>
-          </div>
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">At End</span>
-            <span className="text-xs font-mono text-[var(--green)]">{fmtCompact(lastPoint?.cash ?? 0)}</span>
-          </div>
-        </div>
-      </div>
-
-      <div {...chartWrapperProps}>
-      <ResponsiveContainer width="100%" height={400}>
-        <ComposedChart data={bridgeData} margin={{ top: 30, right: 10, left: 10, bottom: 0 }}>
-          <defs>
-            <linearGradient id="gradBridgeCash" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#2e8b6e" stopOpacity={0.6} />
-              <stop offset="100%" stopColor="#2e8b6e" stopOpacity={0.05} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(42,42,62,0.5)" />
-          <XAxis
-            dataKey="month"
-            stroke="#5c5c6a"
-            tick={{ fontSize: 10, fill: "#5c5c6a" }}
-            tickFormatter={(m) => {
-              if (m === 0) return "Now";
-              if (m === 12) return "Yr 1";
-              if (m === 24) return "Yr 2";
-              if (m === 36) return "Yr 3";
-              if (m === 48) return "Yr 4";
-              if (m === 59) return "Yr 5";
-              return "";
-            }}
-            interval={0}
-            ticks={[0, 12, 24, 36, 48, 59]}
-          />
-          <YAxis
-            stroke="#5c5c6a"
-            tick={{ fontSize: 10, fill: "#5c5c6a" }}
-            tickFormatter={fmtAxis}
-            width={55}
-          />
-          <Tooltip
-            {...TOOLTIP_STYLE}
-            labelFormatter={(m) => `Month ${m}`}
-            formatter={(value, name) => {
-              const labels: Record<string, string> = {
-                cash: "Cash Balance",
-                net: "Net Monthly",
-                ira_draw: "IRA Withdrawal",
-                rrsp_draw: "RRIF Draw",
-                cash_interest: "Cash Interest",
-                income: "Income",
-                expenses: "Expenses",
-              };
-              return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
-            }}
-          />
-
-          {/* Zero line */}
-          <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.5} />
-
-          {/* Event markers */}
-          {eventMarkers}
-
-          {/* Cash balance area */}
-          <Area type="monotone" dataKey="cash" stroke="var(--green)" strokeWidth={2} fill="url(#gradBridgeCash)" dot={false} />
-
-          {/* Net monthly flow line */}
-          <Line type="monotone" dataKey="net" stroke="var(--blue)" strokeWidth={1} strokeDasharray="4 3" dot={false} strokeOpacity={0.6} />
-
-        </ComposedChart>
-      </ResponsiveContainer>
-      {eventOverlay}
-      </div>
-
-      <div className="flex items-center gap-5 mt-3 pt-3 border-t border-[var(--border)]">
-        {[
-          { label: "Cash Balance", color: "var(--green)" },
-          { label: "Net Monthly", color: "var(--blue)", dashed: true },
-          { label: "Events", color: "var(--yellow)", dot: true },
-        ].map((l) => (
-          <div key={l.label} className="flex items-center gap-1.5">
-            <div
-              className={l.dot ? "w-2 h-2 rounded-full" : "w-3 h-[3px] rounded-full"}
-              style={{ backgroundColor: l.color, opacity: l.dashed ? 0.6 : 0.8 }}
-            />
-            <span className="text-[10px] text-[var(--text-secondary)]">{l.label}</span>
-          </div>
-        ))}
       </div>
     </div>
   );
@@ -610,7 +441,6 @@ export default function RetirementPage() {
     : undefined;
 
   const { data: wealthProjection, isLoading: loadingWealth } = useWealthProjection(spendingOverrideCents);
-  const { data: bridgeProjection } = useBridgeProjection(spendingOverrideCents);
   const hasSeppPlan = (wealthProjection?.sepp_monthly ?? 0) > 0;
 
   // Wealth chart data, hoisted so the milestone markers can snap to the
@@ -623,7 +453,8 @@ export default function RetirementPage() {
         cash: Math.max(0, p.cash), // clamp for stacked areas
         taxable: Math.max(0, p.taxable ?? 0), // clamp for stacked areas
         roth: Math.max(0, p.roth ?? 0),
-        annual_spending: p.expenses * 12,
+        annual_outflow: p.expenses * 12,
+        annual_taxes: (p.modeled_taxes ?? 0) * 12,
       })),
     [wealthProjection],
   );
@@ -885,11 +716,6 @@ export default function RetirementPage() {
           sensitivity={sensitivity}
         />
 
-        {/* Bridge Chart — 60 Month Detail */}
-        {bridgeProjection && bridgeProjection.points.length > 0 && (
-          <BridgeChart points={bridgeProjection.points} events={bridgeProjection.events} currentCash={bridge?.cash_balance} />
-        )}
-
         {/* Wealth Projection — Full Width */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
             <div className="flex items-center justify-between mb-4">
@@ -911,7 +737,8 @@ export default function RetirementPage() {
             <p className="text-[11px] text-[var(--text-secondary)] mb-3">
               Employment income stops automatically at your retirement date. Total wealth includes
               home equity and can rise while cash or brokerage balances are being spent whenever
-              investment growth and mortgage paydown exceed withdrawals.
+              investment growth and mortgage paydown exceed withdrawals. The red outflow line includes
+              living costs and modeled taxes; the orange line isolates those taxes.
             </p>
             {wealthProjection && wealthChartData.length > 0 ? (
               <>
@@ -982,7 +809,8 @@ export default function RetirementPage() {
                           taxable: "Taxable brokerage",
                           roth: "Roth (tax-free)",
                           total: "Total",
-                          annual_spending: "Annual Spending",
+                          annual_outflow: "Total portfolio outflow",
+                          annual_taxes: "Modeled taxes",
                         };
                         return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
                       }}
@@ -1006,7 +834,7 @@ export default function RetirementPage() {
                     {/* Total line on top */}
                     <Line type="monotone" dataKey="total" stroke="#1a1a1e" strokeWidth={2} dot={false} strokeOpacity={0.8} />
 
-                    {/* Annual spending line (right axis) */}
+                    {/* Annual portfolio outflow and its withdrawal-tax component (right axis) */}
                     <YAxis
                       yAxisId="spending"
                       orientation="right"
@@ -1017,7 +845,8 @@ export default function RetirementPage() {
                       domain={[0, 200000]}
                       hide={isMobile}
                     />
-                    <Line yAxisId="spending" type="monotone" dataKey="annual_spending" stroke="var(--red)" strokeWidth={1.5} strokeDasharray="6 3" dot={false} strokeOpacity={0.7} />
+                    <Line yAxisId="spending" type="monotone" dataKey="annual_outflow" stroke="var(--red)" strokeWidth={1.5} strokeDasharray="6 3" dot={false} strokeOpacity={0.7} />
+                    <Line yAxisId="spending" type="monotone" dataKey="annual_taxes" stroke="var(--orange, #b06830)" strokeWidth={1.25} strokeDasharray="2 3" dot={false} strokeOpacity={0.85} />
                   </ComposedChart>
                 </ResponsiveContainer>
                 {wealthOverlay}
@@ -1036,7 +865,8 @@ export default function RetirementPage() {
                       { label: "Taxable", color: "#2aa6b8" },
                       { label: "Roth", color: "#5b8c3a" },
                       { label: "Total", color: "#1a1a1e", dashed: true },
-                      { label: "Spending/yr", color: "var(--red)", dashed: true },
+                      { label: "Total outflow/yr", color: "var(--red)", dashed: true },
+                      { label: "Modeled taxes/yr", color: "var(--orange, #b06830)", dashed: true },
                     ].map((l) => (
                       <div key={l.label} className="flex items-center gap-1.5">
                         <div

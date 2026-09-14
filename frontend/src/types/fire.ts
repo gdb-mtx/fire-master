@@ -203,7 +203,8 @@ export interface WealthPoolPoint {
   roth_draw?: number;
   total: number;
   income: number;
-  expenses: number;
+  expenses: number; // total outflow: living costs plus modeled taxes
+  modeled_taxes?: number;
   ira_draw: number; // SEPP + IRA-B gap draw + any forced RMD
   rmd_redeposit?: number; // part of ira_draw redeposited to taxable by an RMD (never reaches cash)
   rrsp_draw: number;

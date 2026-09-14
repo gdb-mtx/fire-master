@@ -256,6 +256,60 @@ class TestRothConversionPlan:
 # ---------------------------------------------------------------------------
 
 class TestWithdrawalSequence:
+    async def test_pre_59_half_deferred_is_locked_without_sepp(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(healthcare_monthly_cost=None)
+        config.custom_assumptions["sepp"] = {"sepp_monthly": 0}
+        config.custom_assumptions["sepp_bridge"] = False
+        engine = _make_planning_engine(deferred=1_000_000)
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].age < 59.5
+        assert plan.years[0].from_deferred == 0
+
+    async def test_working_surplus_becomes_future_bridge_cash(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=6_000_000,
+            target_retirement_age=80,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        salary = _income_source(
+            "One-year salary", IncomeType.SALARY, 100_000,
+            end=date(2026, 12, 31), taxable=False,
+        )
+        engine = _make_planning_engine(income_sources=[salary])
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=2, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].from_cash == 0
+        assert plan.years[1].from_cash == pytest.approx(40_000)
+
+    async def test_cash_above_reserve_is_used_before_taxable(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.target_annual_spending = 6_000_000
+        base_fire_config.healthcare_monthly_cost = None
+        engine = _make_planning_engine(cash=200_000, taxable=200_000)
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].from_cash == pytest.approx(60_000)
+        assert plan.years[0].from_taxable == 0
+
     async def test_unused_itemized_deduction_shields_taxable_gains(
         self, base_fire_config, frozen_today_tax,
     ):
