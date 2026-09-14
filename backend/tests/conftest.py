@@ -140,6 +140,7 @@ def _make_fire_config(**overrides) -> FireConfig:
     config.pension_monthly = None
     config.pension_start_age = None
     config.healthcare_monthly_cost = 60_000  # $600/mo
+    config.post_medicare_healthcare_monthly_cost = None
     config.medicare_start_age = 65
     config.rmd_start_age = 73
     config.target_legacy = 0

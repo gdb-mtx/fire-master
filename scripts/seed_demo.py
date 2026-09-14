@@ -302,6 +302,7 @@ def build_demo_config_values(anchor: date) -> dict:
         pension_monthly=None,
         pension_start_age=None,
         healthcare_monthly_cost=115_000,  # $1,150/mo for the couple pre-Medicare (cents)
+        post_medicare_healthcare_monthly_cost=90_000,  # $900/mo for Medicare + supplements (cents)
         medicare_start_age=65,
         rmd_start_age=73,
         target_legacy=0,

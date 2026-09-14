@@ -74,6 +74,14 @@ def _dollars_to_cents(dollars: float) -> int:
     return int(round(dollars * 100))
 
 
+def _healthcare_monthly_cents_at_age(config: FireConfig, age: float) -> int:
+    """Return the extra retirement healthcare budget for an age, in cents."""
+    medicare_age = config.medicare_start_age or 65
+    if age < medicare_age:
+        return config.healthcare_monthly_cost or 0
+    return config.post_medicare_healthcare_monthly_cost or 0
+
+
 def _primary_mortgage_terms(config: FireConfig) -> tuple[float, float, date | None]:
     """Return monthly P&I dollars, annual rate, and contractual payoff date."""
     projection = (config.custom_assumptions or {}).get("projection", {}) or {}
@@ -438,12 +446,9 @@ class FireProjectionsEngine:
         # Years in retirement
         retirement_age = config.target_retirement_age or 55
         years_in_retirement = config.life_expectancy - retirement_age
-        healthcare_annual_cents = 0
-        if (
-            config.healthcare_monthly_cost
-            and retirement_age < (config.medicare_start_age or 65)
-        ):
-            healthcare_annual_cents = config.healthcare_monthly_cost * 12
+        healthcare_annual_cents = (
+            _healthcare_monthly_cents_at_age(config, retirement_age) * 12
+        )
 
         if years_in_retirement <= 0 or real_return <= 0:
             lifetime_spend_down_cents = annual_spending_cents * max(1, years_in_retirement)
@@ -481,8 +486,7 @@ class FireProjectionsEngine:
                     config,
                     retirement_year,
                 ))
-                if age < (config.medicare_start_age or 65):
-                    yr_spending += healthcare_annual_cents
+                yr_spending += _healthcare_monthly_cents_at_age(config, age) * 12
 
                 # Post-retirement income at this age
                 yr_income = continuing_annual
@@ -848,14 +852,10 @@ class FireProjectionsEngine:
                 current,
             ))
 
-            # Healthcare adjustment
-            if config.healthcare_monthly_cost and not is_retired:
-                pass  # healthcare costs already in spending
-            elif config.healthcare_monthly_cost and is_retired:
-                if config.date_of_birth:
-                    age_now = self._compute_age(config, current)
-                    if age_now < config.medicare_start_age:
-                        monthly_spending += config.healthcare_monthly_cost
+            # Extra retirement healthcare switches from private/ACA coverage
+            # to the configured Medicare-era premium and out-of-pocket budget.
+            if is_retired:
+                monthly_spending += _healthcare_monthly_cents_at_age(config, age)
 
             # Source-aware tax gross-up from the withdrawal planner. Employment
             # income with an explicit net cash-flow amount is treated as already
@@ -1123,6 +1123,9 @@ class FireProjectionsEngine:
         ss_full = round(ss_at_start / _SSA_FACTORS[ss_start_age]) if ss_at_start else 0
         ss_early = round(ss_full * 0.70)
         healthcare_monthly = _cents_to_dollars(config.healthcare_monthly_cost or 0)
+        post_medicare_monthly = _cents_to_dollars(
+            config.post_medicare_healthcare_monthly_cost or 0
+        )
 
         def _milestone_date(age: float) -> date:
             years = int(age)
@@ -1157,8 +1160,12 @@ class FireProjectionsEngine:
                 age=65,
                 date=_milestone_date(65).isoformat(),
                 label="Medicare",
-                description="Federal health insurance. Eliminates private premium.",
-                financial_impact=f"Saves ${healthcare_monthly:,.0f}/mo" if healthcare_monthly else "Healthcare cost TBD",
+                description="Private coverage ends; Medicare premiums and supplemental costs continue.",
+                financial_impact=(
+                    f"Healthcare changes ${healthcare_monthly:,.0f} → ${post_medicare_monthly:,.0f}/mo"
+                    if healthcare_monthly or post_medicare_monthly
+                    else "Healthcare cost TBD"
+                ),
                 status=_status(65),
             ),
             Milestone(
@@ -1336,10 +1343,6 @@ class FireProjectionsEngine:
         recast_paydown = recast_cfg.get("paydown_amount", 0)
         recast_new_pi = recast_cfg.get("new_monthly_pi", primary_property_mortgage_pi)
         mortgage_recast_done = False
-
-        # Healthcare costs (pre-Medicare)
-        healthcare_monthly = _cents_to_dollars(config.healthcare_monthly_cost or 0)
-        medicare_age = config.medicare_start_age or 65
 
         # Rental occupancy rate — multiplier on rental income from DB sources.
         # 1.0 = 100% occupancy (default). 0.7 = 70% (30% vacancy).
@@ -1790,9 +1793,11 @@ class FireProjectionsEngine:
             else:
                 expenses = base_expenses * spending_mult
 
-            # Healthcare costs (pre-Medicare only, not in base spending)
-            if healthcare_monthly > 0 and age < medicare_age:
-                expenses += healthcare_monthly
+            # Extra healthcare is not part of the base spending budget. It
+            # changes at Medicare instead of disappearing entirely.
+            expenses += _cents_to_dollars(
+                _healthcare_monthly_cents_at_age(config, age)
+            )
 
             modeled_taxes = tax_funding_by_year.get(dt.year, 0.0) / 12
             expenses += modeled_taxes
@@ -2060,6 +2065,13 @@ class FireProjectionsEngine:
         today = date.today()
 
         monthly_burn = annual_spending_cents / 12.0 / 100.0
+        if config.date_of_birth:
+            current_age = self._compute_age(config, today)
+            monthly_burn += _cents_to_dollars(
+                _healthcare_monthly_cents_at_age(config, current_age)
+            )
+        else:
+            monthly_burn += _cents_to_dollars(config.healthcare_monthly_cost or 0)
 
         # Recurring cashflow events active THIS month are part of the "now"
         # snapshot (fire-master#17): income events join the streams (temp when

@@ -56,6 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engines.fire_projections import (
     _annual_spending_with_mortgage,
+    _healthcare_monthly_cents_at_age,
     _spending_multiplier,
     build_cashflow_schedule,
     cashflow_by_year,
@@ -238,6 +239,10 @@ class MonteCarloEngine:
                     config,
                     today.year + yr,
                 )
+                if is_retired:
+                    yr_spending += (
+                        _healthcare_monthly_cents_at_age(config, age) * 12 / 100
+                    )
                 yr_spending += tax_funding_by_year.get(today.year + yr, 0.0)
 
                 # Income: flat real, from the shared per-year precompute

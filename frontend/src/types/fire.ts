@@ -14,6 +14,7 @@ export interface FireConfig {
   pension_monthly: number | null;
   pension_start_age: number | null;
   healthcare_monthly_cost: number | null;
+  post_medicare_healthcare_monthly_cost: number | null;
   medicare_start_age: number;
   rmd_start_age: number;
   state_tax_rate: number | null;

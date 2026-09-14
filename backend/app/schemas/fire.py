@@ -25,6 +25,7 @@ class FireConfigResponse(BaseModel):
     pension_monthly: int | None = None
     pension_start_age: int | None = None
     healthcare_monthly_cost: int | None = None
+    post_medicare_healthcare_monthly_cost: int | None = None
     medicare_start_age: int = 65
     rmd_start_age: int = 73
     state_tax_rate: float | None = None
@@ -52,6 +53,7 @@ class FireConfigUpdate(BaseModel):
     pension_monthly: int | None = None
     pension_start_age: int | None = None
     healthcare_monthly_cost: int | None = None
+    post_medicare_healthcare_monthly_cost: int | None = None
     medicare_start_age: int | None = None
     rmd_start_age: int | None = None
     target_legacy: int | None = None

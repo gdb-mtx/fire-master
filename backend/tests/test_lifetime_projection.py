@@ -19,6 +19,7 @@ import pytest
 from app.engines.fire_projections import (
     FireProjectionsEngine,
     _annual_spending_with_mortgage,
+    _healthcare_monthly_cents_at_age,
 )
 from app.engines.net_worth import NetWorthEngine
 
@@ -131,6 +132,15 @@ async def test_fire_number_uses_withdrawal_rate_and_extra_healthcare(
     assert result.fire_number == 4_400_000
     assert result.lifetime_spend_down_number != result.fire_number
     assert result.taxes_included is False
+
+
+def test_healthcare_budget_switches_at_medicare(base_fire_config):
+    base_fire_config.healthcare_monthly_cost = 350_000
+    base_fire_config.post_medicare_healthcare_monthly_cost = 120_000
+    base_fire_config.medicare_start_age = 65
+
+    assert _healthcare_monthly_cents_at_age(base_fire_config, 64.9) == 350_000
+    assert _healthcare_monthly_cents_at_age(base_fire_config, 65) == 120_000
 
 
 async def test_lifetime_spending_is_flat_real(base_fire_config, frozen_today):

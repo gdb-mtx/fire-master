@@ -35,6 +35,7 @@ STARTER = dict(
     social_security_monthly=250_000,  # $2,500/mo (cents)
     social_security_start_age=67,
     healthcare_monthly_cost=80_000,  # $800/mo pre-Medicare (cents)
+    post_medicare_healthcare_monthly_cost=70_000,  # $700/mo Medicare + supplements (cents)
     medicare_start_age=65,
     rmd_start_age=73,
     custom_assumptions={

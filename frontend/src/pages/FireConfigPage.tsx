@@ -37,6 +37,7 @@ export default function FireConfigPage() {
     pension_monthly: "",
     pension_start_age: "",
     healthcare_monthly_cost: "",
+    post_medicare_healthcare_monthly_cost: "",
     medicare_start_age: "65",
     rmd_start_age: "73",
     state_tax_rate: "",
@@ -118,6 +119,7 @@ export default function FireConfigPage() {
         pension_monthly: config.pension_monthly ? (config.pension_monthly / 100).toString() : "",
         pension_start_age: config.pension_start_age?.toString() || "",
         healthcare_monthly_cost: config.healthcare_monthly_cost ? (config.healthcare_monthly_cost / 100).toString() : "",
+        post_medicare_healthcare_monthly_cost: config.post_medicare_healthcare_monthly_cost ? (config.post_medicare_healthcare_monthly_cost / 100).toString() : "",
         medicare_start_age: config.medicare_start_age.toString(),
         rmd_start_age: config.rmd_start_age.toString(),
         state_tax_rate: config.state_tax_rate?.toString() || "",
@@ -176,9 +178,16 @@ export default function FireConfigPage() {
     if (form.target_annual_spending) data.target_annual_spending = Math.round(parseFloat(form.target_annual_spending) * 100);
     if (form.social_security_monthly) data.social_security_monthly = Math.round(parseFloat(form.social_security_monthly) * 100);
     if (form.social_security_start_age) data.social_security_start_age = parseInt(form.social_security_start_age);
-    if (form.pension_monthly) data.pension_monthly = Math.round(parseFloat(form.pension_monthly) * 100);
-    if (form.pension_start_age) data.pension_start_age = parseInt(form.pension_start_age);
-    if (form.healthcare_monthly_cost) data.healthcare_monthly_cost = Math.round(parseFloat(form.healthcare_monthly_cost) * 100);
+    data.pension_monthly = form.pension_monthly
+      ? Math.round(parseFloat(form.pension_monthly) * 100)
+      : null;
+    data.pension_start_age = form.pension_start_age ? parseInt(form.pension_start_age) : null;
+    data.healthcare_monthly_cost = form.healthcare_monthly_cost
+      ? Math.round(parseFloat(form.healthcare_monthly_cost) * 100)
+      : null;
+    data.post_medicare_healthcare_monthly_cost = form.post_medicare_healthcare_monthly_cost
+      ? Math.round(parseFloat(form.post_medicare_healthcare_monthly_cost) * 100)
+      : null;
     if (form.medicare_start_age) data.medicare_start_age = parseInt(form.medicare_start_age);
     if (form.rmd_start_age) data.rmd_start_age = parseInt(form.rmd_start_age);
     if (form.state_tax_rate) data.state_tax_rate = parseFloat(form.state_tax_rate);
@@ -473,10 +482,15 @@ export default function FireConfigPage() {
         {/* Healthcare */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
           <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-4">Healthcare</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className={labelCls}>Healthcare Monthly ($)</label>
               <input type="number" value={form.healthcare_monthly_cost} onChange={(e) => setForm(f => ({ ...f, healthcare_monthly_cost: e.target.value }))} placeholder="ACA cost pre-Medicare" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Post-Medicare Healthcare ($/month)</label>
+              <input type="number" value={form.post_medicare_healthcare_monthly_cost} onChange={(e) => setForm(f => ({ ...f, post_medicare_healthcare_monthly_cost: e.target.value }))} placeholder="Medicare + supplements" className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">For both adults: Part B, Part D, supplements, and routine out-of-pocket costs.</p>
             </div>
             <div>
               <label className={labelCls}>Medicare Start Age</label>
@@ -1048,6 +1062,9 @@ function ExpenseBreakdown({
   const healthcareMo = config?.healthcare_monthly_cost
     ? Math.round(config.healthcare_monthly_cost / 100)
     : 0;
+  const postMedicareMo = config?.post_medicare_healthcare_monthly_cost
+    ? Math.round(config.post_medicare_healthcare_monthly_cost / 100)
+    : 0;
 
   const Row = ({ label, value, color, indent }: { label: string; value: string; color?: string; indent?: boolean }) => (
     <div className={`flex justify-between ${indent ? "ml-3" : ""}`}>
@@ -1104,7 +1121,8 @@ function ExpenseBreakdown({
           ))}
         </div>
         <p className="text-[10px] text-[var(--text-secondary)] mt-3 italic">
-          Source: fire_config.target_annual_spending + healthcare_monthly_cost (${healthcareMo}/mo, drops at Medicare)
+          Source: base spending + pre-Medicare healthcare (${healthcareMo}/mo), then
+          post-Medicare healthcare (${postMedicareMo}/mo)
           + custom_assumptions.property_sales. Spending phases apply on top.
         </p>
       </div>
@@ -1135,7 +1153,7 @@ function ExpenseBreakdown({
   const phase2 = hasSauvieSale
     ? baseBurn - miamiCost + postSaleRent - sauvieCost + healthcareMo // after primary sale too
     : baseBurn - miamiCost + postSaleRent + healthcareMo;
-  const phase2noHC = phase2 - healthcareMo; // post-Medicare
+  const phase2Medicare = phase2 - healthcareMo + postMedicareMo;
 
   return (
     <div className="bg-[var(--bg-card)] rounded p-3 border border-[var(--border)] md:col-span-2">
@@ -1184,12 +1202,12 @@ function ExpenseBreakdown({
           <Row label="Healthcare (until Medicare)" value={`+$${healthcareMo}`} color="red" />
           <div className="border-t border-[var(--border)] pt-1 mt-1">
             <Row label="Pre-Medicare" value={`$${phase2.toLocaleString()}/mo`} color="red" />
-            <Row label="Post-Medicare" value={`$${phase2noHC.toLocaleString()}/mo`} />
+            <Row label="Post-Medicare" value={`$${phase2Medicare.toLocaleString()}/mo`} />
           </div>
         </div>
       </div>
       <p className="text-[10px] text-[var(--text-secondary)] mt-3 italic">
-        Source: fire_config.target_annual_spending + healthcare_monthly_cost + scenario property adjustments (legacy keys).
+        Source: base spending + pre/post-Medicare healthcare + scenario property adjustments (legacy keys).
         P&amp;I from custom_assumptions.projection.primary_property_mortgage_pi. Spending phases apply on top.
       </p>
     </div>

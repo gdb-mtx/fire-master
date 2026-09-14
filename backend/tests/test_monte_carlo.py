@@ -83,7 +83,11 @@ class TestDeterminism:
         nw = start_nw
         for yr in range(TOTAL_YEARS):
             # Retired from year 0 (retirement date is mid-2026, same year)
-            yr_spending = annual_spending * _spending_multiplier(start_age + yr)
+            age = start_age + yr
+            yr_spending = annual_spending * _spending_multiplier(age)
+            # Fixture carries $600/mo of extra pre-Medicare healthcare.
+            if age < 65:
+                yr_spending += 7_200
             yr_income = 55_800.0 if yr >= SS_START_YEAR else 0.0  # SS flat real
             nw = nw * (1 + r_real) + yr_income - yr_spending
             if nw < 0:

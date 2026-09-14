@@ -1093,6 +1093,7 @@ class TaxEngine:
         from app.engines.fire_projections import (
             FireProjectionsEngine,
             _annual_spending_with_mortgage,
+            _healthcare_monthly_cents_at_age,
         )
 
         fire_engine = FireProjectionsEngine(self.db)
@@ -1151,12 +1152,10 @@ class TaxEngine:
             spending_need = _annual_spending_with_mortgage(
                 annual_need, 1.0, config, current_year,
             )
-            if (
-                is_retired
-                and config.healthcare_monthly_cost
-                and age < (config.medicare_start_age or 65)
-            ):
-                spending_need += config.healthcare_monthly_cost * 12 / 100
+            if is_retired:
+                spending_need += (
+                    _healthcare_monthly_cents_at_age(config, age) * 12 / 100
+                )
 
             # Income from sources (SS, pension, rental, etc.). Each type
             # bucket tracks ALL income (it offsets spending need either way)
