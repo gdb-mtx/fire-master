@@ -30,7 +30,6 @@ import {
   CartesianGrid,
   Line,
   ComposedChart,
-  ReferenceArea,
 } from "recharts";
 
 function StatCard({
@@ -302,7 +301,7 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
               const labels: Record<string, string> = {
                 cash: "Cash Balance",
                 net: "Net Monthly",
-                ira_draw: "SEPP Draw",
+                ira_draw: "IRA Withdrawal",
                 rrsp_draw: "RRIF Draw",
                 cash_interest: "Cash Interest",
                 income: "Income",
@@ -312,23 +311,11 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
             }}
           />
 
-          {/* SEPP/RRIF activation zone */}
-          <ReferenceArea x1={12} x2={59} fill="var(--blue)" fillOpacity={0.03} />
-
           {/* Zero line */}
           <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.5} />
 
           {/* Event markers */}
           {eventMarkers}
-
-          {/* SEPP start marker */}
-          <ReferenceLine
-            x={12}
-            stroke="var(--purple, #7a6aaa)"
-            strokeDasharray="4 4"
-            strokeOpacity={0.5}
-            label={{ value: "SEPP+RRIF", position: "top", fill: "var(--purple, #7a6aaa)", fontSize: 9 }}
-          />
 
           {/* Cash balance area */}
           <Area type="monotone" dataKey="cash" stroke="var(--green)" strokeWidth={2} fill="url(#gradBridgeCash)" dot={false} />
@@ -346,7 +333,6 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
           { label: "Cash Balance", color: "var(--green)" },
           { label: "Net Monthly", color: "var(--blue)", dashed: true },
           { label: "Events", color: "var(--yellow)", dot: true },
-          { label: "SEPP+RRIF zone", color: "var(--purple, #7a6aaa)", dashed: true },
         ].map((l) => (
           <div key={l.label} className="flex items-center gap-1.5">
             <div
@@ -614,6 +600,7 @@ export default function RetirementPage() {
 
   const { data: wealthProjection, isLoading: loadingWealth } = useWealthProjection(spendingOverrideCents);
   const { data: bridgeProjection } = useBridgeProjection(spendingOverrideCents);
+  const hasSeppPlan = (wealthProjection?.sepp_monthly ?? 0) > 0;
 
   // Wealth chart data, hoisted so the milestone markers can snap to the
   // chart's own x values (category axis requires exact matches — the old
@@ -965,9 +952,9 @@ export default function RetirementPage() {
                         const labels: Record<string, string> = {
                           real_estate: "Real Estate",
                           illiquid: "Private Venture",
-                          ira_growth: "IRA-B (growth)",
+                          ira_growth: "Traditional retirement",
                           rrsp: "RRSP/RRIF",
-                          ira_sepp: "IRA-A (SEPP)",
+                          ira_sepp: "SEPP IRA (optional)",
                           cash: "Cash (bridge)",
                           taxable: "Taxable brokerage",
                           roth: "Roth (tax-free)",
@@ -987,7 +974,7 @@ export default function RetirementPage() {
                     <Area type="monotone" dataKey="ira_growth" stackId="wealth" stroke="var(--blue)" strokeWidth={0} fill="url(#gradIraB)" />
                     <Area type="monotone" dataKey="taxable" stackId="wealth" stroke="#2aa6b8" strokeWidth={0} fill="url(#gradTaxable)" />
                     <Area type="monotone" dataKey="roth" stackId="wealth" stroke="#5b8c3a" strokeWidth={0} fill="url(#gradRoth)" />
-                    <Area type="monotone" dataKey="ira_sepp" stackId="wealth" stroke="var(--purple, #7a6aaa)" strokeWidth={0} fill="url(#gradIraA)" />
+                    {hasSeppPlan && <Area type="monotone" dataKey="ira_sepp" stackId="wealth" stroke="var(--purple, #7a6aaa)" strokeWidth={0} fill="url(#gradIraA)" />}
                     <Area type="monotone" dataKey="rrsp" stackId="wealth" stroke="var(--pink, #9e4a7a)" strokeWidth={0} fill="url(#gradRRSP)" />
                     <Area type="monotone" dataKey="illiquid" stackId="wealth" stroke="var(--orange, #b06830)" strokeWidth={0} fill="url(#gradIlliquid)" />
                     <Area type="monotone" dataKey="real_estate" stackId="wealth" stroke="var(--yellow)" strokeWidth={0} fill="url(#gradRE)" />
@@ -1021,8 +1008,8 @@ export default function RetirementPage() {
                       { label: "Private Venture", color: "var(--orange, #b06830)" },
                       { label: "Cash (bridge)", color: "var(--green)" },
                       { label: "RRSP/RRIF", color: "var(--pink, #9e4a7a)" },
-                      { label: "IRA-A (SEPP)", color: "var(--purple, #7a6aaa)" },
-                      { label: "IRA-B (growth)", color: "var(--blue)" },
+                      ...(hasSeppPlan ? [{ label: "SEPP IRA", color: "var(--purple, #7a6aaa)" }] : []),
+                      { label: "Traditional retirement", color: "var(--blue)" },
                       { label: "Taxable", color: "#2aa6b8" },
                       { label: "Roth", color: "#5b8c3a" },
                       { label: "Total", color: "#1a1a1e", dashed: true },
@@ -1045,7 +1032,7 @@ export default function RetirementPage() {
               </>
             ) : (
               <div className="flex items-center justify-center h-[400px] text-[var(--text-secondary)] text-sm">
-                {loadingWealth ? "Computing wealth projection..." : "Configure FIRE settings and SEPP assumptions to see projection."}
+                {loadingWealth ? "Computing wealth projection..." : "Configure FIRE settings to see the projection."}
               </div>
             )}
           </div>

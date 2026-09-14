@@ -369,6 +369,17 @@ export function useCreateIncomeSource() {
   });
 }
 
+export function useUpdateIncomeSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Partial<IncomeSource> }) =>
+      putJSON<IncomeSource>(`${BASE}/fire/income/${id}`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["fire"] });
+    },
+  });
+}
+
 export function useDeleteIncomeSource() {
   const queryClient = useQueryClient();
   return useMutation({

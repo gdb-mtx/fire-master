@@ -5,6 +5,7 @@ import {
   useUpdateFireConfig,
   useIncomeSources,
   useCreateIncomeSource,
+  useUpdateIncomeSource,
   useDeleteIncomeSource,
   useScenarios,
   useCreateScenario,
@@ -19,6 +20,7 @@ export default function FireConfigPage() {
   const updateConfig = useUpdateFireConfig();
   const { data: incomeSources } = useIncomeSources();
   const createIncome = useCreateIncomeSource();
+  const updateIncome = useUpdateIncomeSource();
   const deleteIncome = useDeleteIncomeSource();
 
   const [form, setForm] = useState({
@@ -70,9 +72,13 @@ export default function FireConfigPage() {
     name: "",
     income_type: "salary",
     annual_amount: "",
+    projection_annual_amount: "",
+    start_date: "",
     end_date: "",
     growth_rate: "",
+    is_taxable: true,
   });
+  const [editingIncomeId, setEditingIncomeId] = useState<string | null>(null);
 
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved">("idle");
   const [incomeError, setIncomeError] = useState("");
@@ -201,32 +207,86 @@ export default function FireConfigPage() {
     });
   };
 
-  const handleAddIncome = () => {
-    if (!incomeForm.name || !incomeForm.annual_amount) {
-      setIncomeError("Name and annual amount are required");
+  const resetIncomeForm = () => {
+    setIncomeForm({
+      name: "",
+      income_type: "salary",
+      annual_amount: "",
+      projection_annual_amount: "",
+      start_date: "",
+      end_date: "",
+      growth_rate: "",
+      is_taxable: true,
+    });
+    setEditingIncomeId(null);
+    setIncomeError("");
+  };
+
+  const beginIncomeEdit = (source: NonNullable<typeof incomeSources>[number]) => {
+    setEditingIncomeId(source.id);
+    setIncomeForm({
+      name: source.name,
+      income_type: source.income_type,
+      annual_amount: source.annual_amount.toString(),
+      projection_annual_amount: source.projection_annual_amount.toString(),
+      start_date: source.start_date ?? "",
+      end_date: source.end_date ?? "",
+      growth_rate: source.growth_rate?.toString() ?? "",
+      is_taxable: source.is_taxable,
+    });
+    setIncomeError("");
+  };
+
+  const handleSaveIncome = () => {
+    const grossAmount = parseFloat(incomeForm.annual_amount);
+    const projectedAmount = incomeForm.projection_annual_amount
+      ? parseFloat(incomeForm.projection_annual_amount)
+      : grossAmount;
+    if (!incomeForm.name || !(grossAmount > 0) || !(projectedAmount >= 0)) {
+      setIncomeError("Name and valid annual amounts are required");
       return;
     }
-    setIncomeError("");
-    createIncome.mutate({
+
+    const existing = incomeSources?.find((source) => source.id === editingIncomeId);
+    const customData: Record<string, unknown> = { ...(existing?.custom_data ?? {}) };
+    if (Math.abs(projectedAmount - grossAmount) >= 0.01) {
+      customData.net_annual_amount = Math.round(projectedAmount * 100);
+    } else {
+      delete customData.net_annual_amount;
+    }
+
+    const payload = {
       name: incomeForm.name,
       income_type: incomeForm.income_type,
-      annual_amount: Math.round(parseFloat(incomeForm.annual_amount) * 100),
+      annual_amount: Math.round(grossAmount * 100),
       frequency: "monthly",
-      end_date: incomeForm.end_date || undefined,
-      growth_rate: incomeForm.growth_rate ? parseFloat(incomeForm.growth_rate) : undefined,
-    } as any, {
-      onSuccess: () => {
-        setIncomeForm({ name: "", income_type: "salary", annual_amount: "", end_date: "", growth_rate: "" });
-        setIncomeError("");
-      },
-      onError: (err: Error) => {
-        setIncomeError(err.message);
-      },
-    });
+      start_date: incomeForm.start_date || null,
+      end_date: incomeForm.end_date || null,
+      growth_rate: incomeForm.growth_rate ? parseFloat(incomeForm.growth_rate) : null,
+      is_taxable: incomeForm.is_taxable,
+      tax_treatment: incomeForm.is_taxable
+        ? (projectedAmount !== grossAmount ? "gross_with_net_projection" : "gross")
+        : "net_of_tax",
+      custom_data: customData,
+    };
+
+    setIncomeError("");
+    const callbacks = {
+      onSuccess: resetIncomeForm,
+      onError: (err: Error) => setIncomeError(err.message),
+    };
+    if (editingIncomeId) {
+      updateIncome.mutate({ id: editingIncomeId, data: payload as any }, callbacks);
+    } else {
+      createIncome.mutate(payload as any, callbacks);
+    }
   };
 
   const { data: activeScenarios } = useScenarios();
   const activeScenario = activeScenarios?.find((s) => s.is_active);
+  const ssBasis = (
+    (config?.custom_assumptions as Record<string, unknown> | null)?.social_security ?? null
+  ) as Record<string, unknown> | null;
 
   if (isLoading || !config) {
     return (
@@ -332,6 +392,15 @@ export default function FireConfigPage() {
             <div>
               <label className={labelCls}>Social Security Monthly ($)</label>
               <input type="number" value={form.social_security_monthly} onChange={(e) => setForm(f => ({ ...f, social_security_monthly: e.target.value }))} placeholder="0" className={inputCls} />
+              {ssBasis ? (
+                <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+                  Saved basis: {String(ssBasis.workers)} max-credit workers ×{" "}
+                  {formatCurrency(Number(ssBasis.reference_max_monthly_per_worker))}/month ×{" "}
+                  {Math.round(Number(ssBasis.benefit_fraction) * 100)}%.
+                </p>
+              ) : (
+                <p className="text-[10px] text-[var(--text-secondary)] mt-1">Add both spouses' estimates at the selected claiming age.</p>
+              )}
             </div>
             <div>
               <label className={labelCls}>SS Start Age</label>
@@ -519,11 +588,16 @@ export default function FireConfigPage() {
         {/* Income Sources */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
           <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-4">
-            Income Sources
+            Income Plan
             <span className="ml-2 text-xs font-normal">
               ({incomeSources?.length ?? 0})
             </span>
           </h3>
+          <p className="text-xs text-[var(--text-secondary)] mb-4">
+            Use dated phases to model a future pay cut: give the current phase an end date,
+            then add the lower-income phase with the following start date. Gross income feeds
+            the tax page; projected cash flow is what the retirement forecasts can invest.
+          </p>
 
           {/* Existing sources */}
           {incomeSources && incomeSources.length > 0 && (
@@ -533,6 +607,7 @@ export default function FireConfigPage() {
                   <div>
                     <span className="text-sm text-[var(--text-primary)]">{src.name}</span>
                     <span className="ml-2 text-xs text-[var(--text-secondary)]">{src.income_type}</span>
+                    {src.start_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">starts {src.start_date}</span>}
                     {src.end_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">ends {src.end_date}</span>}
                   </div>
                   <div className="flex items-center gap-3">
@@ -544,18 +619,19 @@ export default function FireConfigPage() {
                         </div>
                       )}
                     </div>
-                    <button onClick={() => deleteIncome.mutate(src.id)} className="text-xs text-[var(--text-secondary)] hover:text-[var(--red)] transition-colors">&times;</button>
+                    <button onClick={() => beginIncomeEdit(src)} className="text-xs text-[var(--blue)] hover:text-[var(--text-primary)] transition-colors">Edit</button>
+                    <button onClick={() => deleteIncome.mutate(src.id)} className="text-xs text-[var(--text-secondary)] hover:text-[var(--red)] transition-colors">Delete</button>
                   </div>
                 </div>
               ))}
             </div>
           )}
 
-          {/* Add new */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3 items-end">
+          {/* Add or edit an income phase */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 items-end">
             <div>
-              <label className={labelCls}>Name</label>
-              <input type="text" value={incomeForm.name} onChange={(e) => setIncomeForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g., Salary" className={inputCls} />
+              <label className={labelCls}>Phase Name</label>
+              <input type="text" value={incomeForm.name} onChange={(e) => setIncomeForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g., Current compensation" className={inputCls} />
             </div>
             <div>
               <label className={labelCls}>Type</label>
@@ -569,16 +645,39 @@ export default function FireConfigPage() {
               </select>
             </div>
             <div>
-              <label className={labelCls}>Annual ($)</label>
+              <label className={labelCls}>Gross Annual ($)</label>
               <input type="number" value={incomeForm.annual_amount} onChange={(e) => setIncomeForm(f => ({ ...f, annual_amount: e.target.value }))} placeholder="0" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Projected Cash Flow ($)</label>
+              <input type="number" value={incomeForm.projection_annual_amount} onChange={(e) => setIncomeForm(f => ({ ...f, projection_annual_amount: e.target.value }))} placeholder="Defaults to gross" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Start Date</label>
+              <input type="date" value={incomeForm.start_date} onChange={(e) => setIncomeForm(f => ({ ...f, start_date: e.target.value }))} className={inputCls} />
             </div>
             <div>
               <label className={labelCls}>End Date</label>
               <input type="date" value={incomeForm.end_date} onChange={(e) => setIncomeForm(f => ({ ...f, end_date: e.target.value }))} className={inputCls} />
             </div>
-            <button onClick={handleAddIncome} disabled={createIncome.isPending} className="px-3 py-2 text-xs font-medium bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--blue)] transition-colors disabled:opacity-50">
-              Add
-            </button>
+            <div>
+              <label className={labelCls}>Annual Raise %</label>
+              <input type="number" step="0.1" value={incomeForm.growth_rate} onChange={(e) => setIncomeForm(f => ({ ...f, growth_rate: e.target.value }))} placeholder="0" className={inputCls} />
+            </div>
+            <label className="flex items-center gap-2 pb-2 text-xs text-[var(--text-secondary)]">
+              <input type="checkbox" checked={incomeForm.is_taxable} onChange={(e) => setIncomeForm(f => ({ ...f, is_taxable: e.target.checked }))} />
+              Gross amount is taxable
+            </label>
+            <div className="sm:col-span-2 md:col-span-4 flex gap-2">
+              <button onClick={handleSaveIncome} disabled={createIncome.isPending || updateIncome.isPending} className="px-3 py-2 text-xs font-medium bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--blue)] transition-colors disabled:opacity-50">
+                {editingIncomeId ? "Save Income Phase" : "Add Income Phase"}
+              </button>
+              {editingIncomeId && (
+                <button onClick={resetIncomeForm} className="px-3 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+                  Cancel
+                </button>
+              )}
+            </div>
           </div>
           {incomeError && (
             <p className="text-xs text-[var(--red)] mt-2">{incomeError}</p>

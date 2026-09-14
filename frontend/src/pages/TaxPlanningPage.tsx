@@ -77,6 +77,10 @@ const SEPP_INPUT_CLASS =
 function SeppCalculatorCard({ deferredBalance }: { deferredBalance?: number }) {
   const { data: fireConfig } = useFireConfig();
   const updateConfig = useUpdateFireConfig();
+  const seppConfig = (
+    (fireConfig?.custom_assumptions as Record<string, unknown> | null)?.sepp ?? {}
+  ) as Record<string, unknown>;
+  const hasActiveSepp = Number(seppConfig.sepp_monthly ?? 0) > 0;
 
   const [balanceStr, setBalanceStr] = useState("");
   const [ageStr, setAgeStr] = useState("");
@@ -158,6 +162,11 @@ function SeppCalculatorCard({ deferredBalance }: { deferredBalance?: number }) {
     );
   };
 
+  const removePlan = () => {
+    updateConfig.mutate({ custom_assumptions: { sepp: null } });
+    setConfirming(false);
+  };
+
   return (
     <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
       <div className="flex items-center justify-between mb-4">
@@ -166,7 +175,7 @@ function SeppCalculatorCard({ deferredBalance }: { deferredBalance?: number }) {
             SEPP / 72(t) Calculator
           </h3>
           <span className="text-xs text-[var(--text-secondary)]">
-            Penalty-free withdrawals before 59½ &middot; Rev. Rul. 2002-62, Notice 2022-6
+            Optional early IRA withdrawals &middot; unrelated to self-employment
           </span>
         </div>
         {sepp && (
@@ -179,6 +188,25 @@ function SeppCalculatorCard({ deferredBalance }: { deferredBalance?: number }) {
             </span>
           </div>
         )}
+      </div>
+
+      <div className={`mb-4 rounded border px-3 py-2 text-xs ${
+        hasActiveSepp
+          ? "border-[var(--yellow)] text-[var(--yellow)]"
+          : "border-[var(--border)] text-[var(--text-secondary)]"
+      }`}>
+        <div className="flex items-center justify-between gap-3">
+          <span>
+            {hasActiveSepp
+              ? `Active SEPP plan: ${fmt(Number(seppConfig.sepp_monthly))}/month.`
+              : "No SEPP plan is active. The calculator below is optional and does not affect projections unless you apply it."}
+          </span>
+          {hasActiveSepp && (
+            <button onClick={removePlan} className="shrink-0 text-[var(--red)] hover:underline">
+              Remove plan
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -330,8 +358,8 @@ function SeppCalculatorCard({ deferredBalance }: { deferredBalance?: number }) {
             </button>
           )}
           <p className="text-[10px] text-[var(--text-secondary)]">
-            Writes sepp_monthly + ira_a_balance to the BASE config (scenarios
-            keep their own overrides). Projections refresh automatically.
+            Applying creates a 72(t) IRA-withdrawal plan. It is only useful if
+            you intentionally need retirement-account money before age 59½.
           </p>
           {updateConfig.isSuccess && !confirming && (
             <p className="text-[11px] text-[var(--green)]">Applied — SEPP plan updated.</p>
