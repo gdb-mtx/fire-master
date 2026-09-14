@@ -51,6 +51,14 @@ export default function FireConfigPage() {
     federal_itemized_deduction: "",
     state_deduction_method: "standard",
     state_itemized_deduction: "",
+    dynamic_itemized_enabled: false,
+    annual_property_tax: "",
+    annual_charitable_gifts: "",
+    annual_other_federal: "",
+    annual_other_california: "",
+    annual_california_unlimited: "",
+    federal_mortgage_debt_limit: "750000",
+    california_mortgage_debt_limit: "1000000",
     // Projection assumptions (stored in custom_assumptions.projection)
     // ALL RATES ARE REAL (after inflation, in today's dollars)
     surplus_investment_rate: "4",
@@ -93,6 +101,7 @@ export default function FireConfigPage() {
     if (config && version !== lastConfigVersion) {
       const ca = config.custom_assumptions as Record<string, unknown> | undefined;
       const tax = ca?.tax as Record<string, unknown> | undefined;
+      const itemized = tax?.itemized_deductions as Record<string, unknown> | undefined;
       const proj = ca?.projection as Record<string, unknown> | undefined;
       setForm({
         date_of_birth: config.date_of_birth || "",
@@ -121,6 +130,14 @@ export default function FireConfigPage() {
         federal_itemized_deduction: (tax?.federal_itemized_deduction as number)?.toString() || "",
         state_deduction_method: (tax?.state_deduction_method as string) || "standard",
         state_itemized_deduction: (tax?.state_itemized_deduction as number)?.toString() || "",
+        dynamic_itemized_enabled: (itemized?.enabled as boolean) || false,
+        annual_property_tax: (itemized?.annual_property_tax as number)?.toString() || "",
+        annual_charitable_gifts: (itemized?.annual_charitable_gifts as number)?.toString() || "",
+        annual_other_federal: (itemized?.annual_other_federal as number)?.toString() || "",
+        annual_other_california: (itemized?.annual_other_california as number)?.toString() || "",
+        annual_california_unlimited: (itemized?.annual_california_unlimited as number)?.toString() || "",
+        federal_mortgage_debt_limit: (itemized?.federal_mortgage_debt_limit as number)?.toString() || "750000",
+        california_mortgage_debt_limit: (itemized?.california_mortgage_debt_limit as number)?.toString() || "1000000",
         // Projection assumptions — read from saved config or use defaults
         surplus_investment_rate: proj?.surplus_investment_rate != null ? ((proj.surplus_investment_rate as number) * 100).toString() : "4",
         cash_reserve_months: (proj?.cash_reserve_months as number)?.toString() || "12",
@@ -189,6 +206,16 @@ export default function FireConfigPage() {
         state_itemized_deduction: form.state_itemized_deduction
           ? parseFloat(form.state_itemized_deduction)
           : null,
+        itemized_deductions: {
+          enabled: form.dynamic_itemized_enabled,
+          annual_property_tax: pf(form.annual_property_tax, 0),
+          annual_charitable_gifts: pf(form.annual_charitable_gifts, 0),
+          annual_other_federal: pf(form.annual_other_federal, 0),
+          annual_other_california: pf(form.annual_other_california, 0),
+          annual_california_unlimited: pf(form.annual_california_unlimited, 0),
+          federal_mortgage_debt_limit: pf(form.federal_mortgage_debt_limit, 750000),
+          california_mortgage_debt_limit: pf(form.california_mortgage_debt_limit, 1000000),
+        },
       },
       projection: {
         surplus_investment_rate: pf(form.surplus_investment_rate, 4) / 100,
@@ -498,6 +525,7 @@ export default function FireConfigPage() {
               <select value={form.federal_deduction_method} onChange={(e) => setForm(f => ({ ...f, federal_deduction_method: e.target.value }))} className={inputCls}>
                 <option value="standard">Standard deduction</option>
                 <option value="itemized">Itemized deduction</option>
+                <option value="greater_of">Best available each year</option>
               </select>
             </div>
             <div>
@@ -509,12 +537,66 @@ export default function FireConfigPage() {
               <select value={form.state_deduction_method} onChange={(e) => setForm(f => ({ ...f, state_deduction_method: e.target.value }))} className={inputCls}>
                 <option value="standard">Standard deduction</option>
                 <option value="itemized">Itemized deduction</option>
+                <option value="greater_of">Best available each year</option>
               </select>
             </div>
             <div>
               <label className={labelCls}>{form.state_of_residence.trim().toUpperCase() === "CA" ? "California Itemized Deductions ($/year)" : "State Itemized Deductions ($/year)"}</label>
               <input type="number" min={0} value={form.state_itemized_deduction} onChange={(e) => setForm(f => ({ ...f, state_itemized_deduction: e.target.value }))} disabled={form.state_deduction_method !== "itemized"} placeholder="From state return" className={inputCls} />
             </div>
+            <div className="sm:col-span-2 md:col-span-3 border-t border-[var(--border)] pt-4 mt-1">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.dynamic_itemized_enabled}
+                  onChange={(e) => setForm(f => ({
+                    ...f,
+                    dynamic_itemized_enabled: e.target.checked,
+                    federal_deduction_method: e.target.checked ? "greater_of" : f.federal_deduction_method,
+                    state_deduction_method: e.target.checked ? "greater_of" : f.state_deduction_method,
+                  }))}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="block text-xs font-medium text-[var(--text-primary)]">Model itemized deductions year by year</span>
+                  <span className="block text-[10px] text-[var(--text-secondary)] mt-1">
+                    Amortizes mortgage interest, applies the income-dependent federal SALT cap, and reduces California deductions at high income.
+                  </span>
+                </span>
+              </label>
+            </div>
+            {form.dynamic_itemized_enabled && (
+              <>
+                <div>
+                  <label className={labelCls}>Annual Property Tax ($)</label>
+                  <input type="number" min={0} value={form.annual_property_tax} onChange={(e) => setForm(f => ({ ...f, annual_property_tax: e.target.value }))} placeholder="Property tax only" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Annual Charitable Gifts ($)</label>
+                  <input type="number" min={0} value={form.annual_charitable_gifts} onChange={(e) => setForm(f => ({ ...f, annual_charitable_gifts: e.target.value }))} placeholder="Recurring annual amount" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Other Federal Itemized ($)</label>
+                  <input type="number" min={0} value={form.annual_other_federal} onChange={(e) => setForm(f => ({ ...f, annual_other_federal: e.target.value }))} placeholder="Excludes mortgage, SALT, gifts" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Other CA Limited Deductions ($)</label>
+                  <input type="number" min={0} value={form.annual_other_california} onChange={(e) => setForm(f => ({ ...f, annual_other_california: e.target.value }))} placeholder="Subject to CA income limitation" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>CA Unlimited Deductions ($)</label>
+                  <input type="number" min={0} value={form.annual_california_unlimited} onChange={(e) => setForm(f => ({ ...f, annual_california_unlimited: e.target.value }))} placeholder="Medical, investment interest, etc." className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Federal Mortgage Debt Limit ($)</label>
+                  <input type="number" min={0} value={form.federal_mortgage_debt_limit} onChange={(e) => setForm(f => ({ ...f, federal_mortgage_debt_limit: e.target.value }))} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>California Mortgage Debt Limit ($)</label>
+                  <input type="number" min={0} value={form.california_mortgage_debt_limit} onChange={(e) => setForm(f => ({ ...f, california_mortgage_debt_limit: e.target.value }))} className={inputCls} />
+                </div>
+              </>
+            )}
             <div>
               <label className={labelCls}>Federal Marginal Rate %</label>
               <input type="number" step="0.1" value={form.federal_marginal_rate} onChange={(e) => setForm(f => ({ ...f, federal_marginal_rate: e.target.value }))} placeholder="Auto-computed" className={inputCls} />

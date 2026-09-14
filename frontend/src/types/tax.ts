@@ -45,6 +45,9 @@ export interface BracketAnalysis {
   gross_income: number;
   standard_deduction: number;
   federal_deduction_method: string;
+  federal_itemized_deduction: number;
+  federal_salt_deduction: number;
+  federal_mortgage_interest: number;
   taxable_income: number;
   federal_tax: number;
   federal_brackets: BracketDetail[];
@@ -58,6 +61,9 @@ export interface BracketAnalysis {
   state_taxable_income: number;
   state_standard_deduction: number;
   state_deduction_method: string;
+  state_itemized_before_limit: number;
+  state_itemized_limitation: number;
+  state_mortgage_interest: number;
   state_income_tax: number;
   state_payroll_tax: number;
   state_effective_rate: number;

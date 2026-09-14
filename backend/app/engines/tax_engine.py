@@ -98,6 +98,13 @@ CA_STANDARD_DEDUCTION_2025 = {
 CA_BEHAVIORAL_HEALTH_SURTAX_THRESHOLD = 1_000_000
 CA_BEHAVIORAL_HEALTH_SURTAX_RATE = 0.01
 CA_SDI_RATE_2026 = 0.013
+CA_ITEMIZED_LIMIT_THRESHOLDS_2025 = {
+    "single": 252_203,
+    "married_filing_jointly": 504_411,
+}
+FEDERAL_SALT_BASE_CAP_2025 = 40_000
+FEDERAL_SALT_PHASEOUT_AGI_2025 = 500_000
+FEDERAL_SALT_FLOOR = 10_000
 
 # Long-term capital gains brackets (2026 estimates)
 LTCG_BRACKETS: dict[str, list[dict]] = {
@@ -385,39 +392,35 @@ class TaxEngine:
         status = tax_config.get("filing_status", "single")
         return DEFAULT_BRACKETS.get(status, DEFAULT_BRACKETS["single"])
 
-    def _get_standard_deduction(self, tax_config: dict) -> float:
-        """Get the configured federal deduction (legacy name retained)."""
+    def _get_federal_standard_deduction(self, tax_config: dict) -> float:
+        """Get the federal standard deduction before itemization."""
         status = tax_config.get("filing_status", "single")
         configured_standard = tax_config.get("standard_deduction")
-        standard = (
+        return (
             float(configured_standard)
             if configured_standard is not None
             else DEFAULT_STANDARD_DEDUCTION.get(
                 status, DEFAULT_STANDARD_DEDUCTION["single"],
             )
         )
+
+    def _get_standard_deduction(self, tax_config: dict) -> float:
+        """Get the configured federal deduction (legacy name retained)."""
+        standard = self._get_federal_standard_deduction(tax_config)
         itemized = tax_config.get("federal_itemized_deduction")
         method = tax_config.get("federal_deduction_method", "standard")
-        if itemized is not None and method == "itemized":
-            return max(0.0, float(itemized))
-        if itemized is not None and method == "greater_of":
-            return max(standard, float(itemized))
-        return standard
+        return self._select_deduction(
+            method,
+            standard,
+            float(itemized) if itemized is not None else None,
+        )[0]
 
     def _get_federal_deduction_method(self, tax_config: dict) -> str:
         """Describe which configured federal deduction is actually in use."""
         method = tax_config.get("federal_deduction_method", "standard")
         itemized = tax_config.get("federal_itemized_deduction")
         if itemized is not None and method == "greater_of":
-            status = tax_config.get("filing_status", "single")
-            configured_standard = tax_config.get("standard_deduction")
-            standard = (
-                float(configured_standard)
-                if configured_standard is not None
-                else DEFAULT_STANDARD_DEDUCTION.get(
-                    status, DEFAULT_STANDARD_DEDUCTION["single"],
-                )
-            )
+            standard = self._get_federal_standard_deduction(tax_config)
             return "itemized" if float(itemized) > standard else "standard"
         if itemized is not None and method == "itemized":
             return "itemized"
@@ -427,6 +430,174 @@ class TaxEngine:
     def _is_california(tax_config: dict) -> bool:
         state = str(tax_config.get("state") or "").strip().upper()
         return state in {"CA", "CALIFORNIA"}
+
+    @staticmethod
+    def _itemized_config(tax_config: dict) -> dict:
+        value = tax_config.get("itemized_deductions") or {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _select_deduction(
+        method: str,
+        standard_deduction: float,
+        itemized_deduction: float | None,
+    ) -> tuple[float, str]:
+        if itemized_deduction is None:
+            return standard_deduction, "standard"
+        if method == "itemized":
+            return max(0.0, itemized_deduction), "itemized"
+        if method == "greater_of":
+            if itemized_deduction > standard_deduction:
+                return itemized_deduction, "itemized"
+            return standard_deduction, "standard"
+        return standard_deduction, "standard"
+
+    @staticmethod
+    def _federal_salt_cap(year: int, magi: float, filing_status: str) -> float:
+        """Current-law SALT cap, including the temporary 2025-2029 expansion."""
+        if not 2025 <= year <= 2029:
+            return FEDERAL_SALT_FLOOR / (2 if filing_status == "married_filing_separately" else 1)
+
+        growth = 1.01 ** (year - 2025)
+        base_cap = FEDERAL_SALT_BASE_CAP_2025 * growth
+        phaseout_start = FEDERAL_SALT_PHASEOUT_AGI_2025 * growth
+        floor = FEDERAL_SALT_FLOOR
+        if filing_status == "married_filing_separately":
+            base_cap /= 2
+            phaseout_start /= 2
+            floor /= 2
+        return max(floor, base_cap - 0.30 * max(0.0, magi - phaseout_start))
+
+    def _state_itemized_deduction(
+        self,
+        state_agi: float,
+        tax_config: dict,
+        mortgage_interest: float,
+    ) -> tuple[float | None, float, float]:
+        """Return usable CA itemized deduction, pre-limit total, and limitation."""
+        itemized = self._itemized_config(tax_config)
+        if not itemized.get("enabled", False) or not self._is_california(tax_config):
+            return None, 0.0, 0.0
+
+        property_tax = float(itemized.get("annual_property_tax") or 0.0)
+        charitable = float(itemized.get("annual_charitable_gifts") or 0.0)
+        other_limited = float(itemized.get("annual_other_california") or 0.0)
+        unlimited = float(itemized.get("annual_california_unlimited") or 0.0)
+        limited = mortgage_interest + property_tax + charitable + other_limited
+        before_limit = limited + unlimited
+
+        status = tax_config.get("filing_status", "single")
+        threshold = float(
+            itemized.get("california_limitation_threshold")
+            or CA_ITEMIZED_LIMIT_THRESHOLDS_2025.get(
+                status, CA_ITEMIZED_LIMIT_THRESHOLDS_2025["single"],
+            )
+        )
+        limitation = min(
+            limited * 0.80,
+            max(0.0, state_agi - threshold) * 0.06,
+        )
+        return max(0.0, before_limit - limitation), before_limit, limitation
+
+    def _federal_itemized_deduction(
+        self,
+        year: int,
+        federal_agi: float,
+        state_tax_paid: float,
+        tax_config: dict,
+        mortgage_interest: float,
+    ) -> tuple[float | None, float]:
+        """Return federal itemized deductions and the allowed SALT component."""
+        itemized = self._itemized_config(tax_config)
+        if not itemized.get("enabled", False):
+            return None, 0.0
+
+        property_tax = float(itemized.get("annual_property_tax") or 0.0)
+        charitable = float(itemized.get("annual_charitable_gifts") or 0.0)
+        other = float(itemized.get("annual_other_federal") or 0.0)
+        salt_paid = property_tax + max(0.0, state_tax_paid)
+        salt_allowed = min(
+            salt_paid,
+            self._federal_salt_cap(
+                year, federal_agi, tax_config.get("filing_status", "single"),
+            ),
+        )
+        return mortgage_interest + salt_allowed + charitable + other, salt_allowed
+
+    async def _primary_mortgage_balance(self) -> float:
+        if self.db is None:
+            return 0.0
+        result = await self.db.execute(
+            select(Account).where(Account.fire_role == "primary_mortgage")
+        )
+        return sum(
+            abs(account.current_balance) for account in result.scalars().all()
+            if not account.is_asset
+        ) / 100
+
+    @staticmethod
+    def _mortgage_interest_schedule(
+        config: FireConfig,
+        current_balance: float,
+        start_year: int,
+        years: int,
+    ) -> dict[int, tuple[float, float]]:
+        """Annual deductible federal/CA interest from the live amortizing loan."""
+        itemized = ((config.custom_assumptions or {}).get("tax", {}) or {}).get(
+            "itemized_deductions", {},
+        ) or {}
+        projection = (config.custom_assumptions or {}).get("projection", {}) or {}
+        payment = float(projection.get("primary_property_mortgage_pi") or 0.0)
+        rate = float(projection.get("primary_property_mortgage_rate") or 0.0)
+        payoff_raw = projection.get("primary_property_mortgage_payoff_date")
+        try:
+            payoff = date.fromisoformat(payoff_raw) if isinstance(payoff_raw, str) else payoff_raw
+        except ValueError:
+            payoff = None
+        if current_balance <= 0 or payment <= 0 or rate <= 0:
+            return {}
+
+        monthly_rate = rate / 12
+        balance = current_balance
+        # Reconstruct an approximate January balance from the latest synced
+        # balance so the current calendar year's interest is not understated.
+        today = date.today()
+        for _ in range(max(0, today.month - 1)):
+            balance = (balance + payment) / (1 + monthly_rate)
+
+        federal_limit = float(itemized.get("federal_mortgage_debt_limit") or 750_000)
+        california_limit = float(itemized.get("california_mortgage_debt_limit") or 1_000_000)
+        schedule: dict[int, tuple[float, float]] = {}
+        for year in range(start_year, start_year + years):
+            federal_interest = 0.0
+            california_interest = 0.0
+            for month in range(1, 13):
+                month_date = date(year, month, 1)
+                if payoff and month_date >= payoff:
+                    balance = 0.0
+                    continue
+                if balance <= 0:
+                    continue
+                interest = balance * monthly_rate
+                federal_interest += interest * min(1.0, federal_limit / balance)
+                california_interest += interest * min(1.0, california_limit / balance)
+                principal = min(balance, max(0.0, payment - interest))
+                balance -= principal
+            schedule[year] = (federal_interest, california_interest)
+        return schedule
+
+    async def _mortgage_interest_by_year(
+        self,
+        config: FireConfig,
+        tax_config: dict,
+        start_year: int,
+        years: int,
+    ) -> dict[int, tuple[float, float]]:
+        itemized = self._itemized_config(tax_config)
+        if not itemized.get("enabled", False):
+            return {}
+        balance = await self._primary_mortgage_balance()
+        return self._mortgage_interest_schedule(config, balance, start_year, years)
 
     # -----------------------------------------------------------------------
     # Core tax computations (pure functions, no DB)
@@ -488,6 +659,8 @@ class TaxEngine:
         *,
         earned_income: float = 0.0,
         extra_deduction: float = 0.0,
+        deduction_override: float | None = None,
+        deduction_method_override: str | None = None,
     ) -> StateTaxBreakdown:
         """Compute state tax using a progressive CA model or flat fallback.
 
@@ -510,17 +683,15 @@ class TaxEngine:
                     filing_status, CA_STANDARD_DEDUCTION_2025["single"],
                 )
             )
-            deduction = standard_deduction
-            deduction_method = "standard"
-            itemized = tax_config.get("state_itemized_deduction")
-            configured_method = tax_config.get("state_deduction_method", "standard")
-            if itemized is not None and configured_method == "itemized":
-                deduction = max(0.0, float(itemized))
-                deduction_method = "itemized"
-            elif itemized is not None and configured_method == "greater_of":
-                deduction = max(standard_deduction, float(itemized))
-                deduction_method = (
-                    "itemized" if float(itemized) > standard_deduction else "standard"
+            if deduction_override is not None:
+                deduction = max(0.0, deduction_override)
+                deduction_method = deduction_method_override or "itemized"
+            else:
+                itemized = tax_config.get("state_itemized_deduction")
+                deduction, deduction_method = self._select_deduction(
+                    tax_config.get("state_deduction_method", "standard"),
+                    standard_deduction,
+                    float(itemized) if itemized is not None else None,
                 )
             taxable_income = max(
                 0.0, state_agi - deduction - extra_deduction,
@@ -580,17 +751,15 @@ class TaxEngine:
             )
 
         standard_deduction = self._get_standard_deduction(tax_config)
-        deduction = standard_deduction
-        deduction_method = "standard"
-        itemized = tax_config.get("state_itemized_deduction")
-        configured_method = tax_config.get("state_deduction_method", "standard")
-        if itemized is not None and configured_method == "itemized":
-            deduction = max(0.0, float(itemized))
-            deduction_method = "itemized"
-        elif itemized is not None and configured_method == "greater_of":
-            deduction = max(standard_deduction, float(itemized))
-            deduction_method = (
-                "itemized" if float(itemized) > standard_deduction else "standard"
+        if deduction_override is not None:
+            deduction = max(0.0, deduction_override)
+            deduction_method = deduction_method_override or "itemized"
+        else:
+            itemized = tax_config.get("state_itemized_deduction")
+            deduction, deduction_method = self._select_deduction(
+                tax_config.get("state_deduction_method", "standard"),
+                standard_deduction,
+                float(itemized) if itemized is not None else None,
             )
         taxable_income = max(0.0, state_agi - deduction - extra_deduction)
         state_rate = float(tax_config.get("state_tax_rate") or 0.0)
@@ -920,6 +1089,9 @@ class TaxEngine:
         cash_yield = tax_config.get("cash_yield_rate", 0.0)
 
         today = date.today()
+        mortgage_interest_by_year = await self._mortgage_interest_by_year(
+            config, tax_config, today.year, years,
+        )
         year_plans: list[WithdrawalYearPlan] = []
         total_tax = 0.0
         total_withdrawn = 0.0
@@ -965,6 +1137,7 @@ class TaxEngine:
             taxable_ss = 0.0
             taxable_pension = 0.0
             taxable_other = 0.0
+            taxable_state_wages = 0.0
             gross_non_withdrawal_income = 0.0
             has_prepaid_tax_source = False
 
@@ -1006,6 +1179,8 @@ class TaxEngine:
                 elif src.income_type.value in ("salary", "bonus", "side_hustle"):
                     earned_income += annual_cash
                     taxable_earned += annual if src.is_taxable else 0.0
+                    if src.income_type.value in ("salary", "bonus") and src.is_taxable:
+                        taxable_state_wages += annual
                 else:
                     other_income += annual_cash
                     taxable_other += annual if src.is_taxable else 0.0
@@ -1119,23 +1294,64 @@ class TaxEngine:
                     taxable_earned + taxable_ss * 0.85 + taxable_pension
                     + from_deferred + roth_conversion + taxable_other
                 )
-                taxable_total = max(0, ordinary - std_deduction)
-                federal_breakdown = self.compute_federal_tax(
-                    taxable_total, filing_status, brackets,
-                )
-                gains_tax = self.compute_capital_gains_tax(
-                    capital_gains, taxable_total, filing_status,
-                )
-                federal = federal_breakdown.total_federal_tax + gains_tax
                 state_agi = ordinary + capital_gains
                 if self._is_california(tax_config):
                     # California excludes Social Security benefits entirely.
                     state_agi -= taxable_ss * 0.85
-                state = self.compute_configured_state_tax(
+                federal_mortgage_interest, state_mortgage_interest = (
+                    mortgage_interest_by_year.get(current_year, (0.0, 0.0))
+                )
+                state_itemized, _, _ = self._state_itemized_deduction(
+                    state_agi, tax_config, state_mortgage_interest,
+                )
+                state_deduction = None
+                state_deduction_method = None
+                if state_itemized is not None:
+                    state_standard = (
+                        float(tax_config["state_standard_deduction"])
+                        if tax_config.get("state_standard_deduction") is not None
+                        else CA_STANDARD_DEDUCTION_2025.get(
+                            filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                        )
+                    )
+                    state_deduction, state_deduction_method = self._select_deduction(
+                        tax_config.get("state_deduction_method", "greater_of"),
+                        state_standard,
+                        state_itemized,
+                    )
+                state_breakdown = self.compute_configured_state_tax(
                     state_agi,
                     tax_config,
-                    earned_income=taxable_earned,
-                ).total_tax
+                    earned_income=taxable_state_wages,
+                    deduction_override=state_deduction,
+                    deduction_method_override=state_deduction_method,
+                )
+                state = state_breakdown.total_tax
+
+                federal_itemized, _ = self._federal_itemized_deduction(
+                    current_year,
+                    ordinary + capital_gains,
+                    state,
+                    tax_config,
+                    federal_mortgage_interest,
+                )
+                federal_deduction = std_deduction
+                if federal_itemized is not None:
+                    federal_deduction = self._select_deduction(
+                        tax_config.get("federal_deduction_method", "greater_of"),
+                        self._get_federal_standard_deduction(tax_config),
+                        federal_itemized,
+                    )[0]
+                taxable_total = max(0, ordinary - federal_deduction)
+                unused_deduction = max(0.0, federal_deduction - ordinary)
+                taxable_capital_gains = max(0.0, capital_gains - unused_deduction)
+                federal_breakdown = self.compute_federal_tax(
+                    taxable_total, filing_status, brackets,
+                )
+                gains_tax = self.compute_capital_gains_tax(
+                    taxable_capital_gains, taxable_total, filing_status,
+                )
+                federal = federal_breakdown.total_federal_tax + gains_tax
                 fica = self.compute_fica(taxable_earned, filing_status)
                 return ordinary, federal, state, fica, federal + state + fica
 
@@ -1148,18 +1364,58 @@ class TaxEngine:
                     taxable_earned + taxable_ss * 0.85
                     + taxable_pension + taxable_other
                 )
-                baseline_taxable = max(0, baseline_ordinary - std_deduction)
-                baseline_federal = self.compute_federal_tax(
-                    baseline_taxable, filing_status, brackets,
-                ).total_federal_tax
                 baseline_state_agi = baseline_ordinary
                 if self._is_california(tax_config):
                     baseline_state_agi -= taxable_ss * 0.85
-                baseline_state = self.compute_configured_state_tax(
+                federal_mortgage_interest, state_mortgage_interest = (
+                    mortgage_interest_by_year.get(current_year, (0.0, 0.0))
+                )
+                baseline_state_itemized, _, _ = self._state_itemized_deduction(
+                    baseline_state_agi, tax_config, state_mortgage_interest,
+                )
+                baseline_state_deduction = None
+                baseline_state_method = None
+                if baseline_state_itemized is not None:
+                    state_standard = (
+                        float(tax_config["state_standard_deduction"])
+                        if tax_config.get("state_standard_deduction") is not None
+                        else CA_STANDARD_DEDUCTION_2025.get(
+                            filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                        )
+                    )
+                    baseline_state_deduction, baseline_state_method = self._select_deduction(
+                        tax_config.get("state_deduction_method", "greater_of"),
+                        state_standard,
+                        baseline_state_itemized,
+                    )
+                baseline_state_breakdown = self.compute_configured_state_tax(
                     baseline_state_agi,
                     tax_config,
-                    earned_income=taxable_earned,
-                ).total_tax
+                    earned_income=taxable_state_wages,
+                    deduction_override=baseline_state_deduction,
+                    deduction_method_override=baseline_state_method,
+                )
+                baseline_state = baseline_state_breakdown.total_tax
+                baseline_federal_itemized, _ = self._federal_itemized_deduction(
+                    current_year,
+                    baseline_ordinary,
+                    baseline_state,
+                    tax_config,
+                    federal_mortgage_interest,
+                )
+                baseline_federal_deduction = std_deduction
+                if baseline_federal_itemized is not None:
+                    baseline_federal_deduction = self._select_deduction(
+                        tax_config.get("federal_deduction_method", "greater_of"),
+                        self._get_federal_standard_deduction(tax_config),
+                        baseline_federal_itemized,
+                    )[0]
+                baseline_taxable = max(
+                    0, baseline_ordinary - baseline_federal_deduction,
+                )
+                baseline_federal = self.compute_federal_tax(
+                    baseline_taxable, filing_status, brackets,
+                ).total_federal_tax
                 baseline_fica = self.compute_fica(taxable_earned, filing_status)
                 prepaid_tax = baseline_federal + baseline_state + baseline_fica
 
@@ -1348,6 +1604,11 @@ class TaxEngine:
         total_tax = 0.0
         deferred_balance = accounts.tax_deferred_balance
         current = window_start
+        dynamic_itemized = self._itemized_config(tax_config).get("enabled", False)
+        window_years = max(1, window_end.year - window_start.year + 1)
+        mortgage_interest_by_year = await self._mortgage_interest_by_year(
+            config, tax_config, window_start.year, window_years,
+        )
 
         while current < window_end and deferred_balance > 0:
             age = self._compute_age(config, current)
@@ -1369,12 +1630,72 @@ class TaxEngine:
                     continue  # not yet started
                 baseline_income += src.annual_amount / 100
 
-            # Room to fill so POST-DEDUCTION taxable income lands exactly at
-            # the target bracket ceiling. When baseline income is below the
-            # standard deduction, the conversion absorbs the unused deduction
-            # (converting $X with zero income leaves taxable at X − std_ded).
-            taxable_baseline = max(0, baseline_income - std_deduction)
+            def tax_at_income(income: float) -> tuple[float, float, float]:
+                """Federal taxable income, federal tax, and CA tax."""
+                federal_mortgage_interest, state_mortgage_interest = (
+                    mortgage_interest_by_year.get(current.year, (0.0, 0.0))
+                )
+                state_itemized, _, _ = self._state_itemized_deduction(
+                    income, tax_config, state_mortgage_interest,
+                )
+                state_deduction = None
+                state_method = None
+                if state_itemized is not None:
+                    state_standard = (
+                        float(tax_config["state_standard_deduction"])
+                        if tax_config.get("state_standard_deduction") is not None
+                        else CA_STANDARD_DEDUCTION_2025.get(
+                            filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                        )
+                    )
+                    state_deduction, state_method = self._select_deduction(
+                        tax_config.get("state_deduction_method", "greater_of"),
+                        state_standard,
+                        state_itemized,
+                    )
+                state_tax = self.compute_configured_state_tax(
+                    income,
+                    tax_config,
+                    deduction_override=state_deduction,
+                    deduction_method_override=state_method,
+                ).total_tax
+                federal_itemized, _ = self._federal_itemized_deduction(
+                    current.year,
+                    income,
+                    state_tax,
+                    tax_config,
+                    federal_mortgage_interest,
+                )
+                federal_deduction = std_deduction
+                if federal_itemized is not None:
+                    federal_deduction = self._select_deduction(
+                        tax_config.get("federal_deduction_method", "greater_of"),
+                        self._get_federal_standard_deduction(tax_config),
+                        federal_itemized,
+                    )[0]
+                taxable = max(0.0, income - federal_deduction)
+                federal_tax = self.compute_federal_tax(
+                    taxable, filing_status, brackets,
+                ).total_federal_tax
+                return taxable, federal_tax, state_tax
+
+            # Room to fill so POST-DEDUCTION taxable income lands at the
+            # target bracket ceiling. With dynamic itemization, solve again as
+            # the SALT and California limitations respond to the conversion.
+            taxable_baseline, baseline_federal_tax, baseline_state_tax = tax_at_income(
+                baseline_income,
+            )
             room_to_target = max(0, target_ceiling + std_deduction - baseline_income)
+            if dynamic_itemized:
+                conversion_guess = room_to_target
+                for _ in range(8):
+                    taxable_guess, _, _ = tax_at_income(
+                        baseline_income + conversion_guess,
+                    )
+                    conversion_guess = max(
+                        0.0, conversion_guess + target_ceiling - taxable_guess,
+                    )
+                room_to_target = conversion_guess
 
             # Convert up to the room available (don't exceed deferred balance)
             conversion = min(room_to_target, deferred_balance)
@@ -1382,19 +1703,13 @@ class TaxEngine:
                 current += relativedelta(years=1)
                 continue
 
-            # Tax on conversion (ordinary income, after standard deduction)
-            total_taxable = max(0, baseline_income + conversion - std_deduction)
-            tax_with = self.compute_federal_tax(total_taxable, filing_status, brackets)
-            tax_without = self.compute_federal_tax(taxable_baseline, filing_status, brackets)
-            conversion_tax = tax_with.total_federal_tax - tax_without.total_federal_tax
-            if self._is_california(tax_config):
-                state_with = self.compute_configured_state_tax(
-                    baseline_income + conversion, tax_config,
-                ).total_tax
-                state_without = self.compute_configured_state_tax(
-                    baseline_income, tax_config,
-                ).total_tax
-                conversion_tax += state_with - state_without
+            # Tax on conversion, including income-dependent itemized deductions.
+            total_taxable, federal_with, state_with = tax_at_income(
+                baseline_income + conversion,
+            )
+            conversion_tax = federal_with - baseline_federal_tax
+            if self._is_california(tax_config) or dynamic_itemized:
+                conversion_tax += state_with - baseline_state_tax
             else:
                 conversion_tax += self.compute_state_tax(
                     conversion, tax_config["state_tax_rate"],
@@ -1479,9 +1794,13 @@ class TaxEngine:
             if s.income_type.value in ("salary", "bonus", "side_hustle")
             and s.is_active and s.is_taxable
         )
+        state_wage_income = sum(
+            _prorated_annual_for_year(s, current_year)
+            for s in income_sources
+            if s.income_type.value in ("salary", "bonus")
+            and s.is_active and s.is_taxable
+        )
 
-        taxable_income = max(0, total_income - std_deduction)
-        federal = self.compute_federal_tax(taxable_income, filing_status, brackets)
         state_agi = total_income
         if self._is_california(tax_config):
             state_agi -= sum(
@@ -1490,12 +1809,57 @@ class TaxEngine:
                 if s.income_type.value == "social_security"
                 and s.is_active and s.is_taxable
             )
+        mortgage_schedule = await self._mortgage_interest_by_year(
+            config, tax_config, current_year, 1,
+        )
+        federal_mortgage_interest, state_mortgage_interest = (
+            mortgage_schedule.get(current_year, (0.0, 0.0))
+        )
+        state_itemized, state_itemized_before_limit, state_itemized_limitation = (
+            self._state_itemized_deduction(
+                state_agi, tax_config, state_mortgage_interest,
+            )
+        )
+        state_deduction = None
+        state_deduction_method = None
+        if state_itemized is not None:
+            state_standard = (
+                float(tax_config["state_standard_deduction"])
+                if tax_config.get("state_standard_deduction") is not None
+                else CA_STANDARD_DEDUCTION_2025.get(
+                    filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                )
+            )
+            state_deduction, state_deduction_method = self._select_deduction(
+                tax_config.get("state_deduction_method", "greater_of"),
+                state_standard,
+                state_itemized,
+            )
         state_breakdown = self.compute_configured_state_tax(
             state_agi,
             tax_config,
-            earned_income=earned_income,
+            earned_income=state_wage_income,
+            deduction_override=state_deduction,
+            deduction_method_override=state_deduction_method,
         )
         state_tax = state_breakdown.total_tax
+        federal_itemized, salt_deduction = self._federal_itemized_deduction(
+            current_year,
+            total_income,
+            state_tax,
+            tax_config,
+            federal_mortgage_interest,
+        )
+        federal_deduction = std_deduction
+        federal_deduction_method = self._get_federal_deduction_method(tax_config)
+        if federal_itemized is not None:
+            federal_deduction, federal_deduction_method = self._select_deduction(
+                tax_config.get("federal_deduction_method", "greater_of"),
+                self._get_federal_standard_deduction(tax_config),
+                federal_itemized,
+            )
+        taxable_income = max(0, total_income - federal_deduction)
+        federal = self.compute_federal_tax(taxable_income, filing_status, brackets)
         fica = self.compute_fica(earned_income, filing_status)
         room = self.get_bracket_room(taxable_income, filing_status, brackets)
         effective = self.compute_effective_rate(total_income, federal.total_federal_tax, state_tax, fica)
@@ -1518,8 +1882,11 @@ class TaxEngine:
         return {
             "filing_status": filing_status,
             "gross_income": round(total_income, 2),
-            "standard_deduction": std_deduction,
-            "federal_deduction_method": self._get_federal_deduction_method(tax_config),
+            "standard_deduction": round(federal_deduction, 2),
+            "federal_deduction_method": federal_deduction_method,
+            "federal_itemized_deduction": round(federal_itemized or 0.0, 2),
+            "federal_salt_deduction": round(salt_deduction, 2),
+            "federal_mortgage_interest": round(federal_mortgage_interest, 2),
             "taxable_income": round(taxable_income, 2),
             "federal_tax": federal.total_federal_tax,
             "federal_brackets": federal.brackets,
@@ -1533,6 +1900,9 @@ class TaxEngine:
             "state_taxable_income": state_breakdown.taxable_income,
             "state_standard_deduction": state_breakdown.standard_deduction,
             "state_deduction_method": state_breakdown.deduction_method,
+            "state_itemized_before_limit": round(state_itemized_before_limit, 2),
+            "state_itemized_limitation": round(state_itemized_limitation, 2),
+            "state_mortgage_interest": round(state_mortgage_interest, 2),
             "state_income_tax": state_breakdown.income_tax,
             "state_payroll_tax": state_breakdown.payroll_tax,
             "state_effective_rate": state_breakdown.effective_rate,
@@ -1598,19 +1968,57 @@ class TaxEngine:
         brackets = self._get_brackets(tax_config)
 
         scenario_income = base["gross_income"] + extra_income + roth_conversion
-        scenario_deductions = std_deduction + extra_deduction
-        scenario_taxable = max(0, scenario_income - scenario_deductions)
-
-        scenario_federal = self.compute_federal_tax(scenario_taxable, filing_status, brackets)
         scenario_state_agi = (
             base["state_gross_income"] + extra_income + roth_conversion
         )
-        scenario_state_income_tax = self.compute_configured_state_tax(
+        scenario_state_itemized, _, _ = self._state_itemized_deduction(
+            scenario_state_agi,
+            tax_config,
+            base["state_mortgage_interest"],
+        )
+        scenario_state_deduction = None
+        scenario_state_method = None
+        if scenario_state_itemized is not None:
+            state_standard = (
+                float(tax_config["state_standard_deduction"])
+                if tax_config.get("state_standard_deduction") is not None
+                else CA_STANDARD_DEDUCTION_2025.get(
+                    filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                )
+            )
+            scenario_state_deduction, scenario_state_method = self._select_deduction(
+                tax_config.get("state_deduction_method", "greater_of"),
+                state_standard,
+                scenario_state_itemized,
+            )
+        scenario_state_breakdown = self.compute_configured_state_tax(
             scenario_state_agi,
             tax_config,
             extra_deduction=extra_deduction,
-        ).income_tax
-        scenario_state = scenario_state_income_tax + base["state_payroll_tax"]
+            deduction_override=scenario_state_deduction,
+            deduction_method_override=scenario_state_method,
+        )
+        scenario_state = scenario_state_breakdown.income_tax + base["state_payroll_tax"]
+
+        scenario_federal_itemized, _ = self._federal_itemized_deduction(
+            date.today().year,
+            scenario_income,
+            scenario_state,
+            tax_config,
+            base["federal_mortgage_interest"],
+        )
+        scenario_federal_deduction = std_deduction
+        if scenario_federal_itemized is not None:
+            scenario_federal_deduction = self._select_deduction(
+                tax_config.get("federal_deduction_method", "greater_of"),
+                self._get_federal_standard_deduction(tax_config),
+                scenario_federal_itemized,
+            )[0]
+        scenario_deductions = scenario_federal_deduction + extra_deduction
+        scenario_taxable = max(0, scenario_income - scenario_deductions)
+        scenario_federal = self.compute_federal_tax(
+            scenario_taxable, filing_status, brackets,
+        )
         # Roth conversions and the generic extra-income input are not treated
         # as wages, so current FICA/SDI carry through rather than increasing.
         scenario_total = (

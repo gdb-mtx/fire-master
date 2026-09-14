@@ -724,6 +724,18 @@ export default function TaxPlanningPage() {
                   <span className="text-[var(--text-secondary)]">Taxable Income</span>
                   <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.taxable_income)}</span>
                 </div>
+                {brackets.federal_itemized_deduction > 0 && (
+                  <>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-[var(--text-secondary)]">Mortgage Interest Component</span>
+                      <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.federal_mortgage_interest)}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-[var(--text-secondary)]">Allowed SALT Component</span>
+                      <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.federal_salt_deduction)}</span>
+                    </div>
+                  </>
+                )}
               </div>
 
               {brackets.state_tax_method === "california_progressive_2025" && (
@@ -738,6 +750,18 @@ export default function TaxPlanningPage() {
                     </span>
                     <span className="font-mono text-[var(--green)]">-{fmt(brackets.state_standard_deduction)}</span>
                   </div>
+                  {brackets.state_itemized_before_limit > 0 && (
+                    <>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-[var(--text-secondary)]">CA Itemized Before Limitation</span>
+                        <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.state_itemized_before_limit)}</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-[var(--text-secondary)]">CA High-Income Reduction</span>
+                        <span className="font-mono text-[var(--red)]">-{fmt(brackets.state_itemized_limitation)}</span>
+                      </div>
+                    </>
+                  )}
                   <div className="flex justify-between text-xs">
                     <span className="text-[var(--text-secondary)]">CA Income Tax</span>
                     <span className="font-mono text-[var(--text-primary)]">{fmt(brackets.state_income_tax)}</span>

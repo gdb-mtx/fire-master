@@ -51,6 +51,9 @@ class BracketAnalysisResponse(BaseModel):
     gross_income: float
     standard_deduction: float
     federal_deduction_method: str = "standard"
+    federal_itemized_deduction: float = 0
+    federal_salt_deduction: float = 0
+    federal_mortgage_interest: float = 0
     taxable_income: float
     federal_tax: float
     federal_brackets: list[BracketDetail]
@@ -64,6 +67,9 @@ class BracketAnalysisResponse(BaseModel):
     state_taxable_income: float = 0
     state_standard_deduction: float = 0
     state_deduction_method: str = "standard"
+    state_itemized_before_limit: float = 0
+    state_itemized_limitation: float = 0
+    state_mortgage_interest: float = 0
     state_income_tax: float = 0
     state_payroll_tax: float = 0
     state_effective_rate: float = 0

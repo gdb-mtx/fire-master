@@ -256,6 +256,36 @@ class TestRothConversionPlan:
 # ---------------------------------------------------------------------------
 
 class TestWithdrawalSequence:
+    async def test_unused_itemized_deduction_shields_taxable_gains(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.custom_assumptions["tax"] = {
+            **base_fire_config.custom_assumptions["tax"],
+            "state": "CA",
+            "filing_status": "married_filing_jointly",
+            "fund_taxes_from_withdrawals": True,
+            "federal_deduction_method": "greater_of",
+            "state_deduction_method": "greater_of",
+            "itemized_deductions": {
+                "enabled": True,
+                "annual_charitable_gifts": 100_000,
+            },
+        }
+        engine = _make_planning_engine(taxable=1_000_000)
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.capital_gains_income > 0
+        assert year.federal_tax == 0
+        assert year.state_tax == 0
+        assert year.taxes_funded == 0
+        assert year.net_spendable == pytest.approx(year.spending_need)
+
     async def test_california_excludes_social_security(self, base_fire_config, frozen_today_tax):
         base_fire_config.healthcare_monthly_cost = None
         base_fire_config.target_annual_spending = 4_000_000

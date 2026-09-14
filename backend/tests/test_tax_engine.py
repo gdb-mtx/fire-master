@@ -4,6 +4,9 @@ Tests federal and California brackets, LTCG, FICA, and bracket room
 calculations against published or estimated tax tables.
 """
 
+from datetime import date
+from types import SimpleNamespace
+
 from app.engines.tax_engine import TaxEngine
 
 
@@ -111,6 +114,63 @@ class TestCaliforniaTax:
         assert result.method == "flat_rate"
         assert result.taxable_income == 84_300
         assert result.total_tax == 3_709.20
+
+    def test_salt_cap_phases_with_income_then_reverts(self, tax_engine: TaxEngine):
+        assert tax_engine._federal_salt_cap(2025, 400_000, "married_filing_jointly") == 40_000
+        assert tax_engine._federal_salt_cap(2025, 1_200_000, "married_filing_jointly") == 10_000
+        assert tax_engine._federal_salt_cap(2026, 400_000, "married_filing_jointly") == 40_400
+        assert tax_engine._federal_salt_cap(2030, 200_000, "married_filing_jointly") == 10_000
+
+    def test_california_itemized_limit_varies_with_income(self, tax_engine: TaxEngine):
+        config = {
+            "state": "CA",
+            "filing_status": "married_filing_jointly",
+            "itemized_deductions": {
+                "enabled": True,
+                "annual_property_tax": 25_000,
+                "annual_charitable_gifts": 20_000,
+            },
+        }
+        deduction, before_limit, limitation = tax_engine._state_itemized_deduction(
+            1_200_000, config, mortgage_interest=30_000,
+        )
+
+        assert before_limit == 75_000
+        assert limitation == 41_735.34
+        assert deduction == 33_264.66
+
+        lower_income = tax_engine._state_itemized_deduction(
+            250_000, config, mortgage_interest=30_000,
+        )
+        assert lower_income == (75_000, 75_000, 0)
+
+    def test_mortgage_interest_declines_and_ends_at_payoff(self, tax_engine: TaxEngine):
+        start_year = date.today().year
+        config = SimpleNamespace(custom_assumptions={
+            "projection": {
+                "primary_property_mortgage_pi": 5_689.74,
+                "primary_property_mortgage_rate": 0.025,
+                "primary_property_mortgage_payoff_date": f"{start_year + 2}-03-01",
+            },
+            "tax": {
+                "itemized_deductions": {
+                    "enabled": True,
+                    "federal_mortgage_debt_limit": 750_000,
+                    "california_mortgage_debt_limit": 1_000_000,
+                },
+            },
+        })
+
+        schedule = tax_engine._mortgage_interest_schedule(
+            config, 1_250_000, start_year, 4,
+        )
+        # While the balance exceeds each debt cap, deductible interest is the
+        # cap times the rate; it then falls and reaches zero at payoff.
+        assert schedule[start_year][0] >= schedule[start_year + 1][0] > 0
+        assert schedule[start_year][1] >= schedule[start_year + 1][1] > 0
+        assert schedule[start_year + 2][0] < schedule[start_year + 1][0]
+        assert schedule[start_year][1] > schedule[start_year][0]
+        assert schedule[start_year + 3] == (0.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
