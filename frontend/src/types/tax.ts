@@ -224,3 +224,18 @@ export interface MonteCarloResult {
   excluded_non_spendable_assets: number;
   assumptions?: Record<string, unknown> | null;
 }
+
+export interface RetirementConfidenceAge {
+  confidence: number;
+  earliest_age: number | null;
+  success_rate: number | null;
+  prior_age_success_rate: number | null;
+}
+
+export interface RetirementAgeAnalysis {
+  configured_retirement_age: number | null;
+  current_age: number;
+  max_tested_age: number;
+  runs_per_age: number;
+  confidence_ages: RetirementConfidenceAge[];
+}

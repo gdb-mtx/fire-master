@@ -1136,6 +1136,7 @@ class TaxEngine:
         target_bracket_rate: float = 0.22,
         roth_conversions_enabled: bool = True,
         scenario_id: uuid_mod.UUID | None = None,
+        config_override: FireConfig | None = None,
     ) -> WithdrawalPlan:
         """Produce a year-by-year tax-aware withdrawal plan.
 
@@ -1182,7 +1183,7 @@ class TaxEngine:
         )
 
         fire_engine = FireProjectionsEngine(self.db)
-        config = await fire_engine.get_effective_config(scenario_id)
+        config = config_override or await fire_engine.get_effective_config(scenario_id)
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
         std_deduction = self._get_standard_deduction(tax_config)

@@ -9,6 +9,7 @@ import {
   useIncomeSources,
   useMilestones,
   useMonteCarlo,
+  useRetirementAgeAnalysis,
   useScenarios,
   useSpendingSensitivity,
   useWealthProjection,
@@ -422,11 +423,18 @@ export default function RetirementPage() {
   const { data: sensitivity } = useSpendingSensitivity();
   const { data: incomeSources } = useIncomeSources();
   const { data: monteCarlo, isLoading: loadingMC } = useMonteCarlo(1000);
-  const grossEmploymentIncome = (incomeSources ?? [])
-    .filter((source) => ["salary", "bonus", "side_hustle"].includes(source.income_type))
+  const { data: retirementAges, isLoading: loadingRetirementAges } =
+    useRetirementAgeAnalysis(1000, 42, 85);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const currentEmploymentSources = (incomeSources ?? []).filter(
+    (source) =>
+      ["salary", "bonus", "side_hustle"].includes(source.income_type)
+      && (!source.start_date || source.start_date <= todayIso)
+      && (!source.end_date || source.end_date >= todayIso),
+  );
+  const grossEmploymentIncome = currentEmploymentSources
     .reduce((total, source) => total + source.annual_amount, 0);
-  const projectedEmploymentIncome = (incomeSources ?? [])
-    .filter((source) => ["salary", "bonus", "side_hustle"].includes(source.income_type))
+  const projectedEmploymentIncome = currentEmploymentSources
     .reduce((total, source) => total + source.projection_annual_amount, 0);
 
   // Spending sensitivity state — ephemeral, not persisted
@@ -477,6 +485,16 @@ export default function RetirementPage() {
     }));
   }, [monteCarlo]);
 
+  const selectedRetirementPoint = useMemo(() => {
+    const selectedAge = timeline?.moderate.retirement_age;
+    if (selectedAge == null || fanChartData.length === 0) return null;
+    return fanChartData.reduce((closest, point) =>
+      Math.abs(point.age - selectedAge) < Math.abs(closest.age - selectedAge)
+        ? point
+        : closest,
+    );
+  }, [fanChartData, timeline]);
+
   const wealthMarkerGroups = useMemo<EventMarkerGroup[]>(() => {
     if (!wealthProjection || wealthChartData.length === 0) return [];
     const byX = new Map<number, EventMarkerGroup>();
@@ -514,14 +532,15 @@ export default function RetirementPage() {
     );
   }
 
-  const monthsLeft = timeline?.months_remaining;
-  const yearsLeft = monthsLeft != null ? Math.floor(monthsLeft / 12) : null;
-  const monthsRemainder = monthsLeft != null ? monthsLeft % 12 : null;
-  const onTrack = timeline?.on_track ?? false;
-
   const breakdown = fireNum.net_worth_breakdown;
   const accessibleNW = fireNum.accessible_net_worth;
   const accessiblePct = fireNum.accessible_progress_pct;
+  const confidence90 = retirementAges?.confidence_ages.find(
+    (point) => point.confidence === 90,
+  );
+  const selectedAge = timeline?.moderate.retirement_age;
+  const selectedMedian = selectedRetirementPoint?.p50;
+  const selectedGap = selectedMedian != null ? fireNum.fire_number - selectedMedian : null;
   const successColor =
     (monteCarlo?.success_rate ?? 0) >= 90
       ? "var(--green)"
@@ -553,55 +572,116 @@ export default function RetirementPage() {
           </div>
         </div>
 
-        {/* FIRE Countdown Hero */}
-        {timeline ? (
+        {/* Calculated retirement readiness + selected what-if */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div
-            className="bg-[var(--bg-card)] border rounded-lg p-8 text-center card-hero"
+            className="bg-[var(--bg-card)] border rounded-lg p-6 text-center card-hero"
             style={{
-              borderColor: onTrack
+              borderColor: confidence90?.earliest_age != null
                 ? "rgba(0,212,170,0.3)"
-                : "rgba(255,77,106,0.3)",
+                : "rgba(255,192,77,0.3)",
             }}
           >
             <p className="text-xs uppercase tracking-widest text-[var(--text-secondary)] mb-2">
-              Projected Retirement
+              Earliest Modeled FIRE Age
             </p>
-            {monthsLeft != null && monthsLeft > 0 ? (
+            {confidence90?.earliest_age != null ? (
               <div
-                className={`text-5xl font-bold font-mono tracking-tight mb-2 ${onTrack ? "glow-green" : "glow-red"}`}
-                style={{ color: onTrack ? "var(--green)" : "var(--red)" }}
+                className="text-5xl font-bold font-mono tracking-tight mb-2 glow-green"
+                style={{ color: "var(--green)" }}
               >
-                {yearsLeft != null && yearsLeft > 0 && `${yearsLeft}y `}
-                {monthsRemainder != null && `${monthsRemainder}m`}
+                Age {confidence90.earliest_age}
+              </div>
+            ) : loadingRetirementAges ? (
+              <div className="text-2xl font-bold font-mono tracking-tight mb-2 text-[var(--text-secondary)]">
+                Calculating…
               </div>
             ) : (
-              <div className="text-5xl font-bold font-mono tracking-tight mb-2 text-[var(--green)] glow-green">
-                NOW
+              <div className="text-3xl font-bold font-mono tracking-tight mb-2 text-[var(--yellow)]">
+                After age {retirementAges?.max_tested_age ?? 85}
               </div>
             )}
-            {timeline.projected_retirement_date && (
-              <p className="text-sm text-[var(--text-secondary)]">
-                {new Date(timeline.projected_retirement_date).toLocaleDateString(
-                  "en-US",
-                  { month: "long", year: "numeric" }
-                )}
-                {timeline.moderate.retirement_age && ` (age ${Math.round(timeline.moderate.retirement_age)})`}
-              </p>
-            )}
-          </div>
-        ) : (
-          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-6 text-center">
-            <p className="text-sm text-[var(--text-secondary)] mb-2">
-              Set your date of birth and target retirement age to see projections.
+            <p className="text-sm text-[var(--text-secondary)]">
+              First whole-year age with at least 90% modeled success
             </p>
-            <Link
-              to="/settings"
-              className="text-sm text-[var(--blue)] hover:underline"
-            >
-              Configure FIRE settings
-            </Link>
+            <div className="grid grid-cols-3 gap-2 mt-5 pt-4 border-t border-[var(--border)]">
+              {[80, 90, 95].map((confidence) => {
+                const point = retirementAges?.confidence_ages.find(
+                  (item) => item.confidence === confidence,
+                );
+                return (
+                  <div key={confidence}>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
+                      {confidence}% success
+                    </div>
+                    <div className="text-lg font-mono font-bold text-[var(--text-primary)] mt-1">
+                      {loadingRetirementAges
+                        ? "…"
+                        : point?.earliest_age != null
+                          ? `Age ${point.earliest_age}`
+                          : `>${retirementAges?.max_tested_age ?? 85}`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-[var(--text-secondary)] mt-3">
+              Calculated by rerunning the income, tax, spending, healthcare, and account-access
+              plan at each candidate age; {retirementAges?.runs_per_age ?? 1000} paths per age.
+            </p>
           </div>
-        )}
+
+          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-6">
+            <p className="text-xs uppercase tracking-widest text-[var(--text-secondary)] mb-2">
+              Your Selected What-If
+            </p>
+            <div className="flex items-end justify-between gap-4 mb-5">
+              <div>
+                <div className="text-3xl font-bold font-mono text-[var(--text-primary)]">
+                  {selectedAge != null ? `Retire at ${Math.round(selectedAge)}` : "No age selected"}
+                </div>
+                {timeline?.projected_retirement_date && (
+                  <div className="text-xs text-[var(--text-secondary)] mt-1">
+                    {new Date(timeline.projected_retirement_date).toLocaleDateString(
+                      "en-US",
+                      { month: "long", year: "numeric" },
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="text-right">
+                <div className="text-2xl font-bold font-mono" style={{ color: successColor }}>
+                  {monteCarlo ? `${monteCarlo.success_rate}%` : "—"}
+                </div>
+                <div className="text-[10px] text-[var(--text-secondary)]">modeled success</div>
+              </div>
+            </div>
+            <div className="space-y-2 pt-4 border-t border-[var(--border)]">
+              <div className="flex justify-between text-sm">
+                <span className="text-[var(--text-secondary)]">Median spendable assets at retirement</span>
+                <span className="font-mono text-[var(--text-primary)]">
+                  {selectedMedian != null ? fmtCompact(selectedMedian) : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-[var(--text-secondary)]">Portfolio target</span>
+                <span className="font-mono text-[var(--text-primary)]">{fmtCompact(fireNum.fire_number)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-[var(--text-secondary)]">Median gap at retirement</span>
+                <span
+                  className="font-mono"
+                  style={{ color: (selectedGap ?? 0) <= 0 ? "var(--green)" : "var(--yellow)" }}
+                >
+                  {selectedGap != null ? fmtCompact(Math.max(0, selectedGap)) : "—"}
+                </span>
+              </div>
+            </div>
+            <p className="text-[10px] text-[var(--text-secondary)] mt-4">
+              This is a scenario you selected, not the app&rsquo;s recommendation.
+            </p>
+          </div>
+        </div>
 
         {/* Stat Cards — 5 columns with Cash Runway */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
@@ -663,10 +743,10 @@ export default function RetirementPage() {
             </p>
           )}
           <p>
-            Pre-retirement compensation: {fmt(grossEmploymentIncome)} gross; the projection uses{" "}
-            {fmt(projectedEmploymentIncome)}/year of observed after-withholding cash flow, including
-            retirement contributions. RSU compensation is included once, and employment income stops
-            at retirement.
+            Current employment phase: {fmt(grossEmploymentIncome)} gross. The projection receives{" "}
+            {fmt(projectedEmploymentIncome)}/year before any additional modeled tax outflow. RSU
+            compensation is included once, and each dated income phase stops as configured or at
+            retirement.
           </p>
           {fireNum.lifetime_spend_down_number != null && (
             <p>

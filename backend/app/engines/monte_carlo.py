@@ -57,7 +57,12 @@ from app.engines.fire_projections import (
     build_cashflow_schedule,
     cashflow_by_year,
 )
-from app.schemas.tax import MonteCarloResponse, PercentileCurvePoint
+from app.schemas.tax import (
+    MonteCarloResponse,
+    PercentileCurvePoint,
+    RetirementAgeAnalysisResponse,
+    RetirementConfidenceAge,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +127,7 @@ class MonteCarloEngine:
         n_runs: int = 1000,
         seed: int | None = None,
         scenario_id: uuid_mod.UUID | None = None,
+        retirement_age_override: int | None = None,
     ) -> MonteCarloResponse:
         """Run N Monte Carlo simulations with randomized annual returns.
 
@@ -135,6 +141,11 @@ class MonteCarloEngine:
 
         fire_engine = FireProjectionsEngine(self.db)
         config = await fire_engine.get_effective_config(scenario_id)
+        if retirement_age_override is not None:
+            config = fire_engine._apply_overrides(config, {
+                "target_retirement_age": retirement_age_override,
+                "target_retirement_date": None,
+            })
         nw_engine = NetWorthEngine(self.db)
         nw = await nw_engine.calculate_current()
         tax_engine = TaxEngine(self.db)
@@ -432,4 +443,102 @@ class MonteCarloEngine:
                 ),
                 "seed": seed,
             },
+        )
+
+    async def analyze_retirement_ages(
+        self,
+        targets: tuple[float, ...] = (80.0, 90.0, 95.0),
+        n_runs: int = 1000,
+        seed: int = 42,
+        max_age: int = 85,
+        scenario_id: uuid_mod.UUID | None = None,
+    ) -> RetirementAgeAnalysisResponse:
+        """Find the earliest integer retirement age meeting each confidence.
+
+        Each candidate reuses the same random seed, so moving the retirement
+        age changes the plan rather than the sampled market paths. Success is
+        expected to be monotonic as work continues longer; a shared cache keeps
+        the three binary searches reasonably fast for an interactive page.
+        """
+        from app.engines.fire_projections import FireProjectionsEngine
+
+        fire_engine = FireProjectionsEngine(self.db)
+        config = await fire_engine.get_effective_config(scenario_id)
+        today = date.today()
+        if not config.date_of_birth:
+            return RetirementAgeAnalysisResponse(
+                configured_retirement_age=None,
+                current_age=0.0,
+                max_tested_age=max_age,
+                runs_per_age=n_runs,
+                confidence_ages=[
+                    RetirementConfidenceAge(confidence=target)
+                    for target in sorted(set(targets))
+                ],
+            )
+        current_age = (
+            fire_engine._compute_age(config, today)
+        )
+        retirement_date = fire_engine._get_retirement_date(config)
+        configured_age = (
+            fire_engine._compute_age(config, retirement_date)
+            if retirement_date and config.date_of_birth
+            else None
+        )
+        first_age = max(18, math.ceil(current_age))
+        last_age = min(max_age, max(first_age, int(config.life_expectancy) - 1))
+        cache: dict[int, float] = {}
+
+        async def success_at(age: int) -> float:
+            if age not in cache:
+                result = await self.run_simulation(
+                    n_runs=n_runs,
+                    seed=seed,
+                    scenario_id=scenario_id,
+                    retirement_age_override=age,
+                )
+                cache[age] = result.success_rate
+            return cache[age]
+
+        confidence_ages: list[RetirementConfidenceAge] = []
+        lower_bound = first_age
+        for target in sorted(set(targets)):
+            if await success_at(last_age) < target:
+                confidence_ages.append(RetirementConfidenceAge(
+                    confidence=target,
+                    earliest_age=None,
+                    success_rate=None,
+                    prior_age_success_rate=cache[last_age],
+                ))
+                continue
+
+            lo, hi = lower_bound, last_age
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if await success_at(mid) >= target:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            found = lo
+            # Guard against a one-year local wobble from tax timing or finite
+            # sampling before reporting the boundary as "earliest."
+            while found > first_age and await success_at(found - 1) >= target:
+                found -= 1
+            prior = await success_at(found - 1) if found > first_age else None
+            confidence_ages.append(RetirementConfidenceAge(
+                confidence=target,
+                earliest_age=found,
+                success_rate=await success_at(found),
+                prior_age_success_rate=prior,
+            ))
+            lower_bound = found
+
+        return RetirementAgeAnalysisResponse(
+            configured_retirement_age=(
+                round(configured_age, 1) if configured_age is not None else None
+            ),
+            current_age=round(current_age, 1),
+            max_tested_age=last_age,
+            runs_per_age=n_runs,
+            confidence_ages=confidence_ages,
         )

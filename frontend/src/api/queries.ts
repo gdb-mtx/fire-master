@@ -52,6 +52,7 @@ import type {
   WithdrawalPlan,
   RothConversionPlan,
   MonteCarloResult,
+  RetirementAgeAnalysis,
   SEPPResponse,
   TaxScenarioInput,
   TaxScenarioResponse,
@@ -531,6 +532,20 @@ export function useMonteCarlo(runs: number = 1000, seed: number = 42) {
     queryKey: ["retirement", "monte-carlo", runs, seed],
     queryFn: () =>
       fetchJSON<MonteCarloResult>(`${BASE}/tax/monte-carlo?runs=${runs}&seed=${seed}`),
+  });
+}
+
+export function useRetirementAgeAnalysis(
+  runs: number = 1000,
+  seed: number = 42,
+  maxAge: number = 85,
+) {
+  return useQuery({
+    queryKey: ["retirement", "confidence-ages", runs, seed, maxAge],
+    queryFn: () =>
+      fetchJSON<RetirementAgeAnalysis>(
+        `${BASE}/fire/retirement-age-analysis?runs=${runs}&seed=${seed}&max_age=${maxAge}`,
+      ),
   });
 }
 

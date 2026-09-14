@@ -93,6 +93,48 @@ class TestDeterminism:
         # A different seed actually changes the draw
         assert r3.percentile_50 != r1.percentile_50
 
+    async def test_retirement_age_override_reaches_tax_schedule(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        engine = MonteCarloEngine(db=None)
+        seen_ages = []
+
+        async def capture_tax_config(config, years, scenario_id=None):
+            seen_ages.append(config.target_retirement_age)
+            return {}
+
+        with _mc_env(base_fire_config), patch.object(
+            FireProjectionsEngine,
+            "_get_tax_funding_by_year",
+            side_effect=capture_tax_config,
+        ):
+            await engine.run_simulation(
+                n_runs=10, seed=1, retirement_age_override=60,
+            )
+
+        assert seen_ages == [60]
+
+    async def test_retirement_age_analysis_finds_confidence_boundaries(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        engine = MonteCarloEngine(db=None)
+
+        async def result_for_age(*, retirement_age_override, **_kwargs):
+            return MagicMock(success_rate=min(100.0, (retirement_age_override - 50) * 5.0))
+
+        with patch.object(
+            FireProjectionsEngine,
+            "get_effective_config",
+            AsyncMock(return_value=base_fire_config),
+        ), patch.object(engine, "run_simulation", side_effect=result_for_age):
+            result = await engine.analyze_retirement_ages(
+                targets=(80, 90, 95), n_runs=100, seed=1, max_age=75,
+            )
+
+        assert [point.earliest_age for point in result.confidence_ages] == [66, 68, 69]
+        assert [point.success_rate for point in result.confidence_ages] == [80, 90, 95]
+        assert result.runs_per_age == 100
+
     @staticmethod
     def _hand_loop(annual_spending: float, start_nw: float, dob: date) -> float:
         """Independent replica of the zero-vol path: compound at the real

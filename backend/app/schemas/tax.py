@@ -231,6 +231,21 @@ class MonteCarloResponse(BaseModel):
     assumptions: dict | None = None
 
 
+class RetirementConfidenceAge(BaseModel):
+    confidence: float
+    earliest_age: int | None = None
+    success_rate: float | None = None
+    prior_age_success_rate: float | None = None
+
+
+class RetirementAgeAnalysisResponse(BaseModel):
+    configured_retirement_age: float | None = None
+    current_age: float
+    max_tested_age: int
+    runs_per_age: int
+    confidence_ages: list[RetirementConfidenceAge]
+
+
 # --- SEPP / 72(t) ---
 
 

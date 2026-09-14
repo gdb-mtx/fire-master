@@ -613,6 +613,7 @@ class FireProjectionsEngine:
             years=max(1, years),
             roth_conversions_enabled=False,
             scenario_id=scenario_id,
+            config_override=config,
         )
         return {year.year: year.taxes_funded for year in plan.years}
 
