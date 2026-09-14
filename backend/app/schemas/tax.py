@@ -23,6 +23,9 @@ class BracketRoomResponse(BaseModel):
 class AccountBalanceDetail(BaseModel):
     name: str
     balance: float
+    cost_basis: float | None = None
+    cost_basis_pct: float | None = None
+    basis_source: str | None = None
 
 
 class AccountBalanceSummary(BaseModel):
@@ -33,6 +36,9 @@ class AccountBalanceSummary(BaseModel):
     tax_deferred_accounts: list[AccountBalanceDetail] = []
     tax_free_accounts: list[AccountBalanceDetail] = []
     taxable_accounts: list[AccountBalanceDetail] = []
+    taxable_cost_basis: float = 0
+    taxable_cost_basis_pct: float = 0
+    taxable_basis_coverage_pct: float = 0
 
 
 class ACASnapshot(BaseModel):

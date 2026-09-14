@@ -629,9 +629,9 @@ export default function FireConfigPage() {
               <input type="number" value={form.household_size} onChange={(e) => setForm(f => ({ ...f, household_size: e.target.value }))} placeholder="1" min={1} max={10} className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>Est. Cost Basis %</label>
+              <label className={labelCls}>Fallback Cost Basis %</label>
               <input type="number" step="1" value={form.cost_basis_pct} onChange={(e) => setForm(f => ({ ...f, cost_basis_pct: e.target.value }))} placeholder="60" min={0} max={100} className={inputCls} />
-              <span className="text-[10px] text-[var(--text-secondary)] mt-1 block">% of taxable accounts that is cost basis (not taxed on withdrawal)</span>
+              <span className="text-[10px] text-[var(--text-secondary)] mt-1 block">Used only for taxable holdings whose basis is unavailable; synced account basis takes priority.</span>
             </div>
           </div>
         </div>

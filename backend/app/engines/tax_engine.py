@@ -1042,6 +1042,90 @@ class TaxEngine:
 
         return grouped
 
+    @staticmethod
+    def estimate_taxable_cost_basis(
+        accounts: list[Account], fallback_pct: float,
+    ) -> dict:
+        """Estimate taxable basis from per-account synced data.
+
+        Monarch-reported basis is used for covered holdings, uninvested cash is
+        basis dollar-for-dollar, and the configured percentage applies only to
+        holdings whose basis is unavailable. A manual account-level basis in
+        ``custom_data.taxable_cost_basis_cents`` takes precedence.
+        """
+        fallback_pct = max(0.0, min(1.0, float(fallback_pct)))
+        total_balance = 0.0
+        total_basis = 0.0
+        covered_value = 0.0
+        details: list[dict] = []
+
+        for account in accounts:
+            balance = max(0.0, account.current_balance / 100)
+            total_balance += balance
+            custom = account.custom_data or {}
+            manual_cents = custom.get("taxable_cost_basis_cents")
+            source = "fallback"
+
+            if manual_cents is not None:
+                try:
+                    basis = max(0.0, float(manual_cents) / 100)
+                    exact_value = balance
+                    source = "manual"
+                except (TypeError, ValueError):
+                    basis = balance * fallback_pct
+                    exact_value = 0.0
+            else:
+                synced = (account.extra_data or {}).get("taxable_basis") or {}
+                try:
+                    holdings_value = max(
+                        0.0, float(synced.get("holdings_value_cents") or 0) / 100,
+                    )
+                    known_value = max(
+                        0.0, float(synced.get("basis_covered_value_cents") or 0) / 100,
+                    )
+                    known_basis = max(
+                        0.0, float(synced.get("cost_basis_cents") or 0) / 100,
+                    )
+                except (TypeError, ValueError):
+                    holdings_value = known_value = known_basis = 0.0
+
+                if holdings_value > 0:
+                    # Reconcile small timing differences between the holdings
+                    # total and the account's newer headline balance.
+                    scale = min(1.0, balance / holdings_value)
+                    holdings_value *= scale
+                    known_value = min(holdings_value, known_value * scale)
+                    known_basis *= scale
+                    cash_value = max(0.0, balance - holdings_value)
+                    unknown_value = max(0.0, holdings_value - known_value)
+                    basis = known_basis + cash_value + unknown_value * fallback_pct
+                    exact_value = known_value + cash_value
+                    source = "synced" if unknown_value <= 0.01 else "synced + fallback"
+                else:
+                    basis = balance * fallback_pct
+                    exact_value = 0.0
+
+            # Losses can make actual basis exceed market value. The tax model
+            # conservatively treats the gain portion as zero; it does not book
+            # an assumed capital-loss benefit.
+            taxable_basis = min(balance, basis)
+            total_basis += taxable_basis
+            covered_value += min(balance, exact_value)
+            details.append({
+                "name": account.name,
+                "balance": balance,
+                "cost_basis": round(taxable_basis, 2),
+                "cost_basis_pct": round(taxable_basis / balance, 4) if balance else 0.0,
+                "basis_source": source,
+            })
+
+        return {
+            "cost_basis": round(total_basis, 2),
+            "cost_basis_pct": total_basis / total_balance if total_balance else fallback_pct,
+            "coverage_pct": round(covered_value / total_balance, 4) if total_balance else 0.0,
+            "accounts": details,
+        }
+
     # -----------------------------------------------------------------------
     # Withdrawal sequencing optimizer
     # -----------------------------------------------------------------------
@@ -1056,10 +1140,11 @@ class TaxEngine:
         """Produce a year-by-year tax-aware withdrawal plan.
 
         Withdrawals follow a fixed order each year:
-        1. Taxable accounts first (only the gains portion taxed, at LTCG rates)
-        2. Tax-deferred next (ordinary income)
-        3. Tax-free (Roth) last (preserve tax-free growth)
-        4. Cash as absolute last resort
+        1. Cash above the configured operating reserve
+        2. Taxable accounts (only the gains portion taxed, at LTCG rates)
+        3. Accessible tax-deferred accounts (ordinary income)
+        4. Tax-free Roth accounts
+        5. The remaining cash reserve as a last resort
 
         On top of the fixed order, two tax-aware adjustments per year:
         - RMDs force a minimum deferred withdrawal at rmd_start_age+; any
@@ -1102,10 +1187,13 @@ class TaxEngine:
         filing_status = tax_config["filing_status"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
-        cost_basis_pct = tax_config.get("cost_basis_pct", 0.60)
+        fallback_cost_basis_pct = tax_config.get("cost_basis_pct", 0.60)
         fund_taxes = bool(tax_config.get("fund_taxes_from_withdrawals", False))
 
         accounts = await self.get_accounts_by_tax_treatment()
+        basis_estimate = self.estimate_taxable_cost_basis(
+            accounts.taxable, fallback_cost_basis_pct,
+        )
         income_sources = await self._get_active_income_sources()
         retirement_date = self._get_retirement_date(config)
 
@@ -1136,6 +1224,7 @@ class TaxEngine:
         deferred_balance = accounts.tax_deferred_balance
         roth_balance = accounts.tax_free_balance
         taxable_balance = accounts.taxable_balance
+        taxable_basis_balance = basis_estimate["cost_basis"]
         cash_balance = accounts.already_taxed_balance
 
         # REAL growth rate for invested balances: (1+nominal)/(1+inflation) − 1
@@ -1267,10 +1356,12 @@ class TaxEngine:
 
                 # Then use taxable brokerage (preferential capital-gains rates).
                 if taxable_balance > 0 and remaining_need > 0:
+                    basis_ratio = min(1.0, taxable_basis_balance / taxable_balance)
                     draw = min(remaining_need, taxable_balance)
                     from_taxable = draw
-                    # Only the gains portion is taxable
-                    capital_gains = draw * (1 - cost_basis_pct)
+                    basis_used = draw * basis_ratio
+                    capital_gains += draw - basis_used
+                    taxable_basis_balance = max(0.0, taxable_basis_balance - basis_used)
                     taxable_balance -= draw
                     remaining_need -= draw
 
@@ -1309,6 +1400,7 @@ class TaxEngine:
                     # The forced excess isn't spent — it lands in taxable
                     # until spending and any tax bill need it.
                     taxable_balance += extra_rmd
+                    taxable_basis_balance += extra_rmd
                     rmd_redeposit = extra_rmd
 
             # Golden-window Roth conversion: retired, pre-SS, pre-RMD — fill
@@ -1508,9 +1600,13 @@ class TaxEngine:
                     extra_needed -= amount
                     drawn += amount
                 if taxable_balance > 0 and extra_needed > 0:
+                    basis_ratio = min(1.0, taxable_basis_balance / taxable_balance)
                     amount = min(extra_needed, taxable_balance)
+                    basis_used = amount * basis_ratio
                     taxable_balance -= amount
+                    taxable_basis_balance = max(0.0, taxable_basis_balance - basis_used)
                     from_taxable += amount
+                    capital_gains += amount - basis_used
                     extra_needed -= amount
                     drawn += amount
                 if traditional_accessible and deferred_balance > 0 and extra_needed > 0:
@@ -1532,7 +1628,6 @@ class TaxEngine:
                     extra_needed -= amount
                     drawn += amount
 
-                capital_gains = from_taxable * (1 - cost_basis_pct)
                 if drawn <= 0.01:
                     break
 
@@ -1948,6 +2043,9 @@ class TaxEngine:
 
         # Account balances by tax treatment
         accounts = await self.get_accounts_by_tax_treatment()
+        basis_estimate = self.estimate_taxable_cost_basis(
+            accounts.taxable, tax_config.get("cost_basis_pct", 0.60),
+        )
 
         # ACA analysis — MAGI includes NON-earned income too (rental,
         # severance, dividends); previously only earned income was counted,
@@ -2010,10 +2108,10 @@ class TaxEngine:
                     {"name": a.name, "balance": a.current_balance / 100}
                     for a in accounts.tax_free
                 ],
-                "taxable_accounts": [
-                    {"name": a.name, "balance": a.current_balance / 100}
-                    for a in accounts.taxable
-                ],
+                "taxable_accounts": basis_estimate["accounts"],
+                "taxable_cost_basis": basis_estimate["cost_basis"],
+                "taxable_cost_basis_pct": round(basis_estimate["cost_basis_pct"], 4),
+                "taxable_basis_coverage_pct": basis_estimate["coverage_pct"],
             },
             "aca": {
                 "magi": aca.magi,

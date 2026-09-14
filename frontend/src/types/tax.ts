@@ -17,6 +17,9 @@ export interface BracketRoomInfo {
 export interface AccountBalanceDetail {
   name: string;
   balance: number;
+  cost_basis?: number | null;
+  cost_basis_pct?: number | null;
+  basis_source?: string | null;
 }
 
 export interface AccountBalanceSummary {
@@ -27,6 +30,9 @@ export interface AccountBalanceSummary {
   tax_deferred_accounts: AccountBalanceDetail[];
   tax_free_accounts: AccountBalanceDetail[];
   taxable_accounts: AccountBalanceDetail[];
+  taxable_cost_basis: number;
+  taxable_cost_basis_pct: number;
+  taxable_basis_coverage_pct: number;
 }
 
 export interface ACASnapshot {

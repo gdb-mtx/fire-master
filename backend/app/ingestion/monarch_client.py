@@ -71,6 +71,10 @@ class MonarchClient:
             return data
         return data.get("accountSnapshotHistory", [])
 
+    async def get_account_holdings(self, account_id: str) -> dict:
+        """Fetch investment holdings, including Monarch's reported cost basis."""
+        return await self.mm.get_account_holdings(account_id)
+
     async def get_account_snapshots_by_type(
         self,
         start_date: str | None = None,

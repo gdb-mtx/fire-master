@@ -789,9 +789,17 @@ export default function TaxPlanningPage() {
               </h3>
               <div className="space-y-2">
                 {[
-                  { label: "Tax-Deferred", value: brackets.account_balances.tax_deferred, color: "var(--yellow)", accounts: brackets.account_balances.tax_deferred_accounts },
-                  { label: "Tax-Free", value: brackets.account_balances.tax_free, color: "var(--green)", accounts: brackets.account_balances.tax_free_accounts },
-                  { label: "Taxable", value: brackets.account_balances.taxable, color: "var(--blue)", accounts: brackets.account_balances.taxable_accounts },
+                  { label: "Tax-Deferred", value: brackets.account_balances.tax_deferred, color: "var(--yellow)", accounts: brackets.account_balances.tax_deferred_accounts, costBasis: undefined, costBasisPct: undefined, basisCoveragePct: undefined },
+                  { label: "Tax-Free", value: brackets.account_balances.tax_free, color: "var(--green)", accounts: brackets.account_balances.tax_free_accounts, costBasis: undefined, costBasisPct: undefined, basisCoveragePct: undefined },
+                  {
+                    label: "Taxable",
+                    value: brackets.account_balances.taxable,
+                    color: "var(--blue)",
+                    accounts: brackets.account_balances.taxable_accounts,
+                    costBasis: brackets.account_balances.taxable_cost_basis,
+                    costBasisPct: brackets.account_balances.taxable_cost_basis_pct,
+                    basisCoveragePct: brackets.account_balances.taxable_basis_coverage_pct,
+                  },
                 ].map((bucket) => (
                   <div key={bucket.label}>
                     <div className="flex items-center justify-between">
@@ -803,11 +811,25 @@ export default function TaxPlanningPage() {
                     {bucket.accounts.length > 0 && (
                       <div className="ml-3 mt-0.5 space-y-0.5">
                         {bucket.accounts.map((a) => (
-                          <div key={a.name} className="flex justify-between text-[10px] text-[var(--text-secondary)]">
-                            <span className="truncate mr-2">{a.name}</span>
-                            <span className="font-mono shrink-0">{fmtCompact(a.balance)}</span>
+                          <div key={a.name}>
+                            <div className="flex justify-between text-[10px] text-[var(--text-secondary)]">
+                              <span className="truncate mr-2">{a.name}</span>
+                              <span className="font-mono shrink-0">{fmtCompact(a.balance)}</span>
+                            </div>
+                            {a.cost_basis != null && a.balance > 0 && (
+                              <div className="flex justify-between pl-2 text-[9px] text-[var(--text-secondary)] opacity-80">
+                                <span>Basis ({a.basis_source})</span>
+                                <span className="font-mono">{fmtCompact(a.cost_basis)} · {fmtPct(a.cost_basis_pct ?? 0)}</span>
+                              </div>
+                            )}
                           </div>
                         ))}
+                      </div>
+                    )}
+                    {bucket.costBasis != null && bucket.value > 0 && (
+                      <div className="mt-1 text-[9px] text-[var(--text-secondary)]">
+                        Estimated basis {fmtCompact(bucket.costBasis)} ({fmtPct(bucket.costBasisPct ?? 0)});
+                        {" "}{fmtPct(bucket.basisCoveragePct ?? 0)} of balances covered by synced or cash basis.
                       </div>
                     )}
                   </div>

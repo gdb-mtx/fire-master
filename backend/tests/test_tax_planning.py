@@ -57,6 +57,9 @@ def frozen_today_tax():
 def _acct(dollars: float) -> MagicMock:
     a = MagicMock()
     a.current_balance = round(dollars * 100)
+    a.name = "Test account"
+    a.extra_data = {}
+    a.custom_data = {}
     return a
 
 
@@ -256,6 +259,56 @@ class TestRothConversionPlan:
 # ---------------------------------------------------------------------------
 
 class TestWithdrawalSequence:
+    def test_synced_basis_is_weighted_and_fallback_only_fills_gaps(self):
+        synced = _acct(1_000)
+        synced.name = "Partially covered"
+        synced.extra_data = {
+            "taxable_basis": {
+                "holdings_value_cents": 80_000,
+                "basis_covered_value_cents": 60_000,
+                "cost_basis_cents": 30_000,
+            },
+        }
+        manual = _acct(500)
+        manual.name = "Manual basis"
+        manual.custom_data = {"taxable_cost_basis_cents": 40_000}
+
+        result = TaxEngine.estimate_taxable_cost_basis(
+            [synced, manual], fallback_pct=0.60,
+        )
+
+        # Synced: $300 known basis + $200 cash + 60% of $200 unknown = $620.
+        # Manual: $400. Aggregate = $1,020 / $1,500 = 68% basis.
+        assert result["cost_basis"] == pytest.approx(1_020)
+        assert result["cost_basis_pct"] == pytest.approx(0.68)
+        assert result["coverage_pct"] == pytest.approx(1_300 / 1_500, abs=0.0001)
+
+    async def test_taxable_basis_does_not_grow_with_market_value(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=10_000,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions = {
+            "tax": {"cost_basis_pct": 0.60},
+            "sepp": {"sepp_monthly": 0},
+            "projection": {"cash_reserve_months": 0},
+        }
+        account = _acct(1_000)
+        account.custom_data = {"taxable_cost_basis_cents": 50_000}
+        engine = _make_planning_engine(taxable=1_000)
+        engine.get_accounts_by_tax_treatment.return_value.taxable = [account]
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=2, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].capital_gains_income == pytest.approx(50)
+        assert plan.years[1].capital_gains_income > 50
+
     async def test_pre_59_half_deferred_is_locked_without_sepp(
         self, frozen_today_tax,
     ):
@@ -417,7 +470,12 @@ class TestWithdrawalSequence:
         assert y1.from_taxable == pytest.approx(153_000, rel=1e-6)
         assert y1.from_deferred == 0
         assert y1.from_roth == 0
-        assert y1.capital_gains_income == pytest.approx(y1.from_taxable * 0.4)
+        # Basis is reduced pro rata when sold but does not grow with the market,
+        # so the gain share rises in year 1 instead of staying fixed at 40%.
+        remaining_basis = 800_000 * 0.60 - 153_000 * 0.60
+        grown_balance = (800_000 - 153_000) * (1.07 / 1.03)
+        expected_gain = 153_000 * (1 - remaining_basis / grown_balance)
+        assert y1.capital_gains_income == pytest.approx(expected_gain, rel=1e-6)
 
     async def test_depletion_cascades(self, base_fire_config, frozen_today_tax):
         base_fire_config.healthcare_monthly_cost = None
