@@ -525,8 +525,8 @@ export default function TaxPlanningPage() {
           <span className="font-medium text-[var(--text-primary)]">Tax scope:</span>{" "}
           this page classifies only spendable cash, brokerage, traditional-retirement,
           Roth, and HSA accounts. It excludes your home and 529s. Withdrawal-plan taxes
-          are estimates shown alongside the plan; they are not deducted from projected
-          balances. Gross employment sources feed the current-income tax cards; when a
+          are grossed up and funded from the modeled withdrawal accounts. Gross employment
+          sources feed the current-income tax cards; when a
           separate after-withholding amount is available, forward cash-flow projections
           use that amount instead.
         </div>
@@ -905,7 +905,7 @@ export default function TaxPlanningPage() {
               <table className="w-full text-xs">
                 <thead>
                   <tr className="border-b border-[var(--border)]">
-                    {["Year", "Age", "Taxable", "Deferred", "Roth", "Cash", "Total Tax", "Eff. Rate", "After-Tax"].map((h) => (
+                    {["Year", "Age", "Spend Need", "Taxable", "Deferred", "Roth", "Cash", "Tax Funded", "Net Spendable"].map((h) => (
                       <th
                         key={h}
                         className="py-2 px-3 text-left font-medium text-[var(--text-secondary)] uppercase tracking-wider text-[10px]"
@@ -923,6 +923,7 @@ export default function TaxPlanningPage() {
                     >
                       <td className="py-2 px-3 font-mono text-[var(--text-primary)]">{yr.year}</td>
                       <td className="py-2 px-3 font-mono text-[var(--text-secondary)]">{yr.age}</td>
+                      <td className="py-2 px-3 font-mono text-[var(--text-primary)]">{fmt(yr.spending_need)}</td>
                       <td className="py-2 px-3 font-mono" style={{ color: yr.from_taxable > 0 ? "var(--blue)" : "var(--text-secondary)" }}>
                         {yr.from_taxable > 0 ? fmt(yr.from_taxable) : "—"}
                       </td>
@@ -935,26 +936,22 @@ export default function TaxPlanningPage() {
                       <td className="py-2 px-3 font-mono" style={{ color: yr.from_cash > 0 ? "var(--purple, #7a6aaa)" : "var(--text-secondary)" }}>
                         {yr.from_cash > 0 ? fmt(yr.from_cash) : "—"}
                       </td>
-                      <td className="py-2 px-3 font-mono text-[var(--red)]">
-                        {yr.total_tax > 0 ? fmt(yr.total_tax) : "—"}
-                      </td>
-                      <td className="py-2 px-3 font-mono text-[var(--text-secondary)]">
-                        {yr.effective_rate > 0 ? fmtPct(yr.effective_rate) : "—"}
-                      </td>
+                      <td className="py-2 px-3 font-mono text-[var(--red)]">{yr.taxes_funded > 0 ? fmt(yr.taxes_funded) : "—"}</td>
                       <td className="py-2 px-3 font-mono text-[var(--text-primary)]">
-                        {yr.after_tax_income > 0 ? fmt(yr.after_tax_income) : "—"}
+                        {yr.net_spendable > 0 ? fmt(yr.net_spendable) : "—"}
                       </td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="border-t-2 border-[var(--border)]">
-                    <td colSpan={6} className="py-2 px-3 text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
+                    <td colSpan={7} className="py-2 px-3 text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
                       {withdrawal.years.length}-Year Total
                     </td>
-                    <td className="py-2 px-3 font-mono font-bold text-[var(--red)]">{fmtCompact(withdrawal.total_tax_paid)}</td>
-                    <td className="py-2 px-3 font-mono font-bold text-[var(--text-secondary)]">{fmtPct(withdrawal.average_effective_rate)}</td>
-                    <td className="py-2 px-3 font-mono font-bold text-[var(--text-primary)]">{fmtCompact(withdrawal.total_withdrawn - withdrawal.total_tax_paid)}</td>
+                    <td className="py-2 px-3 font-mono font-bold text-[var(--red)]">
+                      {fmtCompact(withdrawal.years.reduce((sum, yr) => sum + yr.taxes_funded, 0))}
+                    </td>
+                    <td className="py-2 px-3 font-mono font-bold text-[var(--text-primary)]">grossed up</td>
                   </tr>
                 </tfoot>
               </table>

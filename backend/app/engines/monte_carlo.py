@@ -151,6 +151,9 @@ class MonteCarloEngine:
             end_date = today + relativedelta(years=40)
 
         total_years = max(1, (end_date.year - today.year))
+        tax_funding_by_year = await fire_engine._get_tax_funding_by_year(
+            config, total_years, scenario_id,
+        )
         years_to_retirement = 0
         if retirement_date and retirement_date > today:
             years_to_retirement = max(0, (retirement_date.year - today.year))
@@ -235,6 +238,7 @@ class MonteCarloEngine:
                     config,
                     today.year + yr,
                 )
+                yr_spending += tax_funding_by_year.get(today.year + yr, 0.0)
 
                 # Income: flat real, from the shared per-year precompute
                 yr_income = income_by_year[yr]

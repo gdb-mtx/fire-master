@@ -471,11 +471,25 @@ class FireProjectionsEngine:
                 )
 
         # The headline target is the transparent, conventional FIRE calculation:
-        # planned annual outflow / withdrawal rate.  It deliberately does not
+        # gross portfolio outflow / withdrawal rate. It deliberately does not
         # credit uncertain future Social Security or assume the portfolio reaches
-        # zero at life expectancy.  Pre-Medicare healthcare is configured as an
-        # extra cost, so include it conservatively in the perpetual outflow.
-        planning_outflow_cents = annual_spending_cents + healthcare_annual_cents
+        # zero at life expectancy. Source-aware taxes for the first full retirement
+        # year are added when tax gross-up is enabled.
+        estimated_annual_taxes_cents = 0
+        retirement_date = self._get_retirement_date(config)
+        if retirement_date:
+            first_full_retirement_year = retirement_date.year + 1
+            tax_schedule = await self._get_tax_funding_by_year(
+                config,
+                max(1, first_full_retirement_year - date.today().year + 1),
+            )
+            estimated_annual_taxes_cents = _dollars_to_cents(
+                tax_schedule.get(first_full_retirement_year, 0.0)
+            )
+        planning_outflow_cents = (
+            annual_spending_cents + healthcare_annual_cents
+            + estimated_annual_taxes_cents
+        )
         withdrawal_rate = max((config.safe_withdrawal_rate or 0) / 100.0, 0.0001)
         fire_number_cents = int(planning_outflow_cents / withdrawal_rate)
 
@@ -494,8 +508,9 @@ class FireProjectionsEngine:
             annual_spending=_cents_to_dollars(planning_outflow_cents),
             base_annual_spending=_cents_to_dollars(annual_spending_cents),
             healthcare_annual=_cents_to_dollars(healthcare_annual_cents),
+            estimated_annual_taxes=_cents_to_dollars(estimated_annual_taxes_cents),
             lifetime_spend_down_number=_cents_to_dollars(lifetime_spend_down_cents),
-            taxes_included=False,
+            taxes_included=estimated_annual_taxes_cents > 0,
             safe_withdrawal_rate=config.safe_withdrawal_rate,
             current_net_worth=nw.net_worth,
             gap=_cents_to_dollars(gap_cents),
@@ -544,6 +559,25 @@ class FireProjectionsEngine:
             select(IncomeSource).where(IncomeSource.is_active == True)
         )
         return list(result.scalars().all())
+
+    async def _get_tax_funding_by_year(
+        self,
+        config: FireConfig,
+        years: int,
+        scenario_id: uuid_mod.UUID | None = None,
+    ) -> dict[int, float]:
+        """Source-aware taxes that must be funded as additional cash outflow."""
+        tax_config = (config.custom_assumptions or {}).get("tax", {}) or {}
+        if not tax_config.get("fund_taxes_from_withdrawals", False):
+            return {}
+        from app.engines.tax_engine import TaxEngine
+
+        plan = await TaxEngine(self.db).optimize_withdrawal_sequence(
+            years=max(1, years),
+            roth_conversions_enabled=False,
+            scenario_id=scenario_id,
+        )
+        return {year.year: year.taxes_funded for year in plan.years}
 
     async def _get_cashflow_events(self) -> list[CashflowEvent]:
         """Planned + confirmed cashflow events — the declared plan's dated flows."""
@@ -727,6 +761,9 @@ class FireProjectionsEngine:
             end_date = config.date_of_birth + relativedelta(years=life_exp)
         else:
             end_date = today + relativedelta(years=40)
+        tax_funding_by_year = await self._get_tax_funding_by_year(
+            config, end_date.year - today.year + 1,
+        )
 
         # Cashflow events are part of the declared plan (fire-master#17). Skip
         # conversion events (property sale proceeds, vests): this single-pool
@@ -786,6 +823,13 @@ class FireProjectionsEngine:
                     age_now = self._compute_age(config, current)
                     if age_now < config.medicare_start_age:
                         monthly_spending += config.healthcare_monthly_cost
+
+            # Source-aware tax gross-up from the withdrawal planner. Employment
+            # income with an explicit net cash-flow amount is treated as already
+            # withheld, so only taxes that still need cash funding appear here.
+            monthly_spending += _dollars_to_cents(
+                tax_funding_by_year.get(current.year, 0.0) / 12
+            )
 
             # Monthly income (flat real throughout)
             if is_retired:
@@ -1403,6 +1447,11 @@ class FireProjectionsEngine:
 
         total_months = int((end_age - current_age) * 12)
         ira_b_monthly_growth = ira_growth_rate / 12
+        tax_funding_by_year = await self._get_tax_funding_by_year(
+            config,
+            max(1, (today + relativedelta(months=total_months)).year - today.year + 1),
+            scenario_id,
+        )
         mortgage_payoff_month = None
         if mortgage_terms_configured and primary_property_mortgage_payoff_date:
             mortgage_payoff_month = max(
@@ -1701,6 +1750,8 @@ class FireProjectionsEngine:
             # Healthcare costs (pre-Medicare only, not in base spending)
             if healthcare_monthly > 0 and age < medicare_age:
                 expenses += healthcare_monthly
+
+            expenses += tax_funding_by_year.get(dt.year, 0.0) / 12
 
             # --- IRA-A: grows + SEPP draws ---
             # IRA-A is invested (same growth rate as IRA-B) but has fixed SEPP withdrawals

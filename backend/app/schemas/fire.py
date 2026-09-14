@@ -240,6 +240,7 @@ class FireNumberResponse(BaseModel):
     annual_spending: float
     base_annual_spending: float | None = None
     healthcare_annual: float = 0
+    estimated_annual_taxes: float = 0
     lifetime_spend_down_number: float | None = None
     taxes_included: bool = False
     safe_withdrawal_rate: float

@@ -11,9 +11,10 @@ Documented simplifications (asserted here as intended behavior, not bugs):
   cliff_warning only fires on the *approaching* side of the 400% FPL cliff.
 - The withdrawal sequencer runs in REAL terms: spending flat, balances at
   the real return ((1.07/1.03)−1 for the persona), brackets frozen at
-  today's levels (≈ IRS inflation indexing). Taxes are reported but not
-  deducted from balances. Shortfalls draw through the waterfall
-  pre-retirement too.
+  today's levels (≈ IRS inflation indexing). By default, taxes are reported
+  but not deducted from balances; the source-aware gross-up tests explicitly
+  enable funding taxes from withdrawals. Shortfalls draw through the
+  waterfall pre-retirement too.
 - total_withdrawn excludes cash draws (cash is already-taxed money).
   average_effective_rate = total tax / total GROSS income (income sources +
   all draws), matching each year's effective_rate — fire-master#4 killed the
@@ -255,6 +256,44 @@ class TestRothConversionPlan:
 # ---------------------------------------------------------------------------
 
 class TestWithdrawalSequence:
+    async def test_tax_deferred_withdrawals_are_grossed_up_to_fund_tax(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.custom_assumptions["tax"]["fund_taxes_from_withdrawals"] = True
+        engine = _make_planning_engine(deferred=1_000_000)
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.from_deferred > year.spending_need
+        assert year.taxes_funded == pytest.approx(year.total_tax, abs=0.02)
+        assert year.net_spendable == pytest.approx(year.spending_need, abs=0.05)
+
+    async def test_net_salary_withholding_is_not_funded_twice(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.target_annual_spending = 12_000_000
+        base_fire_config.target_retirement_age = 60
+        base_fire_config.custom_assumptions["tax"]["fund_taxes_from_withdrawals"] = True
+        salary = _income_source("Gross salary", IncomeType.SALARY, 200_000)
+        salary.custom_data = {"net_annual_amount": 15_000_000}
+        engine = _make_planning_engine(deferred=1_000_000, income_sources=[salary])
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.from_deferred == 0
+        assert year.taxes_funded == 0
+        assert year.net_spendable == pytest.approx(150_000)
+
     async def test_waterfall_order_taxable_first(self, base_fire_config, frozen_today_tax):
         base_fire_config.healthcare_monthly_cost = None
         engine = _make_planning_engine(taxable=800_000, deferred=400_000, roth=200_000)

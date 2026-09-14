@@ -797,9 +797,16 @@ export default function RetirementPage() {
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4 text-xs text-[var(--text-secondary)] space-y-1">
           <p>
             <span className="text-[var(--text-primary)] font-medium">How the target works:</span>{" "}
-            {fmt(fireNum.annual_spending)} annual outflow ÷ {fireNum.safe_withdrawal_rate}%.
+            {fmt(fireNum.annual_spending)} gross annual portfolio outflow ÷ {fireNum.safe_withdrawal_rate}%.
             This does not credit future Social Security or assume you spend the portfolio to zero.
           </p>
+          {fireNum.taxes_included && (
+            <p>
+              Gross outflow includes {fmt(fireNum.base_annual_spending ?? 0)} after-tax spending,
+              {" "}{fmt(fireNum.healthcare_annual)} pre-Medicare healthcare, and approximately{" "}
+              {fmt(fireNum.estimated_annual_taxes)} of first-full-retirement-year withdrawal taxes.
+            </p>
+          )}
           <p>
             Pre-retirement compensation: {fmt(grossEmploymentIncome)} gross; the projection uses{" "}
             {fmt(projectedEmploymentIncome)}/year of observed after-withholding cash flow, including
@@ -813,8 +820,8 @@ export default function RetirementPage() {
             </p>
           )}
           <p className="text-[var(--yellow)]">
-            Income taxes are not added automatically. Your annual spending target must include the
-            taxes you expect to pay; the Tax page estimates withdrawal taxes separately.
+            Withdrawal taxes are grossed up according to the projected source of funds. Actual taxes
+            will vary with future law, deductions, cost basis, and the withdrawal sequence.
           </p>
         </div>
 

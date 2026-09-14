@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.account import Account
 from app.models.enums import AccountType
 from app.models.fire_config import FireConfig
-from app.models.income_source import IncomeSource
+from app.models.income_source import IncomeSource, projection_annual_amount_cents
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,17 @@ def _prorated_annual_for_year(source, year: int, end_override: date | None = Non
     return (source.annual_amount / 100) * _year_fraction(year, source.start_date, end)
 
 
+def _prorated_projection_for_year(source, year: int, end_override: date | None = None) -> float:
+    """Spendable cash contribution for a source, respecting its date window."""
+    end = source.end_date
+    if end_override is not None and (end is None or end_override < end):
+        end = end_override
+    return (
+        projection_annual_amount_cents(source) / 100
+        * _year_fraction(year, source.start_date, end)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Data classes for results
 # ---------------------------------------------------------------------------
@@ -195,6 +206,9 @@ class WithdrawalYearPlan:
     """One year of the withdrawal sequence."""
     year: int
     age: float
+    spending_need: float
+    taxes_funded: float
+    net_spendable: float
     from_taxable: float
     from_deferred: float
     from_roth: float
@@ -295,6 +309,9 @@ class TaxEngine:
             # cash holds purchasing power (HYSA ≈ inflation). Positive only if
             # cash is parked meaningfully above inflation.
             "cash_yield_rate": 0.0,
+            # When enabled, iteratively gross up withdrawals until spending
+            # plus the resulting tax bill is fully funded.
+            "fund_taxes_from_withdrawals": False,
         }
         if config.custom_assumptions and "tax" in config.custom_assumptions:
             defaults.update(config.custom_assumptions["tax"])
@@ -641,8 +658,10 @@ class TaxEngine:
         annually (a nominal simulation against frozen brackets manufactures
         phantom bracket creep).
 
-        Simplification: taxes are reported but not deducted from balances
-        (the plan shows the tax cost of the sequence, not net-of-tax wealth).
+        When tax.fund_taxes_from_withdrawals is enabled, withdrawals are
+        iteratively grossed up until both the desired spending and the tax bill
+        produced by those withdrawals are funded. Taxes already embedded in a
+        source's explicit net cash-flow amount are not charged twice.
 
         IncomeSource.is_taxable gates the tax computation: a source flagged
         non-taxable (or entered net-of-tax — flag it False) still offsets
@@ -666,6 +685,7 @@ class TaxEngine:
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
         cost_basis_pct = tax_config.get("cost_basis_pct", 0.60)
+        fund_taxes = bool(tax_config.get("fund_taxes_from_withdrawals", False))
 
         accounts = await self.get_accounts_by_tax_treatment()
         income_sources = await self._get_active_income_sources()
@@ -723,6 +743,8 @@ class TaxEngine:
             taxable_ss = 0.0
             taxable_pension = 0.0
             taxable_other = 0.0
+            gross_non_withdrawal_income = 0.0
+            has_prepaid_tax_source = False
 
             for src in income_sources:
                 # Day-prorated contribution for this calendar year (an ended
@@ -733,24 +755,37 @@ class TaxEngine:
                 if src.income_type.value in ("salary", "bonus", "side_hustle"):
                     end_override = retirement_date
                 annual = _prorated_annual_for_year(src, current_year, end_override)
+                annual_cash = _prorated_projection_for_year(
+                    src, current_year, end_override,
+                )
                 if annual <= 0:
                     continue
                 if src.growth_rate and yr > 0:
                     # growth_rate is a NOMINAL raise — deflate to real
                     real_growth = (1 + src.growth_rate / 100) / (1 + inflation) - 1
                     annual *= (1 + real_growth) ** yr
+                    annual_cash *= (1 + real_growth) ** yr
+
+                gross_non_withdrawal_income += annual
+                custom_data = getattr(src, "custom_data", None)
+                if (
+                    src.is_taxable
+                    and isinstance(custom_data, dict)
+                    and custom_data.get("net_annual_amount") is not None
+                ):
+                    has_prepaid_tax_source = True
 
                 if src.income_type.value == "social_security":
-                    ss_income += annual
+                    ss_income += annual_cash
                     taxable_ss += annual if src.is_taxable else 0.0
                 elif src.income_type.value == "pension":
-                    pension_income += annual
+                    pension_income += annual_cash
                     taxable_pension += annual if src.is_taxable else 0.0
                 elif src.income_type.value in ("salary", "bonus", "side_hustle"):
-                    earned_income += annual
+                    earned_income += annual_cash
                     taxable_earned += annual if src.is_taxable else 0.0
                 else:
-                    other_income += annual
+                    other_income += annual_cash
                     taxable_other += annual if src.is_taxable else 0.0
 
             # Social Security from config (if not in income sources) —
@@ -760,6 +795,7 @@ class TaxEngine:
                 ss_income = (config.social_security_monthly * 12 / 100) * _year_fraction(
                     current_year, start=ss_start)
                 taxable_ss = ss_income
+                gross_non_withdrawal_income += ss_income
 
             # Pension from config — same first-year proration
             if config.pension_monthly and config.pension_start_age and config.date_of_birth and pension_income == 0:
@@ -767,6 +803,7 @@ class TaxEngine:
                 pension_income = (config.pension_monthly * 12 / 100) * _year_fraction(
                     current_year, start=pension_start)
                 taxable_pension = pension_income
+                gross_non_withdrawal_income += pension_income
 
             total_non_withdrawal_income = earned_income + ss_income + pension_income + other_income
             withdrawal_needed = max(0, spending_need - total_non_withdrawal_income)
@@ -814,6 +851,7 @@ class TaxEngine:
 
             # RMD check (age 73+): force minimum deferred withdrawal
             roth_conversion = 0.0
+            rmd_redeposit = 0.0
             if age >= config.rmd_start_age and deferred_balance > 0:
                 rmd_pct = 1 / _get_rmd_divisor(int(age))
                 rmd_amount = deferred_balance * rmd_pct
@@ -822,8 +860,9 @@ class TaxEngine:
                     from_deferred += extra_rmd
                     deferred_balance -= extra_rmd
                     # The forced excess isn't spent — it lands in taxable
-                    # (gross redeposit; taxes are reported, not deducted).
+                    # until spending and any tax bill need it.
                     taxable_balance += extra_rmd
+                    rmd_redeposit = extra_rmd
 
             # Golden-window Roth conversion: retired, pre-SS, pre-RMD — fill
             # ordinary income up to the target bracket ceiling. Conversion is
@@ -852,17 +891,104 @@ class TaxEngine:
                 deferred_balance -= roth_conversion
                 roth_balance += roth_conversion
 
-            # Compute taxes (Roth conversion counts as ordinary income) —
-            # only the is_taxable portion of each income bucket enters.
-            ordinary_income = taxable_earned + taxable_ss * 0.85 + taxable_pension + from_deferred + roth_conversion + taxable_other
-            taxable_income = max(0, ordinary_income - std_deduction)
+            def calculate_year_tax() -> tuple[float, float, float, float, float]:
+                """Return ordinary income and federal/state/FICA/total tax."""
+                ordinary = (
+                    taxable_earned + taxable_ss * 0.85 + taxable_pension
+                    + from_deferred + roth_conversion + taxable_other
+                )
+                taxable_total = max(0, ordinary - std_deduction)
+                federal_breakdown = self.compute_federal_tax(
+                    taxable_total, filing_status, brackets,
+                )
+                gains_tax = self.compute_capital_gains_tax(
+                    capital_gains, taxable_total, filing_status,
+                )
+                federal = federal_breakdown.total_federal_tax + gains_tax
+                state = self.compute_state_tax(
+                    ordinary + capital_gains - std_deduction, state_rate,
+                )
+                fica = self.compute_fica(taxable_earned, filing_status)
+                return ordinary, federal, state, fica, federal + state + fica
 
-            federal_breakdown = self.compute_federal_tax(taxable_income, filing_status, brackets)
-            cg_tax = self.compute_capital_gains_tax(capital_gains, taxable_income, filing_status)
-            federal_tax = federal_breakdown.total_federal_tax + cg_tax
-            state_tax = self.compute_state_tax(ordinary_income + capital_gains - std_deduction, state_rate)
-            fica_tax = self.compute_fica(taxable_earned, filing_status)
-            total_tax_year = federal_tax + state_tax + fica_tax
+            # A source with an explicit net cash-flow amount represents money
+            # after payroll withholding. Its baseline income tax is displayed,
+            # but must not be funded a second time from the portfolio.
+            prepaid_tax = 0.0
+            if has_prepaid_tax_source:
+                baseline_ordinary = (
+                    taxable_earned + taxable_ss * 0.85
+                    + taxable_pension + taxable_other
+                )
+                baseline_taxable = max(0, baseline_ordinary - std_deduction)
+                baseline_federal = self.compute_federal_tax(
+                    baseline_taxable, filing_status, brackets,
+                ).total_federal_tax
+                baseline_state = self.compute_state_tax(
+                    baseline_ordinary - std_deduction, state_rate,
+                )
+                baseline_fica = self.compute_fica(taxable_earned, filing_status)
+                prepaid_tax = baseline_federal + baseline_state + baseline_fica
+
+            # Fixed-point gross-up: taxes on an extra traditional withdrawal
+            # themselves require another (smaller) withdrawal. Iterate until
+            # the remaining after-tax cash gap is immaterial or assets run out.
+            for _ in range(12):
+                (
+                    ordinary_income,
+                    federal_tax,
+                    state_tax,
+                    fica_tax,
+                    total_tax_year,
+                ) = calculate_year_tax()
+                taxes_funded = max(0.0, total_tax_year - prepaid_tax) if fund_taxes else 0.0
+                spendable_cash = (
+                    total_non_withdrawal_income + from_taxable + from_deferred
+                    + from_roth + from_cash - rmd_redeposit
+                )
+                extra_needed = max(0.0, spending_need + taxes_funded - spendable_cash)
+                if extra_needed <= 0.01 or not fund_taxes:
+                    break
+
+                drawn = 0.0
+                if taxable_balance > 0 and extra_needed > 0:
+                    amount = min(extra_needed, taxable_balance)
+                    taxable_balance -= amount
+                    from_taxable += amount
+                    extra_needed -= amount
+                    drawn += amount
+                if deferred_balance > 0 and extra_needed > 0:
+                    amount = min(extra_needed, deferred_balance)
+                    deferred_balance -= amount
+                    from_deferred += amount
+                    extra_needed -= amount
+                    drawn += amount
+                if roth_balance > 0 and extra_needed > 0:
+                    amount = min(extra_needed, roth_balance)
+                    roth_balance -= amount
+                    from_roth += amount
+                    extra_needed -= amount
+                    drawn += amount
+                if cash_balance > 0 and extra_needed > 0:
+                    amount = min(extra_needed, cash_balance)
+                    cash_balance -= amount
+                    from_cash += amount
+                    extra_needed -= amount
+                    drawn += amount
+
+                capital_gains = from_taxable * (1 - cost_basis_pct)
+                if drawn <= 0.01:
+                    break
+
+            # Recompute once with the final grossed-up withdrawal amounts.
+            (
+                ordinary_income,
+                federal_tax,
+                state_tax,
+                fica_tax,
+                total_tax_year,
+            ) = calculate_year_tax()
+            taxes_funded = max(0.0, total_tax_year - prepaid_tax) if fund_taxes else 0.0
 
             magi = self.compute_magi(
                 earned_income=taxable_earned,
@@ -875,14 +1001,21 @@ class TaxEngine:
             )
 
             total_gross = (
-                total_non_withdrawal_income + from_taxable + from_deferred
+                gross_non_withdrawal_income + from_taxable + from_deferred
                 + from_roth + from_cash
             )
             effective = total_tax_year / total_gross if total_gross > 0 else 0
+            net_spendable = (
+                total_non_withdrawal_income + from_taxable + from_deferred
+                + from_roth + from_cash - rmd_redeposit - taxes_funded
+            )
 
             year_plans.append(WithdrawalYearPlan(
                 year=current_year,
                 age=round(age, 1),
+                spending_need=round(spending_need, 2),
+                taxes_funded=round(taxes_funded, 2),
+                net_spendable=round(net_spendable, 2),
                 from_taxable=round(from_taxable, 2),
                 from_deferred=round(from_deferred, 2),
                 from_roth=round(from_roth, 2),

@@ -64,6 +64,9 @@ export interface BracketAnalysis {
 export interface WithdrawalYear {
   year: number;
   age: number;
+  spending_need: number;
+  taxes_funded: number;
+  net_spendable: number;
   from_taxable: number;
   from_deferred: number;
   from_roth: number;

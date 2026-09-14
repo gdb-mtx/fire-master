@@ -81,6 +81,7 @@ export interface FireNumber {
   annual_spending: number;
   base_annual_spending: number | null;
   healthcare_annual: number;
+  estimated_annual_taxes: number;
   lifetime_spend_down_number: number | null;
   taxes_included: boolean;
   safe_withdrawal_rate: number;

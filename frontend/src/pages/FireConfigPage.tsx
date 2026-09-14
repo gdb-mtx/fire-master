@@ -383,10 +383,10 @@ export default function FireConfigPage() {
             </div>
           </div>
           <div className="mt-4">
-            <label className={labelCls}>Target Annual Retirement Outflow ($)</label>
+            <label className={labelCls}>Target Annual Retirement Spending — After Tax ($)</label>
             <input type="number" value={form.target_annual_spending} onChange={(e) => setForm(f => ({ ...f, target_annual_spending: e.target.value }))} placeholder="Auto-computed from spending data" className={inputCls} />
             <p className="text-[10px] text-[var(--text-secondary)] mt-1">
-              Include expected income taxes. Extra pre-Medicare healthcare below is added separately.
+              Enter what you want available to spend. Withdrawal taxes and extra pre-Medicare healthcare are added by the model.
             </p>
           </div>
         </div>

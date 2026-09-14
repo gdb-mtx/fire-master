@@ -71,6 +71,9 @@ class BracketAnalysisResponse(BaseModel):
 class WithdrawalYearResponse(BaseModel):
     year: int
     age: float
+    spending_need: float = 0.0
+    taxes_funded: float = 0.0
+    net_spendable: float = 0.0
     from_taxable: float
     from_deferred: float
     from_roth: float
