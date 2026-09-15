@@ -24,6 +24,7 @@ export default function FireConfigPage() {
   const deleteIncome = useDeleteIncomeSource();
 
   const [form, setForm] = useState({
+    household_type: "one_adult",
     date_of_birth: "",
     target_retirement_age: "",
     life_expectancy: "90",
@@ -129,7 +130,11 @@ export default function FireConfigPage() {
       const rothLadder = ca?.roth_conversion_ladder as Record<string, unknown> | undefined;
       const monteCarlo = ca?.monte_carlo as Record<string, unknown> | undefined;
       const household = ca?.household as Record<string, unknown> | undefined;
+      const hasSavedSecondAdult = Boolean(
+        household?.adult_2_date_of_birth || household?.adult_2_life_expectancy,
+      );
       setForm({
+        household_type: hasSavedSecondAdult ? "two_adults" : "one_adult",
         date_of_birth: config.date_of_birth || "",
         target_retirement_age: config.target_retirement_age?.toString() || "",
         life_expectancy: config.life_expectancy.toString(),
@@ -265,8 +270,10 @@ export default function FireConfigPage() {
     // omitting a key would leave the old value in place.
     data.custom_assumptions = {
       household: {
-        adult_2_date_of_birth: form.adult_2_date_of_birth || null,
-        adult_2_life_expectancy: form.adult_2_life_expectancy
+        adult_2_date_of_birth: form.household_type === "two_adults"
+          ? form.adult_2_date_of_birth || null
+          : null,
+        adult_2_life_expectancy: form.household_type === "two_adults" && form.adult_2_life_expectancy
           ? parseInt(form.adult_2_life_expectancy)
           : null,
         survivor_spending_pct: pf(form.survivor_spending_pct, 70) / 100,
@@ -440,6 +447,7 @@ export default function FireConfigPage() {
 
   const { data: activeScenarios } = useScenarios();
   const activeScenario = activeScenarios?.find((s) => s.is_active);
+  const hasSecondAdult = form.household_type === "two_adults";
   const ssBasis = (
     (config?.custom_assumptions as Record<string, unknown> | null)?.social_security ?? null
   ) as Record<string, unknown> | null;
@@ -491,34 +499,45 @@ export default function FireConfigPage() {
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
           <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-1">Household</h3>
           <p className="text-[10px] text-[var(--text-secondary)] mb-4">
-            The plan runs through the later lifespan. Leave Adult 2 blank for a one-person plan.
+            Choose whether the plan covers one adult or two. Two-adult plans run through the later lifespan.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
             <div>
-              <label className={labelCls}>Adult 1 Date of Birth</label>
+              <label className={labelCls}>Plan Covers</label>
+              <select value={form.household_type} onChange={(e) => setForm(f => ({ ...f, household_type: e.target.value }))} className={inputCls}>
+                <option value="one_adult">One adult</option>
+                <option value="two_adults">Two adults</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>Your Date of Birth</label>
               <input type="date" value={form.date_of_birth} onChange={(e) => setForm(f => ({ ...f, date_of_birth: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>Adult 1 Life Expectancy</label>
+              <label className={labelCls}>Your Life Expectancy</label>
               <input type="number" value={form.life_expectancy} onChange={(e) => setForm(f => ({ ...f, life_expectancy: e.target.value }))} placeholder="90" className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>Target Retirement Age (Adult 1)</label>
+              <label className={labelCls}>Your Target Retirement Age</label>
               <input type="number" value={form.target_retirement_age} onChange={(e) => setForm(f => ({ ...f, target_retirement_age: e.target.value }))} placeholder="55" className={inputCls} />
             </div>
-            <div>
-              <label className={labelCls}>Adult 2 Date of Birth</label>
-              <input type="date" value={form.adult_2_date_of_birth} onChange={(e) => setForm(f => ({ ...f, adult_2_date_of_birth: e.target.value }))} className={inputCls} />
-            </div>
-            <div>
-              <label className={labelCls}>Adult 2 Life Expectancy</label>
-              <input type="number" value={form.adult_2_life_expectancy} onChange={(e) => setForm(f => ({ ...f, adult_2_life_expectancy: e.target.value }))} placeholder="90" className={inputCls} />
-            </div>
-            <div>
-              <label className={labelCls}>One-Survivor Spending (% of household)</label>
-              <input type="number" min="0" max="100" value={form.survivor_spending_pct} onChange={(e) => setForm(f => ({ ...f, survivor_spending_pct: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">70% is a common planning assumption; housing and other fixed costs do not halve.</p>
-            </div>
+            {hasSecondAdult && (
+              <>
+                <div>
+                  <label className={labelCls}>Partner Date of Birth</label>
+                  <input type="date" value={form.adult_2_date_of_birth} onChange={(e) => setForm(f => ({ ...f, adult_2_date_of_birth: e.target.value }))} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Partner Life Expectancy</label>
+                  <input type="number" value={form.adult_2_life_expectancy} onChange={(e) => setForm(f => ({ ...f, adult_2_life_expectancy: e.target.value }))} placeholder="90" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>One-Survivor Spending (% of household)</label>
+                  <input type="number" min="0" max="100" value={form.survivor_spending_pct} onChange={(e) => setForm(f => ({ ...f, survivor_spending_pct: e.target.value }))} className={inputCls} />
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-1">70% is a common planning assumption; housing and other fixed costs do not halve.</p>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -560,9 +579,9 @@ export default function FireConfigPage() {
         {/* Social Security + Pension */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
           <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-4">Post-Retirement Income</h3>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className={labelCls}>Social Security Monthly ($)</label>
+              <label className={labelCls}>{hasSecondAdult ? "Combined Social Security Monthly ($)" : "Social Security Monthly ($)"}</label>
               <input type="number" value={form.social_security_monthly} onChange={(e) => setForm(f => ({ ...f, social_security_monthly: e.target.value }))} placeholder="0" className={inputCls} />
               {ssBasis ? (
                 <p className="text-[10px] text-[var(--text-secondary)] mt-1">
@@ -571,9 +590,13 @@ export default function FireConfigPage() {
                   {Math.round(Number(ssBasis.benefit_fraction) * 100)}%.
                 </p>
               ) : (
-                <p className="text-[10px] text-[var(--text-secondary)] mt-1">Add both spouses' estimates at the selected claiming age.</p>
+                <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+                  {hasSecondAdult
+                    ? "Add both adults' estimates at the selected claiming age."
+                    : "Enter your estimate at the selected claiming age."}
+                </p>
               )}
-              {form.adult_2_date_of_birth && (
+              {hasSecondAdult && form.adult_2_date_of_birth && (
                 <p className="text-[10px] text-[var(--text-secondary)] mt-1">Split equally between the two adults and started when each person reaches the configured age.</p>
               )}
             </div>
@@ -603,7 +626,9 @@ export default function FireConfigPage() {
             <div>
               <label className={labelCls}>Post-Medicare Healthcare ($/month)</label>
               <input type="number" value={form.post_medicare_healthcare_monthly_cost} onChange={(e) => setForm(f => ({ ...f, post_medicare_healthcare_monthly_cost: e.target.value }))} placeholder="Medicare + supplements" className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">For both adults: Part B, Part D, supplements, and routine out-of-pocket costs.</p>
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+                {hasSecondAdult ? "For both adults: " : "Include "}Part B, Part D, supplements, and routine out-of-pocket costs.
+              </p>
             </div>
             <div>
               <label className={labelCls}>Medicare Start Age</label>
