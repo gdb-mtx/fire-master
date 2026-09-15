@@ -22,6 +22,11 @@ fi
 echo "Cleaning up stale processes..."
 lsof -ti:8000 | xargs kill -9 2>/dev/null || true
 lsof -ti:5173 | xargs kill -9 2>/dev/null || true
+# Celery binds no port, so the lsof sweep above can never see it. A worker or beat
+# left over from a previous run keeps consuming the same Redis queue, and two
+# workers means every scheduled sync runs twice — visible as the duplicate full
+# syncs in backend/celery-worker.log on Aug 4 2026. Match the command line instead.
+pkill -f "celery -A app.tasks.celery_app" 2>/dev/null || true
 sleep 1
 
 # Verify Docker daemon is reachable before any compose calls
@@ -59,7 +64,12 @@ cleanup() {
   echo "Shutting down..."
   kill $BACKEND_PID 2>/dev/null
   kill $CELERY_PID 2>/dev/null
+  kill $BEAT_PID 2>/dev/null
   kill $FRONTEND_PID 2>/dev/null
+  # $CELERY_PID is only the `uv run` wrapper. The worker's prefork children are not
+  # killed with it and survive as orphans holding the queue — which is precisely the
+  # stale state the startup sweep above then has to clean up.
+  pkill -f "celery -A app.tasks.celery_app" 2>/dev/null || true
   exit 0
 }
 trap cleanup INT TERM
@@ -91,6 +101,15 @@ echo "Starting Celery worker..."
 $UV run celery -A app.tasks.celery_app worker --loglevel=info -I app.tasks.sync_tasks &
 CELERY_PID=$!
 
+# Start Celery beat. Without it nothing ever fires celery_app.py's beat_schedule,
+# so the 4-hourly Monarch sync and the nightly net worth snapshot simply never run
+# and the stack only syncs when someone clicks the button. A sync that is never
+# attempted also never reports failing — which is how a session revoked on Sept 6
+# 2026 went unnoticed for nine days.
+echo "Starting Celery beat (4-hourly sync, nightly snapshot)..."
+$UV run celery -A app.tasks.celery_app beat --loglevel=info &
+BEAT_PID=$!
+
 # Start frontend
 echo "Starting frontend on :5173..."
 export NVM_DIR="$HOME/.nvm"
@@ -110,6 +129,7 @@ echo "FIREMaster is running:"
 echo "  Dashboard: http://localhost:5173"
 echo "  API:       http://localhost:8000/api/health"
 echo "  API Docs:  http://localhost:8000/docs"
+echo "  Scheduler: celery beat (Monarch sync every 4h)"
 echo ""
 echo "Press Ctrl+C to stop all services."
 
