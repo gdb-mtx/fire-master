@@ -1067,7 +1067,7 @@ export default function RetirementPage() {
                     ))}
                   </div>
                   <p className="text-[10px] text-[var(--text-secondary)] mt-3">
-                    The configured return is the long-run arithmetic mean, not the median outcome.
+                    {String(monteCarlo.assumptions?.return_model ?? "Configured retirement return model")}.
                     A fixed set of random paths is reused so settings comparisons do not bounce
                     around. Projected federal and state taxes are included, using the expected-path
                     withdrawal schedule rather than recalculating taxes inside every random path.

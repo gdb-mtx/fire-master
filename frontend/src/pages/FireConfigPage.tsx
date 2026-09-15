@@ -93,6 +93,10 @@ export default function FireConfigPage() {
     monte_carlo_return_mean_type: "geometric",
     monte_carlo_accumulation_volatility: "13",
     monte_carlo_retirement_volatility: "12",
+    monte_carlo_simulation_method: "historical_blocks",
+    monte_carlo_historical_block_years: "7",
+    monte_carlo_accumulation_stock_weight: "80",
+    monte_carlo_retirement_stock_weight: "70",
   });
 
   const [incomeForm, setIncomeForm] = useState({
@@ -193,6 +197,14 @@ export default function FireConfigPage() {
         monte_carlo_retirement_volatility: monteCarlo?.retirement_return_std != null
           ? ((monteCarlo.retirement_return_std as number) * 100).toString()
           : "12",
+        monte_carlo_simulation_method: (monteCarlo?.simulation_method as string) || "historical_blocks",
+        monte_carlo_historical_block_years: (monteCarlo?.historical_block_years as number)?.toString() || "7",
+        monte_carlo_accumulation_stock_weight: monteCarlo?.accumulation_stock_weight != null
+          ? ((monteCarlo.accumulation_stock_weight as number) * 100).toString()
+          : "80",
+        monte_carlo_retirement_stock_weight: monteCarlo?.retirement_stock_weight != null
+          ? ((monteCarlo.retirement_stock_weight as number) * 100).toString()
+          : "70",
       });
       setLastConfigVersion(version);
     }
@@ -311,6 +323,10 @@ export default function FireConfigPage() {
         // settings are saved.
         return_std: null,
         return_mean_type: form.monte_carlo_return_mean_type,
+        simulation_method: form.monte_carlo_simulation_method,
+        historical_block_years: Math.max(1, parseInt(form.monte_carlo_historical_block_years) || 7),
+        accumulation_stock_weight: pf(form.monte_carlo_accumulation_stock_weight, 80) / 100,
+        retirement_stock_weight: pf(form.monte_carlo_retirement_stock_weight, 70) / 100,
         accumulation_return_std: pf(form.monte_carlo_accumulation_volatility, 13) / 100,
         retirement_return_std: pf(form.monte_carlo_retirement_volatility, 12) / 100,
       },
@@ -806,24 +822,54 @@ export default function FireConfigPage() {
           <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Monte Carlo Return Model</h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
             <div>
-              <label className={labelCls}>Expected Return Means</label>
-              <select value={form.monte_carlo_return_mean_type} onChange={(e) => setForm(f => ({ ...f, monte_carlo_return_mean_type: e.target.value }))} className={inputCls}>
-                <option value="geometric">Compounded return (CAGR)</option>
-                <option value="arithmetic">Arithmetic annual mean</option>
+              <label className={labelCls}>Simulation Method</label>
+              <select value={form.monte_carlo_simulation_method} onChange={(e) => setForm(f => ({ ...f, monte_carlo_simulation_method: e.target.value }))} className={inputCls}>
+                <option value="historical_blocks">Historical multi-year blocks</option>
+                <option value="parametric">Independent annual shocks</option>
               </select>
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">CAGR matches how long-run return assumptions are normally quoted.</p>
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Historical blocks preserve real crash, recovery, bond, and inflation sequences.</p>
             </div>
-            <div>
-              <label className={labelCls}>Working-Years Volatility %</label>
-              <input type="number" min={0} max={50} step="0.5" value={form.monte_carlo_accumulation_volatility} onChange={(e) => setForm(f => ({ ...f, monte_carlo_accumulation_volatility: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">13% represents a diversified, equity-heavy portfolio rather than 100% stocks.</p>
-            </div>
-            <div>
-              <label className={labelCls}>Retirement Volatility %</label>
-              <input type="number" min={0} max={50} step="0.5" value={form.monte_carlo_retirement_volatility} onChange={(e) => setForm(f => ({ ...f, monte_carlo_retirement_volatility: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">12% assumes some risk reduction and rebalancing after retirement.</p>
-            </div>
+            {form.monte_carlo_simulation_method === "historical_blocks" ? (
+              <>
+                <div>
+                  <label className={labelCls}>Historical Block Length</label>
+                  <input type="number" min={1} max={20} step="1" value={form.monte_carlo_historical_block_years} onChange={(e) => setForm(f => ({ ...f, monte_carlo_historical_block_years: e.target.value }))} className={inputCls} />
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-1">Seven years retains market regimes without relying on a single fixed historical path.</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Working-Years Stocks %</label>
+                  <input type="number" min={0} max={100} step="5" value={form.monte_carlo_accumulation_stock_weight} onChange={(e) => setForm(f => ({ ...f, monte_carlo_accumulation_stock_weight: e.target.value }))} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Retirement Stocks %</label>
+                  <input type="number" min={0} max={100} step="5" value={form.monte_carlo_retirement_stock_weight} onChange={(e) => setForm(f => ({ ...f, monte_carlo_retirement_stock_weight: e.target.value }))} className={inputCls} />
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <label className={labelCls}>Expected Return Means</label>
+                  <select value={form.monte_carlo_return_mean_type} onChange={(e) => setForm(f => ({ ...f, monte_carlo_return_mean_type: e.target.value }))} className={inputCls}>
+                    <option value="geometric">Compounded return (CAGR)</option>
+                    <option value="arithmetic">Arithmetic annual mean</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Working-Years Volatility %</label>
+                  <input type="number" min={0} max={50} step="0.5" value={form.monte_carlo_accumulation_volatility} onChange={(e) => setForm(f => ({ ...f, monte_carlo_accumulation_volatility: e.target.value }))} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Retirement Volatility %</label>
+                  <input type="number" min={0} max={50} step="0.5" value={form.monte_carlo_retirement_volatility} onChange={(e) => setForm(f => ({ ...f, monte_carlo_retirement_volatility: e.target.value }))} className={inputCls} />
+                </div>
+              </>
+            )}
           </div>
+          {form.monte_carlo_simulation_method === "historical_blocks" && (
+            <p className="text-[10px] text-[var(--text-secondary)] mt-2">
+              Source: NYU Stern/Damodaran annual S&amp;P 500 total returns, 10-year Treasury returns, and inflation, 1928–2025. Returns are recentered to your Expected Annual Return CAGR.
+            </p>
+          )}
 
           {/* Primary Property */}
           <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Primary Property</h4>

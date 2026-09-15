@@ -34,6 +34,8 @@ cash-flow events can make an excluded asset spendable when a planned sale or
 vest actually occurs.
 
 Overrides via fire_config.custom_assumptions["monte_carlo"]:
+  simulation_method ("historical_blocks"), historical_block_years (7),
+  accumulation_stock_weight (0.80), retirement_stock_weight (0.70),
   return_mean_type ("geometric"), accumulation_return_std (0.13),
   retirement_return_std (0.12), inflation_std (0.015), correlation (-0.25).
 Nominal return mean and inflation mean come from the base config
@@ -48,10 +50,12 @@ import random
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import date
+from functools import lru_cache
 
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.data.historical_market_returns import HISTORICAL_MARKET_RETURNS
 from app.engines.fire_projections import (
     _annual_spending_with_mortgage,
     _contribution_policy_active,
@@ -78,6 +82,9 @@ DEFAULT_ACCUMULATION_RETURN_STD = 0.13
 DEFAULT_RETIREMENT_RETURN_STD = 0.12
 DEFAULT_INFLATION_STD = 0.015
 DEFAULT_CORRELATION = -0.25
+DEFAULT_HISTORICAL_BLOCK_YEARS = 7
+DEFAULT_ACCUMULATION_STOCK_WEIGHT = 0.80
+DEFAULT_RETIREMENT_STOCK_WEIGHT = 0.70
 
 
 def _draw_year(
@@ -118,6 +125,70 @@ def _draw_year(
 
     r_real = (1.0 + r_nom) / (1.0 + infl) - 1.0
     return r_real, infl
+
+
+@lru_cache(maxsize=32)
+def _historical_log_centers(stock_weight: float) -> tuple[float, float]:
+    """Geometric centers for a rebalanced stock/bond portfolio and inflation."""
+    weight = max(0.0, min(1.0, stock_weight))
+    portfolio_logs = []
+    inflation_logs = []
+    for _year, stock_return, bond_return, inflation in HISTORICAL_MARKET_RETURNS:
+        portfolio_return = weight * stock_return + (1 - weight) * bond_return
+        portfolio_logs.append(math.log1p(portfolio_return))
+        inflation_logs.append(math.log1p(inflation))
+    return (
+        sum(portfolio_logs) / len(portfolio_logs),
+        sum(inflation_logs) / len(inflation_logs),
+    )
+
+
+def _sample_historical_path(
+    rng: random.Random,
+    years: int,
+    block_years: int = DEFAULT_HISTORICAL_BLOCK_YEARS,
+) -> list[tuple[int, float, float, float]]:
+    """Sample overlapping contiguous historical blocks without year wrapping."""
+    history = HISTORICAL_MARKET_RETURNS
+    block = max(1, min(int(block_years), len(history), max(1, years)))
+    path: list[tuple[int, float, float, float]] = []
+    while len(path) < years:
+        start = rng.randrange(0, len(history) - block + 1)
+        path.extend(history[start:start + block])
+    return path[:years]
+
+
+def _historical_real_return(
+    observation: tuple[int, float, float, float],
+    stock_weight: float,
+    target_nominal_cagr: float,
+    target_inflation: float,
+) -> tuple[float, float]:
+    """Recenter one joint historical observation to configured long-run means.
+
+    Log deviations from the full-history geometric mean are retained, so crash,
+    recovery, bond, and inflation relationships remain exactly historical. The
+    level is shifted so the full-history portfolio CAGR matches the user's
+    expected-return input and inflation matches the configured long-run rate.
+    """
+    _year, stock_return, bond_return, inflation = observation
+    weight = max(0.0, min(1.0, stock_weight))
+    portfolio_return = weight * stock_return + (1 - weight) * bond_return
+    portfolio_center, inflation_center = _historical_log_centers(weight)
+    nominal_log = (
+        math.log1p(target_nominal_cagr)
+        + math.log1p(portfolio_return)
+        - portfolio_center
+    )
+    inflation_log = (
+        math.log1p(target_inflation)
+        + math.log1p(inflation)
+        - inflation_center
+    )
+    nominal_return = math.exp(nominal_log) - 1
+    adjusted_inflation = math.exp(inflation_log) - 1
+    real_return = (1 + nominal_return) / (1 + adjusted_inflation) - 1
+    return real_return, adjusted_inflation
 
 
 @dataclass
@@ -198,6 +269,33 @@ class MonteCarloEngine:
         mc_cfg = (config.custom_assumptions or {}).get("monte_carlo", {})
         mu_nom = config.expected_annual_return / 100
         mu_i = config.expected_inflation_rate / 100
+        configured_method = mc_cfg.get("simulation_method")
+        if configured_method is None:
+            # Test fixtures and older saved profiles used return_std as an
+            # explicit request for the parametric model.
+            configured_method = (
+                "parametric"
+                if "return_std" in mc_cfg or "inflation_std" in mc_cfg
+                else "historical_blocks"
+            )
+        simulation_method = str(configured_method).lower()
+        if simulation_method not in {"historical_blocks", "parametric"}:
+            simulation_method = "historical_blocks"
+        historical_block_years = max(
+            1, int(mc_cfg.get("historical_block_years", DEFAULT_HISTORICAL_BLOCK_YEARS)),
+        )
+        accumulation_stock_weight = max(0.0, min(
+            1.0,
+            float(mc_cfg.get(
+                "accumulation_stock_weight", DEFAULT_ACCUMULATION_STOCK_WEIGHT,
+            )),
+        ))
+        retirement_stock_weight = max(0.0, min(
+            1.0,
+            float(mc_cfg.get(
+                "retirement_stock_weight", DEFAULT_RETIREMENT_STOCK_WEIGHT,
+            )),
+        ))
         mean_type = str(mc_cfg.get("return_mean_type", "geometric")).lower()
         if mean_type not in {"geometric", "arithmetic"}:
             mean_type = "geometric"
@@ -325,6 +423,10 @@ class MonteCarloEngine:
         # Run simulations (all values in real dollars)
         runs: list[SimulationRun] = []
         for _ in range(n_runs):
+            historical_path = (
+                _sample_historical_path(rng, total_years, historical_block_years)
+                if simulation_method == "historical_blocks" else None
+            )
             cash = starting_cash
             taxable = starting_taxable
             deferred = starting_deferred
@@ -357,10 +459,19 @@ class MonteCarloEngine:
 
                 age = start_age + yr
                 is_retired = yr >= years_to_retirement
-                sigma = retirement_sigma if is_retired else accumulation_sigma
-                r_real, _infl = _draw_year(
-                    rng, mu_nom, sigma, mu_i, sigma_i, rho, mean_type,
-                )
+                if historical_path is not None:
+                    stock_weight = (
+                        retirement_stock_weight if is_retired
+                        else accumulation_stock_weight
+                    )
+                    r_real, _infl = _historical_real_return(
+                        historical_path[yr], stock_weight, mu_nom, mu_i,
+                    )
+                else:
+                    sigma = retirement_sigma if is_retired else accumulation_sigma
+                    r_real, _infl = _draw_year(
+                        rng, mu_nom, sigma, mu_i, sigma_i, rho, mean_type,
+                    )
 
                 # Only invested, spendable accounts receive the stochastic
                 # market return. Home equity, 529s, private assets, and other
@@ -577,10 +688,23 @@ class MonteCarloEngine:
             assumptions={
                 "frame": "real (today's dollars); spending/income/SS flat real",
                 "return_model": (
-                    f"lognormal gross growth, {mu_nom:.2%} nominal {mean_type} return; "
-                    f"sigma {accumulation_sigma:.2%} while working and {retirement_sigma:.2%} in retirement"
+                    f"overlapping {historical_block_years}-year blocks from 1928-2025, "
+                    f"{accumulation_stock_weight:.0%} stocks while working / "
+                    f"{retirement_stock_weight:.0%} in retirement, recentered to "
+                    f"{mu_nom:.2%} nominal CAGR"
+                    if simulation_method == "historical_blocks"
+                    else (
+                        f"independent lognormal growth, {mu_nom:.2%} nominal {mean_type} return; "
+                        f"sigma {accumulation_sigma:.2%} while working and "
+                        f"{retirement_sigma:.2%} in retirement"
+                    )
                 ),
-                "inflation_model": f"normal, mean {mu_i:.2%}, sigma {sigma_i:.2%}, corr {rho:+.2f} with returns",
+                "inflation_model": (
+                    f"joint historical blocks recentered to {mu_i:.2%} long-run inflation"
+                    if simulation_method == "historical_blocks"
+                    else f"normal, mean {mu_i:.2%}, sigma {sigma_i:.2%}, corr {rho:+.2f} with returns"
+                ),
+                "simulation_method": simulation_method,
                 "real_return": "(1+r_nom)/(1+inflation) - 1 per year",
                 "success": "cash, taxable, and age-accessible retirement assets fund every modeled year",
                 "early_access": "traditional accounts are age-gated; SEPP is capped; Roth contribution basis and five-year-matured conversions are available before 59.5; the configured HSA reserve is limited to modeled qualified healthcare costs",

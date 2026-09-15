@@ -18,7 +18,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.engines.fire_projections import FireProjectionsEngine, _spending_multiplier
-from app.engines.monte_carlo import MonteCarloEngine, _draw_year
+from app.data.historical_market_returns import HISTORICAL_MARKET_RETURNS
+from app.engines.monte_carlo import (
+    MonteCarloEngine,
+    _draw_year,
+    _historical_real_return,
+    _sample_historical_path,
+)
 from app.engines.net_worth import NetWorthEngine
 from app.engines.tax_engine import AccountsByTaxTreatment, TaxEngine
 
@@ -212,6 +218,32 @@ class TestDeterminism:
 
 
 class TestDrawModel:
+    def test_historical_blocks_preserve_contiguous_joint_years(self):
+        path = _sample_historical_path(random.Random(4), years=21, block_years=7)
+        assert len(path) == 21
+        historical_rows = set(HISTORICAL_MARKET_RETURNS)
+        assert all(observation in historical_rows for observation in path)
+        for start in range(0, len(path), 7):
+            years = [observation[0] for observation in path[start:start + 7]]
+            assert years == list(range(years[0], years[0] + len(years)))
+
+    def test_historical_recenter_matches_configured_geometric_means(self):
+        nominal_logs = []
+        inflation_logs = []
+        for observation in HISTORICAL_MARKET_RETURNS:
+            real_return, inflation = _historical_real_return(
+                observation, 0.80, 0.07, 0.03,
+            )
+            nominal_return = (1 + real_return) * (1 + inflation) - 1
+            nominal_logs.append(math.log1p(nominal_return))
+            inflation_logs.append(math.log1p(inflation))
+        assert sum(nominal_logs) / len(nominal_logs) == pytest.approx(
+            math.log1p(0.07), abs=1e-10,
+        )
+        assert sum(inflation_logs) / len(inflation_logs) == pytest.approx(
+            math.log1p(0.03), abs=1e-10,
+        )
+
     def test_correlation_near_target(self):
         """Recover the standard-normal drivers from 10K draws; their Pearson
         correlation must sit near rho = −0.25."""
