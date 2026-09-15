@@ -90,6 +90,9 @@ export default function FireConfigPage() {
     roth_conversion_ladder_enabled: false,
     roth_conversion_wait_years: "5",
     roth_conversion_annual_amount: "",
+    monte_carlo_return_mean_type: "geometric",
+    monte_carlo_accumulation_volatility: "13",
+    monte_carlo_retirement_volatility: "12",
   });
 
   const [incomeForm, setIncomeForm] = useState({
@@ -117,6 +120,7 @@ export default function FireConfigPage() {
       const proj = ca?.projection as Record<string, unknown> | undefined;
       const savings = ca?.retirement_contributions as Record<string, unknown> | undefined;
       const rothLadder = ca?.roth_conversion_ladder as Record<string, unknown> | undefined;
+      const monteCarlo = ca?.monte_carlo as Record<string, unknown> | undefined;
       setForm({
         date_of_birth: config.date_of_birth || "",
         target_retirement_age: config.target_retirement_age?.toString() || "",
@@ -182,6 +186,13 @@ export default function FireConfigPage() {
         roth_conversion_ladder_enabled: (rothLadder?.enabled as boolean) || false,
         roth_conversion_wait_years: (rothLadder?.wait_years as number)?.toString() || "5",
         roth_conversion_annual_amount: (rothLadder?.annual_conversion as number)?.toString() || "",
+        monte_carlo_return_mean_type: (monteCarlo?.return_mean_type as string) || "geometric",
+        monte_carlo_accumulation_volatility: monteCarlo?.accumulation_return_std != null
+          ? ((monteCarlo.accumulation_return_std as number) * 100).toString()
+          : "13",
+        monte_carlo_retirement_volatility: monteCarlo?.retirement_return_std != null
+          ? ((monteCarlo.retirement_return_std as number) * 100).toString()
+          : "12",
       });
       setLastConfigVersion(version);
     }
@@ -294,6 +305,14 @@ export default function FireConfigPage() {
         enabled: form.roth_conversion_ladder_enabled,
         wait_years: Math.max(1, parseInt(form.roth_conversion_wait_years) || 5),
         annual_conversion: pf(form.roth_conversion_annual_amount, 0),
+      },
+      monte_carlo: {
+        // Remove the legacy one-volatility override when the phase-specific
+        // settings are saved.
+        return_std: null,
+        return_mean_type: form.monte_carlo_return_mean_type,
+        accumulation_return_std: pf(form.monte_carlo_accumulation_volatility, 13) / 100,
+        retirement_return_std: pf(form.monte_carlo_retirement_volatility, 12) / 100,
       },
     };
 
@@ -781,6 +800,28 @@ export default function FireConfigPage() {
               <label className={labelCls}>Rental Occupancy %</label>
               <input type="number" step="5" value={form.rental_occupancy_rate} onChange={(e) => setForm(f => ({ ...f, rental_occupancy_rate: e.target.value }))} className={inputCls} />
               <p className="text-[10px] text-[var(--text-secondary)] mt-1">Rental income multiplier (70% = 30% vacancy)</p>
+            </div>
+          </div>
+
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Monte Carlo Return Model</h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <label className={labelCls}>Expected Return Means</label>
+              <select value={form.monte_carlo_return_mean_type} onChange={(e) => setForm(f => ({ ...f, monte_carlo_return_mean_type: e.target.value }))} className={inputCls}>
+                <option value="geometric">Compounded return (CAGR)</option>
+                <option value="arithmetic">Arithmetic annual mean</option>
+              </select>
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">CAGR matches how long-run return assumptions are normally quoted.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Working-Years Volatility %</label>
+              <input type="number" min={0} max={50} step="0.5" value={form.monte_carlo_accumulation_volatility} onChange={(e) => setForm(f => ({ ...f, monte_carlo_accumulation_volatility: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">13% represents a diversified, equity-heavy portfolio rather than 100% stocks.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Retirement Volatility %</label>
+              <input type="number" min={0} max={50} step="0.5" value={form.monte_carlo_retirement_volatility} onChange={(e) => setForm(f => ({ ...f, monte_carlo_retirement_volatility: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">12% assumes some risk reduction and rebalancing after retirement.</p>
             </div>
           </div>
 

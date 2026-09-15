@@ -239,6 +239,20 @@ class TestDrawModel:
             nominal_draws.append((1 + real_return) * (1 + inflation) - 1)
         assert sum(nominal_draws) / len(nominal_draws) == pytest.approx(0.07, abs=0.002)
 
+    def test_geometric_mode_calibrates_compounded_return(self):
+        rng = random.Random(19)
+        log_growth = []
+        for _ in range(100_000):
+            real_return, inflation = _draw_year(
+                rng, 0.07, 0.13, 0.03, 0.0, 0.0,
+                mean_type="geometric",
+            )
+            nominal_return = (1 + real_return) * (1 + inflation) - 1
+            log_growth.append(math.log1p(nominal_return))
+        assert sum(log_growth) / len(log_growth) == pytest.approx(
+            math.log1p(0.07), abs=0.001,
+        )
+
 
 class TestDepletion:
     async def test_depletion_pads_and_fails(self, base_fire_config, frozen_today_mc):

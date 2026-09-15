@@ -6,8 +6,9 @@ today's dollars (constant purchasing power; COLA offsets inflation).
 
 Per-year market draw:
   z_r, z_o ~ N(0,1) independent;  z_i = rho*z_r + sqrt(1-rho^2)*z_o
-  r_nom = exp(ln(1+mu_nom) - sigma^2/2 + sigma*z_r) - 1
-          (lognormal gross growth calibrated so its arithmetic mean is mu_nom)
+  r_nom = exp(log_center + sigma*z_r) - 1
+          where log_center is ln(1+mu_nom) for CAGR mode, or subtracts
+          sigma^2/2 when the configured return is an arithmetic mean
   infl  = max(-0.99, mu_i + sigma_i*z_i)         (normal, floored)
   r_real = (1+r_nom)/(1+infl) - 1
 
@@ -33,7 +34,8 @@ cash-flow events can make an excluded asset spendable when a planned sale or
 vest actually occurs.
 
 Overrides via fire_config.custom_assumptions["monte_carlo"]:
-  return_std (0.16), inflation_std (0.015), correlation (-0.25).
+  return_mean_type ("geometric"), accumulation_return_std (0.13),
+  retirement_return_std (0.12), inflation_std (0.015), correlation (-0.25).
 Nominal return mean and inflation mean come from the base config
 (expected_annual_return / expected_inflation_rate).
 """
@@ -68,9 +70,12 @@ from app.schemas.tax import (
 
 logger = logging.getLogger(__name__)
 
-# Historical S&P 500 annual volatility (~16%, 1928-2024). Return MEAN comes
-# from config (expected_annual_return, nominal).
+# Legacy all-stock volatility remains exported for the deterministic FIRE
+# safety-margin calculation. Monte Carlo itself defaults to a diversified
+# 13% working / 12% retirement allocation.
 DEFAULT_RETURN_STD = 0.16
+DEFAULT_ACCUMULATION_RETURN_STD = 0.13
+DEFAULT_RETIREMENT_RETURN_STD = 0.12
 DEFAULT_INFLATION_STD = 0.015
 DEFAULT_CORRELATION = -0.25
 
@@ -82,6 +87,7 @@ def _draw_year(
     mu_i: float,
     sigma_i: float,
     rho: float,
+    mean_type: str = "arithmetic",
 ) -> tuple[float, float]:
     """One year's correlated (real_return, inflation) draw.
 
@@ -94,10 +100,14 @@ def _draw_year(
     z_i = rho * z_r + math.sqrt(1.0 - rho * rho) * z_o
 
     if sigma > 0:
-        # Calibrate the lognormal so E[r_nom] == mu_nom. Centering log returns
-        # directly on log(1+mu_nom) makes the arithmetic mean too high by the
-        # volatility drag term and materially overstates long horizons.
-        log_mean = math.log(1.0 + mu_nom) - (sigma ** 2) / 2
+        if mean_type == "geometric":
+            # Household planning inputs are normally understood as long-run
+            # compounded returns (CAGR). Keep the median log-growth path at
+            # that rate; volatility then widens outcomes around it.
+            log_mean = math.log(1.0 + mu_nom)
+        else:
+            # Arithmetic-capital-market mode: E[r_nom] == mu_nom.
+            log_mean = math.log(1.0 + mu_nom) - (sigma ** 2) / 2
         r_nom = math.exp(log_mean + sigma * z_r) - 1.0
     else:
         r_nom = mu_nom
@@ -188,7 +198,22 @@ class MonteCarloEngine:
         mc_cfg = (config.custom_assumptions or {}).get("monte_carlo", {})
         mu_nom = config.expected_annual_return / 100
         mu_i = config.expected_inflation_rate / 100
-        sigma = mc_cfg.get("return_std", DEFAULT_RETURN_STD)
+        mean_type = str(mc_cfg.get("return_mean_type", "geometric")).lower()
+        if mean_type not in {"geometric", "arithmetic"}:
+            mean_type = "geometric"
+        legacy_sigma = mc_cfg.get("return_std")
+        accumulation_sigma = float(
+            mc_cfg.get(
+                "accumulation_return_std",
+                legacy_sigma if legacy_sigma is not None else DEFAULT_ACCUMULATION_RETURN_STD,
+            ),
+        )
+        retirement_sigma = float(
+            mc_cfg.get(
+                "retirement_return_std",
+                legacy_sigma if legacy_sigma is not None else DEFAULT_RETIREMENT_RETURN_STD,
+            ),
+        )
         sigma_i = mc_cfg.get("inflation_std", DEFAULT_INFLATION_STD)
         rho = mc_cfg.get("correlation", DEFAULT_CORRELATION)
         assumptions = config.custom_assumptions or {}
@@ -330,7 +355,12 @@ class MonteCarloEngine:
                     if available_year > yr
                 ]
 
-                r_real, _infl = _draw_year(rng, mu_nom, sigma, mu_i, sigma_i, rho)
+                age = start_age + yr
+                is_retired = yr >= years_to_retirement
+                sigma = retirement_sigma if is_retired else accumulation_sigma
+                r_real, _infl = _draw_year(
+                    rng, mu_nom, sigma, mu_i, sigma_i, rho, mean_type,
+                )
 
                 # Only invested, spendable accounts receive the stochastic
                 # market return. Home equity, 529s, private assets, and other
@@ -340,9 +370,6 @@ class MonteCarloEngine:
                 roth = max(0.0, roth * (1 + r_real))
                 roth_accessible_basis = min(roth, roth_accessible_basis)
                 cash = max(0.0, cash * (1 + cash_real_yield))
-
-                age = start_age + yr
-                is_retired = yr >= years_to_retirement
 
                 # RMDs are a transfer from deferred to already-taxed assets,
                 # not spending. The expected-path tax schedule includes the
@@ -549,7 +576,10 @@ class MonteCarloEngine:
             excluded_non_spendable_assets=round(excluded_non_spendable, 2),
             assumptions={
                 "frame": "real (today's dollars); spending/income/SS flat real",
-                "return_model": f"lognormal gross growth, mean {mu_nom:.2%} nominal, sigma {sigma:.2%}",
+                "return_model": (
+                    f"lognormal gross growth, {mu_nom:.2%} nominal {mean_type} return; "
+                    f"sigma {accumulation_sigma:.2%} while working and {retirement_sigma:.2%} in retirement"
+                ),
                 "inflation_model": f"normal, mean {mu_i:.2%}, sigma {sigma_i:.2%}, corr {rho:+.2f} with returns",
                 "real_return": "(1+r_nom)/(1+inflation) - 1 per year",
                 "success": "cash, taxable, and age-accessible retirement assets fund every modeled year",
