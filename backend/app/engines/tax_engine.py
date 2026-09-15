@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.account import Account
 from app.models.enums import AccountType
 from app.models.fire_config import FireConfig
-from app.models.income_source import IncomeSource
+from app.models.income_source import IncomeSource, projection_annual_amount_cents
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,49 @@ DEFAULT_STANDARD_DEDUCTION = {
     "single": 15_700,
     "married_filing_jointly": 31_400,
 }
+
+# California Franchise Tax Board 2025 published schedules. The projection is
+# expressed in today's dollars, so these thresholds stay fixed just like the
+# federal brackets above. California taxes capital gains as ordinary income.
+CA_BRACKETS_2025: dict[str, list[dict]] = {
+    "single": [
+        {"rate": 0.01, "up_to": 11_079},
+        {"rate": 0.02, "up_to": 26_264},
+        {"rate": 0.04, "up_to": 41_452},
+        {"rate": 0.06, "up_to": 57_542},
+        {"rate": 0.08, "up_to": 72_724},
+        {"rate": 0.093, "up_to": 371_479},
+        {"rate": 0.103, "up_to": 445_771},
+        {"rate": 0.113, "up_to": 742_953},
+        {"rate": 0.123, "up_to": float("inf")},
+    ],
+    "married_filing_jointly": [
+        {"rate": 0.01, "up_to": 22_158},
+        {"rate": 0.02, "up_to": 52_528},
+        {"rate": 0.04, "up_to": 82_904},
+        {"rate": 0.06, "up_to": 115_084},
+        {"rate": 0.08, "up_to": 145_448},
+        {"rate": 0.093, "up_to": 742_958},
+        {"rate": 0.103, "up_to": 891_542},
+        {"rate": 0.113, "up_to": 1_485_906},
+        {"rate": 0.123, "up_to": float("inf")},
+    ],
+}
+
+CA_STANDARD_DEDUCTION_2025 = {
+    "single": 5_706,
+    "married_filing_jointly": 11_412,
+}
+CA_BEHAVIORAL_HEALTH_SURTAX_THRESHOLD = 1_000_000
+CA_BEHAVIORAL_HEALTH_SURTAX_RATE = 0.01
+CA_SDI_RATE_2026 = 0.013
+CA_ITEMIZED_LIMIT_THRESHOLDS_2025 = {
+    "single": 252_203,
+    "married_filing_jointly": 504_411,
+}
+FEDERAL_SALT_BASE_CAP_2025 = 40_000
+FEDERAL_SALT_PHASEOUT_AGI_2025 = 500_000
+FEDERAL_SALT_FLOOR = 10_000
 
 # Long-term capital gains brackets (2026 estimates)
 LTCG_BRACKETS: dict[str, list[dict]] = {
@@ -141,6 +184,17 @@ def _prorated_annual_for_year(source, year: int, end_override: date | None = Non
     return (source.annual_amount / 100) * _year_fraction(year, source.start_date, end)
 
 
+def _prorated_projection_for_year(source, year: int, end_override: date | None = None) -> float:
+    """Spendable cash contribution for a source, respecting its date window."""
+    end = source.end_date
+    if end_override is not None and (end is None or end_override < end):
+        end = end_override
+    return (
+        projection_annual_amount_cents(source) / 100
+        * _year_fraction(year, source.start_date, end)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Data classes for results
 # ---------------------------------------------------------------------------
@@ -153,6 +207,20 @@ class TaxBreakdown:
     total_federal_tax: float
     effective_rate: float
     marginal_rate: float
+
+
+@dataclass
+class StateTaxBreakdown:
+    """State income/payroll tax details for the configured residence."""
+    taxable_income: float
+    income_tax: float
+    payroll_tax: float
+    total_tax: float
+    effective_rate: float
+    marginal_rate: float
+    standard_deduction: float
+    deduction_method: str
+    method: str
 
 
 @dataclass
@@ -195,6 +263,9 @@ class WithdrawalYearPlan:
     """One year of the withdrawal sequence."""
     year: int
     age: float
+    spending_need: float
+    taxes_funded: float
+    net_spendable: float
     from_taxable: float
     from_deferred: float
     from_roth: float
@@ -284,8 +355,19 @@ class TaxEngine:
             "filing_status": "single",
             "state": "UT",
             "state_tax_rate": config.state_tax_rate or 4.65,
+            # Optional state-specific overrides. California automatically uses
+            # the published progressive schedule when state is CA.
+            "state_brackets": None,
+            "state_standard_deduction": None,
+            "state_deduction_method": "standard",
+            "state_itemized_deduction": None,
+            "state_surtax_threshold": None,
+            "state_surtax_rate": None,
+            "state_payroll_tax_rate": None,
             "brackets": None,  # will use DEFAULT_BRACKETS
             "standard_deduction": None,  # will use DEFAULT_STANDARD_DEDUCTION
+            "federal_deduction_method": "standard",
+            "federal_itemized_deduction": None,
             "household_size": 1,
             "cost_basis_pct": 0.60,  # estimated % of taxable balance that is cost basis (not taxed)
             # Assumed marginal rate on future RMDs, used to estimate Roth
@@ -295,6 +377,9 @@ class TaxEngine:
             # cash holds purchasing power (HYSA ≈ inflation). Positive only if
             # cash is parked meaningfully above inflation.
             "cash_yield_rate": 0.0,
+            # When enabled, iteratively gross up withdrawals until spending
+            # plus the resulting tax bill is fully funded.
+            "fund_taxes_from_withdrawals": False,
         }
         if config.custom_assumptions and "tax" in config.custom_assumptions:
             defaults.update(config.custom_assumptions["tax"])
@@ -307,12 +392,238 @@ class TaxEngine:
         status = tax_config.get("filing_status", "single")
         return DEFAULT_BRACKETS.get(status, DEFAULT_BRACKETS["single"])
 
-    def _get_standard_deduction(self, tax_config: dict) -> float:
-        """Get standard deduction for filing status."""
-        if tax_config.get("standard_deduction"):
-            return tax_config["standard_deduction"]
+    def _get_federal_standard_deduction(self, tax_config: dict) -> float:
+        """Get the federal standard deduction before itemization."""
         status = tax_config.get("filing_status", "single")
-        return DEFAULT_STANDARD_DEDUCTION.get(status, DEFAULT_STANDARD_DEDUCTION["single"])
+        configured_standard = tax_config.get("standard_deduction")
+        return (
+            float(configured_standard)
+            if configured_standard is not None
+            else DEFAULT_STANDARD_DEDUCTION.get(
+                status, DEFAULT_STANDARD_DEDUCTION["single"],
+            )
+        )
+
+    def _get_standard_deduction(self, tax_config: dict) -> float:
+        """Get the configured federal deduction (legacy name retained)."""
+        standard = self._get_federal_standard_deduction(tax_config)
+        itemized = tax_config.get("federal_itemized_deduction")
+        method = tax_config.get("federal_deduction_method", "standard")
+        return self._select_deduction(
+            method,
+            standard,
+            float(itemized) if itemized is not None else None,
+        )[0]
+
+    def _get_federal_deduction_method(self, tax_config: dict) -> str:
+        """Describe which configured federal deduction is actually in use."""
+        method = tax_config.get("federal_deduction_method", "standard")
+        itemized = tax_config.get("federal_itemized_deduction")
+        if itemized is not None and method == "greater_of":
+            standard = self._get_federal_standard_deduction(tax_config)
+            return "itemized" if float(itemized) > standard else "standard"
+        if itemized is not None and method == "itemized":
+            return "itemized"
+        return "standard"
+
+    @staticmethod
+    def _is_california(tax_config: dict) -> bool:
+        state = str(tax_config.get("state") or "").strip().upper()
+        return state in {"CA", "CALIFORNIA"}
+
+    @staticmethod
+    def _itemized_config(tax_config: dict) -> dict:
+        value = tax_config.get("itemized_deductions") or {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _select_deduction(
+        method: str,
+        standard_deduction: float,
+        itemized_deduction: float | None,
+    ) -> tuple[float, str]:
+        if itemized_deduction is None:
+            return standard_deduction, "standard"
+        if method == "itemized":
+            return max(0.0, itemized_deduction), "itemized"
+        if method == "greater_of":
+            if itemized_deduction > standard_deduction:
+                return itemized_deduction, "itemized"
+            return standard_deduction, "standard"
+        return standard_deduction, "standard"
+
+    @staticmethod
+    def _federal_salt_cap(year: int, magi: float, filing_status: str) -> float:
+        """Current-law SALT cap, including the temporary 2025-2029 expansion."""
+        if not 2025 <= year <= 2029:
+            return FEDERAL_SALT_FLOOR / (2 if filing_status == "married_filing_separately" else 1)
+
+        growth = 1.01 ** (year - 2025)
+        base_cap = FEDERAL_SALT_BASE_CAP_2025 * growth
+        phaseout_start = FEDERAL_SALT_PHASEOUT_AGI_2025 * growth
+        floor = FEDERAL_SALT_FLOOR
+        if filing_status == "married_filing_separately":
+            base_cap /= 2
+            phaseout_start /= 2
+            floor /= 2
+        return max(floor, base_cap - 0.30 * max(0.0, magi - phaseout_start))
+
+    def _state_itemized_deduction(
+        self,
+        state_agi: float,
+        tax_config: dict,
+        mortgage_interest: float,
+        *,
+        year: int | None = None,
+        inflation_rate: float = 0.0,
+    ) -> tuple[float | None, float, float]:
+        """Return usable CA itemized deduction, pre-limit total, and limitation."""
+        itemized = self._itemized_config(tax_config)
+        if not itemized.get("enabled", False) or not self._is_california(tax_config):
+            return None, 0.0, 0.0
+
+        property_tax = self._projected_property_tax(
+            itemized, year=year, inflation_rate=inflation_rate,
+        )
+        charitable = float(itemized.get("annual_charitable_gifts") or 0.0)
+        other_limited = float(itemized.get("annual_other_california") or 0.0)
+        unlimited = float(itemized.get("annual_california_unlimited") or 0.0)
+        limited = mortgage_interest + property_tax + charitable + other_limited
+        before_limit = limited + unlimited
+
+        status = tax_config.get("filing_status", "single")
+        threshold = float(
+            itemized.get("california_limitation_threshold")
+            or CA_ITEMIZED_LIMIT_THRESHOLDS_2025.get(
+                status, CA_ITEMIZED_LIMIT_THRESHOLDS_2025["single"],
+            )
+        )
+        limitation = min(
+            limited * 0.80,
+            max(0.0, state_agi - threshold) * 0.06,
+        )
+        return max(0.0, before_limit - limitation), before_limit, limitation
+
+    def _federal_itemized_deduction(
+        self,
+        year: int,
+        federal_agi: float,
+        state_tax_paid: float,
+        tax_config: dict,
+        mortgage_interest: float,
+        *,
+        inflation_rate: float = 0.0,
+    ) -> tuple[float | None, float]:
+        """Return federal itemized deductions and the allowed SALT component."""
+        itemized = self._itemized_config(tax_config)
+        if not itemized.get("enabled", False):
+            return None, 0.0
+
+        property_tax = self._projected_property_tax(
+            itemized, year=year, inflation_rate=inflation_rate,
+        )
+        charitable = float(itemized.get("annual_charitable_gifts") or 0.0)
+        other = float(itemized.get("annual_other_federal") or 0.0)
+        salt_paid = property_tax + max(0.0, state_tax_paid)
+        salt_allowed = min(
+            salt_paid,
+            self._federal_salt_cap(
+                year, federal_agi, tax_config.get("filing_status", "single"),
+            ),
+        )
+        return mortgage_interest + salt_allowed + charitable + other, salt_allowed
+
+    @staticmethod
+    def _projected_property_tax(
+        itemized_config: dict,
+        *,
+        year: int | None,
+        inflation_rate: float,
+    ) -> float:
+        """Project a nominal property-tax increase in the model's real dollars."""
+        base_amount = float(itemized_config.get("annual_property_tax") or 0.0)
+        if year is None:
+            return base_amount
+        base_year = int(itemized_config.get("property_tax_base_year") or date.today().year)
+        years_elapsed = max(0, year - base_year)
+        nominal_growth = float(itemized_config.get("property_tax_growth_rate") or 0.0)
+        real_growth = (1 + nominal_growth) / (1 + inflation_rate) - 1
+        return base_amount * ((1 + real_growth) ** years_elapsed)
+
+    async def _primary_mortgage_balance(self) -> float:
+        if self.db is None:
+            return 0.0
+        result = await self.db.execute(
+            select(Account).where(Account.fire_role == "primary_mortgage")
+        )
+        return sum(
+            abs(account.current_balance) for account in result.scalars().all()
+            if not account.is_asset
+        ) / 100
+
+    @staticmethod
+    def _mortgage_interest_schedule(
+        config: FireConfig,
+        current_balance: float,
+        start_year: int,
+        years: int,
+    ) -> dict[int, tuple[float, float]]:
+        """Annual deductible federal/CA interest from the live amortizing loan."""
+        itemized = ((config.custom_assumptions or {}).get("tax", {}) or {}).get(
+            "itemized_deductions", {},
+        ) or {}
+        projection = (config.custom_assumptions or {}).get("projection", {}) or {}
+        payment = float(projection.get("primary_property_mortgage_pi") or 0.0)
+        rate = float(projection.get("primary_property_mortgage_rate") or 0.0)
+        payoff_raw = projection.get("primary_property_mortgage_payoff_date")
+        try:
+            payoff = date.fromisoformat(payoff_raw) if isinstance(payoff_raw, str) else payoff_raw
+        except ValueError:
+            payoff = None
+        if current_balance <= 0 or payment <= 0 or rate <= 0:
+            return {}
+
+        monthly_rate = rate / 12
+        balance = current_balance
+        # Reconstruct an approximate January balance from the latest synced
+        # balance so the current calendar year's interest is not understated.
+        today = date.today()
+        for _ in range(max(0, today.month - 1)):
+            balance = (balance + payment) / (1 + monthly_rate)
+
+        federal_limit = float(itemized.get("federal_mortgage_debt_limit") or 750_000)
+        california_limit = float(itemized.get("california_mortgage_debt_limit") or 1_000_000)
+        schedule: dict[int, tuple[float, float]] = {}
+        for year in range(start_year, start_year + years):
+            federal_interest = 0.0
+            california_interest = 0.0
+            for month in range(1, 13):
+                month_date = date(year, month, 1)
+                if payoff and month_date >= payoff:
+                    balance = 0.0
+                    continue
+                if balance <= 0:
+                    continue
+                interest = balance * monthly_rate
+                federal_interest += interest * min(1.0, federal_limit / balance)
+                california_interest += interest * min(1.0, california_limit / balance)
+                principal = min(balance, max(0.0, payment - interest))
+                balance -= principal
+            schedule[year] = (federal_interest, california_interest)
+        return schedule
+
+    async def _mortgage_interest_by_year(
+        self,
+        config: FireConfig,
+        tax_config: dict,
+        start_year: int,
+        years: int,
+    ) -> dict[int, tuple[float, float]]:
+        itemized = self._itemized_config(tax_config)
+        if not itemized.get("enabled", False):
+            return {}
+        balance = await self._primary_mortgage_balance()
+        return self._mortgage_interest_schedule(config, balance, start_year, years)
 
     # -----------------------------------------------------------------------
     # Core tax computations (pure functions, no DB)
@@ -364,8 +675,132 @@ class TaxEngine:
         )
 
     def compute_state_tax(self, taxable_income: float, state_rate: float) -> float:
-        """Compute state income tax (flat rate, e.g., Utah 4.65%)."""
+        """Compute a flat state tax for states without a modeled schedule."""
         return round(max(0, taxable_income) * state_rate / 100, 2)
+
+    def compute_configured_state_tax(
+        self,
+        state_agi: float,
+        tax_config: dict,
+        *,
+        earned_income: float = 0.0,
+        extra_deduction: float = 0.0,
+        deduction_override: float | None = None,
+        deduction_method_override: str | None = None,
+    ) -> StateTaxBreakdown:
+        """Compute state tax using a progressive CA model or flat fallback.
+
+        California uses its own standard deduction, taxes capital gains as
+        ordinary income, excludes Social Security before this method is called,
+        and adds the 1% Behavioral Health Services Tax above $1 million of
+        California taxable income. Employee SDI is included for earned income.
+        """
+        filing_status = tax_config.get("filing_status", "single")
+
+        if self._is_california(tax_config):
+            brackets = tax_config.get("state_brackets") or CA_BRACKETS_2025.get(
+                filing_status, CA_BRACKETS_2025["single"],
+            )
+            configured_standard = tax_config.get("state_standard_deduction")
+            standard_deduction = (
+                float(configured_standard)
+                if configured_standard is not None
+                else CA_STANDARD_DEDUCTION_2025.get(
+                    filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                )
+            )
+            if deduction_override is not None:
+                deduction = max(0.0, deduction_override)
+                deduction_method = deduction_method_override or "itemized"
+            else:
+                itemized = tax_config.get("state_itemized_deduction")
+                deduction, deduction_method = self._select_deduction(
+                    tax_config.get("state_deduction_method", "standard"),
+                    standard_deduction,
+                    float(itemized) if itemized is not None else None,
+                )
+            taxable_income = max(
+                0.0, state_agi - deduction - extra_deduction,
+            )
+
+            income_tax = 0.0
+            marginal_rate = brackets[0]["rate"] if brackets else 0.0
+            previous_ceiling = 0.0
+            remaining = taxable_income
+            for bracket in brackets:
+                bracket_width = bracket["up_to"] - previous_ceiling
+                income_in_bracket = min(remaining, bracket_width)
+                if income_in_bracket > 0:
+                    income_tax += income_in_bracket * bracket["rate"]
+                    marginal_rate = bracket["rate"]
+                remaining -= income_in_bracket
+                previous_ceiling = bracket["up_to"]
+                if remaining <= 0:
+                    break
+
+            configured_threshold = tax_config.get("state_surtax_threshold")
+            surtax_threshold = (
+                float(configured_threshold)
+                if configured_threshold is not None
+                else CA_BEHAVIORAL_HEALTH_SURTAX_THRESHOLD
+            )
+            configured_surtax_rate = tax_config.get("state_surtax_rate")
+            surtax_rate = (
+                float(configured_surtax_rate)
+                if configured_surtax_rate is not None
+                else CA_BEHAVIORAL_HEALTH_SURTAX_RATE
+            )
+            surtax = max(0.0, taxable_income - surtax_threshold) * surtax_rate
+            if taxable_income > surtax_threshold:
+                marginal_rate += surtax_rate
+
+            configured_payroll_rate = tax_config.get("state_payroll_tax_rate")
+            payroll_rate = (
+                float(configured_payroll_rate)
+                if configured_payroll_rate is not None
+                else CA_SDI_RATE_2026
+            )
+            payroll_tax = max(0.0, earned_income) * payroll_rate
+            income_tax = round(income_tax + surtax, 2)
+            payroll_tax = round(payroll_tax, 2)
+            total_tax = round(income_tax + payroll_tax, 2)
+            return StateTaxBreakdown(
+                taxable_income=round(taxable_income, 2),
+                income_tax=income_tax,
+                payroll_tax=payroll_tax,
+                total_tax=total_tax,
+                effective_rate=round(total_tax / state_agi, 4) if state_agi > 0 else 0.0,
+                marginal_rate=round(marginal_rate, 4),
+                standard_deduction=deduction,
+                deduction_method=deduction_method,
+                method="california_progressive_2025",
+            )
+
+        standard_deduction = self._get_standard_deduction(tax_config)
+        if deduction_override is not None:
+            deduction = max(0.0, deduction_override)
+            deduction_method = deduction_method_override or "itemized"
+        else:
+            itemized = tax_config.get("state_itemized_deduction")
+            deduction, deduction_method = self._select_deduction(
+                tax_config.get("state_deduction_method", "standard"),
+                standard_deduction,
+                float(itemized) if itemized is not None else None,
+            )
+        taxable_income = max(0.0, state_agi - deduction - extra_deduction)
+        state_rate = float(tax_config.get("state_tax_rate") or 0.0)
+        total_tax = self.compute_state_tax(taxable_income, state_rate)
+        return StateTaxBreakdown(
+            taxable_income=round(taxable_income, 2),
+            income_tax=total_tax,
+            payroll_tax=0.0,
+            total_tax=total_tax,
+            effective_rate=round(total_tax / state_agi, 4) if state_agi > 0 else 0.0,
+            marginal_rate=round(state_rate / 100, 4) if taxable_income > 0 else 0.0,
+            standard_deduction=deduction,
+            deduction_method=deduction_method,
+            method="flat_rate",
+        )
 
     def compute_effective_rate(
         self, gross_income: float, federal_tax: float, state_tax: float,
@@ -607,6 +1042,90 @@ class TaxEngine:
 
         return grouped
 
+    @staticmethod
+    def estimate_taxable_cost_basis(
+        accounts: list[Account], fallback_pct: float,
+    ) -> dict:
+        """Estimate taxable basis from per-account synced data.
+
+        Monarch-reported basis is used for covered holdings, uninvested cash is
+        basis dollar-for-dollar, and the configured percentage applies only to
+        holdings whose basis is unavailable. A manual account-level basis in
+        ``custom_data.taxable_cost_basis_cents`` takes precedence.
+        """
+        fallback_pct = max(0.0, min(1.0, float(fallback_pct)))
+        total_balance = 0.0
+        total_basis = 0.0
+        covered_value = 0.0
+        details: list[dict] = []
+
+        for account in accounts:
+            balance = max(0.0, account.current_balance / 100)
+            total_balance += balance
+            custom = account.custom_data or {}
+            manual_cents = custom.get("taxable_cost_basis_cents")
+            source = "fallback"
+
+            if manual_cents is not None:
+                try:
+                    basis = max(0.0, float(manual_cents) / 100)
+                    exact_value = balance
+                    source = "manual"
+                except (TypeError, ValueError):
+                    basis = balance * fallback_pct
+                    exact_value = 0.0
+            else:
+                synced = (account.extra_data or {}).get("taxable_basis") or {}
+                try:
+                    holdings_value = max(
+                        0.0, float(synced.get("holdings_value_cents") or 0) / 100,
+                    )
+                    known_value = max(
+                        0.0, float(synced.get("basis_covered_value_cents") or 0) / 100,
+                    )
+                    known_basis = max(
+                        0.0, float(synced.get("cost_basis_cents") or 0) / 100,
+                    )
+                except (TypeError, ValueError):
+                    holdings_value = known_value = known_basis = 0.0
+
+                if holdings_value > 0:
+                    # Reconcile small timing differences between the holdings
+                    # total and the account's newer headline balance.
+                    scale = min(1.0, balance / holdings_value)
+                    holdings_value *= scale
+                    known_value = min(holdings_value, known_value * scale)
+                    known_basis *= scale
+                    cash_value = max(0.0, balance - holdings_value)
+                    unknown_value = max(0.0, holdings_value - known_value)
+                    basis = known_basis + cash_value + unknown_value * fallback_pct
+                    exact_value = known_value + cash_value
+                    source = "synced" if unknown_value <= 0.01 else "synced + fallback"
+                else:
+                    basis = balance * fallback_pct
+                    exact_value = 0.0
+
+            # Losses can make actual basis exceed market value. The tax model
+            # conservatively treats the gain portion as zero; it does not book
+            # an assumed capital-loss benefit.
+            taxable_basis = min(balance, basis)
+            total_basis += taxable_basis
+            covered_value += min(balance, exact_value)
+            details.append({
+                "name": account.name,
+                "balance": balance,
+                "cost_basis": round(taxable_basis, 2),
+                "cost_basis_pct": round(taxable_basis / balance, 4) if balance else 0.0,
+                "basis_source": source,
+            })
+
+        return {
+            "cost_basis": round(total_basis, 2),
+            "cost_basis_pct": total_basis / total_balance if total_balance else fallback_pct,
+            "coverage_pct": round(covered_value / total_balance, 4) if total_balance else 0.0,
+            "accounts": details,
+        }
+
     # -----------------------------------------------------------------------
     # Withdrawal sequencing optimizer
     # -----------------------------------------------------------------------
@@ -617,14 +1136,16 @@ class TaxEngine:
         target_bracket_rate: float = 0.22,
         roth_conversions_enabled: bool = True,
         scenario_id: uuid_mod.UUID | None = None,
+        config_override: FireConfig | None = None,
     ) -> WithdrawalPlan:
         """Produce a year-by-year tax-aware withdrawal plan.
 
         Withdrawals follow a fixed order each year:
-        1. Taxable accounts first (only the gains portion taxed, at LTCG rates)
-        2. Tax-deferred next (ordinary income)
-        3. Tax-free (Roth) last (preserve tax-free growth)
-        4. Cash as absolute last resort
+        1. Cash above the configured operating reserve
+        2. Taxable accounts (only the gains portion taxed, at LTCG rates)
+        3. Accessible tax-deferred accounts (ordinary income)
+        4. Tax-free Roth accounts
+        5. The remaining cash reserve as a last resort
 
         On top of the fixed order, two tax-aware adjustments per year:
         - RMDs force a minimum deferred withdrawal at rmd_start_age+; any
@@ -641,8 +1162,10 @@ class TaxEngine:
         annually (a nominal simulation against frozen brackets manufactures
         phantom bracket creep).
 
-        Simplification: taxes are reported but not deducted from balances
-        (the plan shows the tax cost of the sequence, not net-of-tax wealth).
+        When tax.fund_taxes_from_withdrawals is enabled, withdrawals are
+        iteratively grossed up until both the desired spending and the tax bill
+        produced by those withdrawals are funded. Taxes already embedded in a
+        source's explicit net cash-flow amount are not charged twice.
 
         IncomeSource.is_taxable gates the tax computation: a source flagged
         non-taxable (or entered net-of-tax — flag it False) still offsets
@@ -653,28 +1176,51 @@ class TaxEngine:
         Config comes from get_effective_config (active scenario merged, or
         an explicit scenario_id) — same as the projection engines.
         """
-        from app.engines.fire_projections import FireProjectionsEngine
+        from app.engines.fire_projections import (
+            FireProjectionsEngine,
+            _annual_spending_with_mortgage,
+            _contribution_policy_active,
+            _healthcare_monthly_cents_at_date,
+            _household_social_security_monthly_cents,
+            _household_survivor_spending_multiplier,
+            _retirement_savings_settings,
+        )
 
         fire_engine = FireProjectionsEngine(self.db)
-        config = await fire_engine.get_effective_config(scenario_id)
+        config = config_override or await fire_engine.get_effective_config(scenario_id)
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
-        state_rate = tax_config["state_tax_rate"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
-        cost_basis_pct = tax_config.get("cost_basis_pct", 0.60)
+        fallback_cost_basis_pct = tax_config.get("cost_basis_pct", 0.60)
+        fund_taxes = bool(tax_config.get("fund_taxes_from_withdrawals", False))
 
         accounts = await self.get_accounts_by_tax_treatment()
+        basis_estimate = self.estimate_taxable_cost_basis(
+            accounts.taxable, fallback_cost_basis_pct,
+        )
         income_sources = await self._get_active_income_sources()
         retirement_date = self._get_retirement_date(config)
 
         annual_spending_cents = config.target_annual_spending or 12_000_000  # default $120K
         annual_need = annual_spending_cents / 100
+        assumptions = config.custom_assumptions or {}
+        projection_config = assumptions.get("projection", {}) or {}
+        penalty_free_age = float(assumptions.get("penalty_free_age", 59.5))
+        rule_of_55_eligible = bool(assumptions.get("rule_of_55_eligible", False))
+        sepp_monthly = float((assumptions.get("sepp", {}) or {}).get("sepp_monthly", 0) or 0)
+        savings_settings = _retirement_savings_settings(config)
+        cash_reserve_months = max(
+            0.0, float(projection_config.get("cash_reserve_months", 12) or 0),
+        )
         # REAL yield on cash — default 0 (cash holds purchasing power at
         # best; set positive for HYSA-parked cash, negative for checking).
         cash_yield = tax_config.get("cash_yield_rate", 0.0)
 
         today = date.today()
+        mortgage_interest_by_year = await self._mortgage_interest_by_year(
+            config, tax_config, today.year, years,
+        )
         year_plans: list[WithdrawalYearPlan] = []
         total_tax = 0.0
         total_withdrawn = 0.0
@@ -683,7 +1229,16 @@ class TaxEngine:
         # Track account balances across years
         deferred_balance = accounts.tax_deferred_balance
         roth_balance = accounts.tax_free_balance
+        roth_accessible_basis = min(
+            roth_balance, float(savings_settings["starting_roth_basis"]),
+        )
+        hsa_qualified_balance = min(
+            max(0.0, roth_balance - roth_accessible_basis),
+            float(savings_settings["starting_hsa_qualified_balance"]),
+        )
+        roth_conversion_vintages: list[tuple[int, float]] = []
         taxable_balance = accounts.taxable_balance
+        taxable_basis_balance = basis_estimate["cost_basis"]
         cash_balance = accounts.already_taxed_balance
 
         # REAL growth rate for invested balances: (1+nominal)/(1+inflation) − 1
@@ -696,8 +1251,44 @@ class TaxEngine:
             age = self._compute_age(config, current_date)
             is_retired = retirement_date and current_date >= retirement_date
 
+            # Each conversion becomes penalty-free after its own five-tax-year
+            # clock. Contributions were already basis and need no waiting period.
+            matured = sum(
+                amount for available_year, amount in roth_conversion_vintages
+                if available_year <= current_year
+            )
+            roth_accessible_basis = min(
+                max(0.0, roth_balance - hsa_qualified_balance),
+                roth_accessible_basis + matured,
+            )
+            roth_conversion_vintages = [
+                (available_year, amount)
+                for available_year, amount in roth_conversion_vintages
+                if available_year > current_year
+            ]
+
             # Spending: flat in real terms (constant purchasing power)
-            spending_need = annual_need
+            spending_need = _annual_spending_with_mortgage(
+                annual_need,
+                _household_survivor_spending_multiplier(config, current_date),
+                config,
+                current_year,
+            )
+            annual_healthcare = sum(
+                _healthcare_monthly_cents_at_date(
+                    config, date(current_year, month, 1),
+                )
+                for month in range(1, 13)
+            ) / 100
+            if is_retired:
+                spending_need += annual_healthcare
+            qualified_healthcare_spending = (
+                annual_healthcare
+                if is_retired else 0.0
+            )
+            hsa_eligible_remaining = min(
+                hsa_qualified_balance, qualified_healthcare_spending,
+            )
 
             # Income from sources (SS, pension, rental, etc.). Each type
             # bucket tracks ALL income (it offsets spending need either way)
@@ -712,6 +1303,10 @@ class TaxEngine:
             taxable_ss = 0.0
             taxable_pension = 0.0
             taxable_other = 0.0
+            taxable_state_wages = 0.0
+            fica_earned = 0.0
+            gross_non_withdrawal_income = 0.0
+            prepaid_withholding = 0.0
 
             for src in income_sources:
                 # Day-prorated contribution for this calendar year (an ended
@@ -722,33 +1317,59 @@ class TaxEngine:
                 if src.income_type.value in ("salary", "bonus", "side_hustle"):
                     end_override = retirement_date
                 annual = _prorated_annual_for_year(src, current_year, end_override)
+                annual_cash = _prorated_projection_for_year(
+                    src, current_year, end_override,
+                )
                 if annual <= 0:
                     continue
                 if src.growth_rate and yr > 0:
                     # growth_rate is a NOMINAL raise — deflate to real
                     real_growth = (1 + src.growth_rate / 100) / (1 + inflation) - 1
                     annual *= (1 + real_growth) ** yr
+                    annual_cash *= (1 + real_growth) ** yr
+
+                gross_non_withdrawal_income += annual
+                custom_data = getattr(src, "custom_data", None)
+                if (
+                    src.is_taxable
+                    and isinstance(custom_data, dict)
+                    and custom_data.get("net_annual_amount") is not None
+                ):
+                    # The gross-minus-projected-cash difference is the amount
+                    # already withheld from this source. The former boolean
+                    # treatment credited the household with its ENTIRE tax
+                    # bill whenever even one source had a net-cash override,
+                    # including taxes attributable to overlapping gross-only
+                    # sources. That made mixed income phases far too rosy.
+                    prepaid_withholding += max(0.0, annual - annual_cash)
 
                 if src.income_type.value == "social_security":
-                    ss_income += annual
+                    ss_income += annual_cash
                     taxable_ss += annual if src.is_taxable else 0.0
                 elif src.income_type.value == "pension":
-                    pension_income += annual
+                    pension_income += annual_cash
                     taxable_pension += annual if src.is_taxable else 0.0
                 elif src.income_type.value in ("salary", "bonus", "side_hustle"):
-                    earned_income += annual
+                    earned_income += annual_cash
                     taxable_earned += annual if src.is_taxable else 0.0
+                    fica_earned += annual if src.is_taxable else 0.0
+                    if src.income_type.value in ("salary", "bonus") and src.is_taxable:
+                        taxable_state_wages += annual
                 else:
-                    other_income += annual
+                    other_income += annual_cash
                     taxable_other += annual if src.is_taxable else 0.0
 
             # Social Security from config (if not in income sources) —
             # prorated in its first year (a mid-year start is half a year)
             if config.social_security_monthly and config.date_of_birth and ss_income == 0:
-                ss_start = config.date_of_birth + relativedelta(years=config.social_security_start_age)
-                ss_income = (config.social_security_monthly * 12 / 100) * _year_fraction(
-                    current_year, start=ss_start)
+                ss_income = sum(
+                    _household_social_security_monthly_cents(
+                        config, date(current_year, month, 1),
+                    )
+                    for month in range(1, 13)
+                ) / 100
                 taxable_ss = ss_income
+                gross_non_withdrawal_income += ss_income
 
             # Pension from config — same first-year proration
             if config.pension_monthly and config.pension_start_age and config.date_of_birth and pension_income == 0:
@@ -756,8 +1377,34 @@ class TaxEngine:
                 pension_income = (config.pension_monthly * 12 / 100) * _year_fraction(
                     current_year, start=pension_start)
                 taxable_pension = pension_income
+                gross_non_withdrawal_income += pension_income
 
-            total_non_withdrawal_income = earned_income + ss_income + pension_income + other_income
+            # Employee contributions are transfers from wages into modeled
+            # retirement pools, not free extra income. Traditional 401(k)
+            # deferrals reduce federal/CA ordinary income but remain subject to
+            # payroll tax; Roth/backdoor-Roth contributions are after tax.
+            annual_401k_contribution = 0.0
+            annual_roth_contribution = 0.0
+            contribution_phase_active = any(
+                _contribution_policy_active(
+                    savings_settings, date(current_year, month, 1),
+                )
+                for month in range(1, 13)
+            )
+            if earned_income > 0.01 and contribution_phase_active:
+                annual_401k_contribution = min(
+                    float(savings_settings["annual_401k"]), earned_income,
+                )
+                annual_roth_contribution = min(
+                    float(savings_settings["annual_roth"]),
+                    max(0.0, earned_income - annual_401k_contribution),
+                )
+            taxable_earned = max(0.0, taxable_earned - annual_401k_contribution)
+            contribution_outflow = annual_401k_contribution + annual_roth_contribution
+            total_non_withdrawal_income = (
+                earned_income + ss_income + pension_income + other_income
+                - contribution_outflow
+            )
             withdrawal_needed = max(0, spending_need - total_non_withdrawal_income)
 
             # Withdrawal sequencing — runs whenever spending exceeds income,
@@ -769,40 +1416,76 @@ class TaxEngine:
             from_cash = 0.0
             capital_gains = 0.0
             remaining_need = withdrawal_needed
+            traditional_accessible = (
+                age >= penalty_free_age
+                or (rule_of_55_eligible and age >= 55)
+            )
+            sepp_remaining = sepp_monthly * 12 if not traditional_accessible else 0.0
+            cash_reserve = withdrawal_needed / 12 * cash_reserve_months
 
             if remaining_need > 0:
-                # Step 1: Draw from taxable first (preferential capital gains rates)
+                # Spend cash above the configured operating reserve before selling
+                # investments. This also makes accumulated working-year surplus
+                # available to bridge an early retirement.
+                cash_above_reserve = max(0.0, cash_balance - cash_reserve)
+                if cash_above_reserve > 0:
+                    draw = min(remaining_need, cash_above_reserve)
+                    from_cash += draw
+                    cash_balance -= draw
+                    remaining_need -= draw
+
+                # Then use taxable brokerage (preferential capital-gains rates).
                 if taxable_balance > 0 and remaining_need > 0:
+                    basis_ratio = min(1.0, taxable_basis_balance / taxable_balance)
                     draw = min(remaining_need, taxable_balance)
                     from_taxable = draw
-                    # Only the gains portion is taxable
-                    capital_gains = draw * (1 - cost_basis_pct)
+                    basis_used = draw * basis_ratio
+                    capital_gains += draw - basis_used
+                    taxable_basis_balance = max(0.0, taxable_basis_balance - basis_used)
                     taxable_balance -= draw
                     remaining_need -= draw
 
-                # Step 2: Draw from tax-deferred (ordinary income, fill lower brackets)
-                if deferred_balance > 0 and remaining_need > 0:
-                    draw = min(remaining_need, deferred_balance)
+                # Traditional accounts are unavailable before 59½ unless the
+                # household explicitly configured Rule of 55 or a SEPP plan.
+                deferred_limit = deferred_balance if traditional_accessible else sepp_remaining
+                if deferred_limit > 0 and deferred_balance > 0 and remaining_need > 0:
+                    draw = min(remaining_need, deferred_balance, deferred_limit)
                     from_deferred = draw
                     deferred_balance -= draw
                     remaining_need -= draw
+                    if not traditional_accessible:
+                        sepp_remaining -= draw
 
-                # Step 3: Draw from Roth (tax-free, last resort)
-                if roth_balance > 0 and remaining_need > 0:
-                    draw = min(remaining_need, roth_balance)
+                # Before 59½, only contribution basis and conversions whose
+                # five-year clocks have expired are spendable without penalty.
+                roth_limit = (
+                    roth_balance if age >= penalty_free_age
+                    else min(
+                        roth_balance,
+                        roth_accessible_basis + hsa_eligible_remaining,
+                    )
+                )
+                if roth_limit > 0 and remaining_need > 0:
+                    draw = min(remaining_need, roth_limit)
                     from_roth = draw
                     roth_balance -= draw
                     remaining_need -= draw
+                    if age < penalty_free_age:
+                        hsa_draw = min(draw, hsa_eligible_remaining)
+                        hsa_eligible_remaining -= hsa_draw
+                        hsa_qualified_balance -= hsa_draw
+                        roth_accessible_basis -= draw - hsa_draw
 
-                # Step 4: Cash/savings as absolute last resort
+                # Finally permit the operating reserve itself to be depleted.
                 if cash_balance > 0 and remaining_need > 0:
                     draw = min(remaining_need, cash_balance)
-                    from_cash = draw
+                    from_cash += draw
                     cash_balance -= draw
                     remaining_need -= draw
 
             # RMD check (age 73+): force minimum deferred withdrawal
             roth_conversion = 0.0
+            rmd_redeposit = 0.0
             if age >= config.rmd_start_age and deferred_balance > 0:
                 rmd_pct = 1 / _get_rmd_divisor(int(age))
                 rmd_amount = deferred_balance * rmd_pct
@@ -811,8 +1494,35 @@ class TaxEngine:
                     from_deferred += extra_rmd
                     deferred_balance -= extra_rmd
                     # The forced excess isn't spent — it lands in taxable
-                    # (gross redeposit; taxes are reported, not deducted).
+                    # until spending and any tax bill need it.
                     taxable_balance += extra_rmd
+                    taxable_basis_balance += extra_rmd
+                    rmd_redeposit = extra_rmd
+
+            # A configured conversion ladder deliberately converts the future
+            # spending gap during early retirement. The converted principal is
+            # taxed now and becomes accessible only after its five-year clock.
+            if (
+                bool(savings_settings["ladder_enabled"])
+                and is_retired
+                and age + int(savings_settings["ladder_wait_years"]) < penalty_free_age
+                and deferred_balance > 0
+            ):
+                configured_conversion = float(
+                    savings_settings["ladder_annual_conversion"],
+                )
+                automatic_conversion = max(
+                    0.0,
+                    spending_need - (
+                        earned_income + ss_income + pension_income + other_income
+                    ),
+                )
+                roth_conversion = min(
+                    configured_conversion or automatic_conversion,
+                    deferred_balance,
+                )
+                deferred_balance -= roth_conversion
+                roth_balance += roth_conversion
 
             # Golden-window Roth conversion: retired, pre-SS, pre-RMD — fill
             # ordinary income up to the target bracket ceiling. Conversion is
@@ -837,21 +1547,182 @@ class TaxEngine:
                 # bracket ceiling — the conversion also absorbs any unused
                 # standard deduction.
                 room = max(0.0, target_ceiling + std_deduction - ordinary_so_far)
-                roth_conversion = min(room, deferred_balance)
-                deferred_balance -= roth_conversion
-                roth_balance += roth_conversion
+                extra_conversion = min(
+                    max(0.0, room - roth_conversion), deferred_balance,
+                )
+                roth_conversion += extra_conversion
+                deferred_balance -= extra_conversion
+                roth_balance += extra_conversion
 
-            # Compute taxes (Roth conversion counts as ordinary income) —
-            # only the is_taxable portion of each income bucket enters.
-            ordinary_income = taxable_earned + taxable_ss * 0.85 + taxable_pension + from_deferred + roth_conversion + taxable_other
-            taxable_income = max(0, ordinary_income - std_deduction)
+            if roth_conversion > 0 and age < penalty_free_age:
+                roth_conversion_vintages.append((
+                    current_year + int(savings_settings["ladder_wait_years"]),
+                    roth_conversion,
+                ))
 
-            federal_breakdown = self.compute_federal_tax(taxable_income, filing_status, brackets)
-            cg_tax = self.compute_capital_gains_tax(capital_gains, taxable_income, filing_status)
-            federal_tax = federal_breakdown.total_federal_tax + cg_tax
-            state_tax = self.compute_state_tax(ordinary_income + capital_gains - std_deduction, state_rate)
-            fica_tax = self.compute_fica(taxable_earned, filing_status)
-            total_tax_year = federal_tax + state_tax + fica_tax
+            def calculate_year_tax() -> tuple[float, float, float, float, float]:
+                """Return ordinary income and federal/state/FICA/total tax."""
+                ordinary = (
+                    taxable_earned + taxable_ss * 0.85 + taxable_pension
+                    + from_deferred + roth_conversion + taxable_other
+                )
+                state_agi = ordinary + capital_gains
+                if self._is_california(tax_config):
+                    # California excludes Social Security benefits entirely.
+                    state_agi -= taxable_ss * 0.85
+                federal_mortgage_interest, state_mortgage_interest = (
+                    mortgage_interest_by_year.get(current_year, (0.0, 0.0))
+                )
+                state_itemized, _, _ = self._state_itemized_deduction(
+                    state_agi,
+                    tax_config,
+                    state_mortgage_interest,
+                    year=current_year,
+                    inflation_rate=inflation,
+                )
+                state_deduction = None
+                state_deduction_method = None
+                if state_itemized is not None:
+                    state_standard = (
+                        float(tax_config["state_standard_deduction"])
+                        if tax_config.get("state_standard_deduction") is not None
+                        else CA_STANDARD_DEDUCTION_2025.get(
+                            filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                        )
+                    )
+                    state_deduction, state_deduction_method = self._select_deduction(
+                        tax_config.get("state_deduction_method", "greater_of"),
+                        state_standard,
+                        state_itemized,
+                    )
+                state_breakdown = self.compute_configured_state_tax(
+                    state_agi,
+                    tax_config,
+                    earned_income=taxable_state_wages,
+                    deduction_override=state_deduction,
+                    deduction_method_override=state_deduction_method,
+                )
+                state = state_breakdown.total_tax
+
+                federal_itemized, _ = self._federal_itemized_deduction(
+                    current_year,
+                    ordinary + capital_gains,
+                    state,
+                    tax_config,
+                    federal_mortgage_interest,
+                    inflation_rate=inflation,
+                )
+                federal_deduction = std_deduction
+                if federal_itemized is not None:
+                    federal_deduction = self._select_deduction(
+                        tax_config.get("federal_deduction_method", "greater_of"),
+                        self._get_federal_standard_deduction(tax_config),
+                        federal_itemized,
+                    )[0]
+                taxable_total = max(0, ordinary - federal_deduction)
+                unused_deduction = max(0.0, federal_deduction - ordinary)
+                taxable_capital_gains = max(0.0, capital_gains - unused_deduction)
+                federal_breakdown = self.compute_federal_tax(
+                    taxable_total, filing_status, brackets,
+                )
+                gains_tax = self.compute_capital_gains_tax(
+                    taxable_capital_gains, taxable_total, filing_status,
+                )
+                federal = federal_breakdown.total_federal_tax + gains_tax
+                fica = self.compute_fica(fica_earned, filing_status)
+                return ordinary, federal, state, fica, federal + state + fica
+
+            # An explicit projected-cash amount is net of withholding. Credit
+            # only the dollars actually removed from that source, rather than
+            # declaring the household's whole computed liability prepaid.
+            # Any calculated liability above the implied withholding remains
+            # an outflow; excess withholding is conservatively not refunded.
+            prepaid_tax = prepaid_withholding
+
+            # Fixed-point gross-up: taxes on an extra traditional withdrawal
+            # themselves require another (smaller) withdrawal. Iterate until
+            # the remaining after-tax cash gap is immaterial or assets run out.
+            for _ in range(12):
+                (
+                    ordinary_income,
+                    federal_tax,
+                    state_tax,
+                    fica_tax,
+                    total_tax_year,
+                ) = calculate_year_tax()
+                taxes_funded = max(0.0, total_tax_year - prepaid_tax) if fund_taxes else 0.0
+                spendable_cash = (
+                    total_non_withdrawal_income + from_taxable + from_deferred
+                    + from_roth + from_cash - rmd_redeposit
+                )
+                extra_needed = max(0.0, spending_need + taxes_funded - spendable_cash)
+                if extra_needed <= 0.01 or not fund_taxes:
+                    break
+
+                drawn = 0.0
+                cash_above_reserve = max(0.0, cash_balance - cash_reserve)
+                if cash_above_reserve > 0 and extra_needed > 0:
+                    amount = min(extra_needed, cash_above_reserve)
+                    cash_balance -= amount
+                    from_cash += amount
+                    extra_needed -= amount
+                    drawn += amount
+                if taxable_balance > 0 and extra_needed > 0:
+                    basis_ratio = min(1.0, taxable_basis_balance / taxable_balance)
+                    amount = min(extra_needed, taxable_balance)
+                    basis_used = amount * basis_ratio
+                    taxable_balance -= amount
+                    taxable_basis_balance = max(0.0, taxable_basis_balance - basis_used)
+                    from_taxable += amount
+                    capital_gains += amount - basis_used
+                    extra_needed -= amount
+                    drawn += amount
+                deferred_limit = deferred_balance if traditional_accessible else sepp_remaining
+                if deferred_limit > 0 and deferred_balance > 0 and extra_needed > 0:
+                    amount = min(extra_needed, deferred_balance, deferred_limit)
+                    deferred_balance -= amount
+                    from_deferred += amount
+                    extra_needed -= amount
+                    drawn += amount
+                    if not traditional_accessible:
+                        sepp_remaining -= amount
+                roth_limit = (
+                    roth_balance if age >= penalty_free_age
+                    else min(
+                        roth_balance,
+                        roth_accessible_basis + hsa_eligible_remaining,
+                    )
+                )
+                if roth_limit > 0 and extra_needed > 0:
+                    amount = min(extra_needed, roth_limit)
+                    roth_balance -= amount
+                    from_roth += amount
+                    extra_needed -= amount
+                    drawn += amount
+                    if age < penalty_free_age:
+                        hsa_draw = min(amount, hsa_eligible_remaining)
+                        hsa_eligible_remaining -= hsa_draw
+                        hsa_qualified_balance -= hsa_draw
+                        roth_accessible_basis -= amount - hsa_draw
+                if cash_balance > 0 and extra_needed > 0:
+                    amount = min(extra_needed, cash_balance)
+                    cash_balance -= amount
+                    from_cash += amount
+                    extra_needed -= amount
+                    drawn += amount
+
+                if drawn <= 0.01:
+                    break
+
+            # Recompute once with the final grossed-up withdrawal amounts.
+            (
+                ordinary_income,
+                federal_tax,
+                state_tax,
+                fica_tax,
+                total_tax_year,
+            ) = calculate_year_tax()
+            taxes_funded = max(0.0, total_tax_year - prepaid_tax) if fund_taxes else 0.0
 
             magi = self.compute_magi(
                 earned_income=taxable_earned,
@@ -864,14 +1735,21 @@ class TaxEngine:
             )
 
             total_gross = (
-                total_non_withdrawal_income + from_taxable + from_deferred
+                gross_non_withdrawal_income + from_taxable + from_deferred
                 + from_roth + from_cash
             )
             effective = total_tax_year / total_gross if total_gross > 0 else 0
+            net_spendable = (
+                total_non_withdrawal_income + from_taxable + from_deferred
+                + from_roth + from_cash - rmd_redeposit - taxes_funded
+            )
 
             year_plans.append(WithdrawalYearPlan(
                 year=current_year,
                 age=round(age, 1),
+                spending_need=round(spending_need, 2),
+                taxes_funded=round(taxes_funded, 2),
+                net_spendable=round(net_spendable, 2),
                 from_taxable=round(from_taxable, 2),
                 from_deferred=round(from_deferred, 2),
                 from_roth=round(from_roth, 2),
@@ -893,9 +1771,18 @@ class TaxEngine:
             total_withdrawn += from_taxable + from_deferred + from_roth
             total_gross_all_years += total_gross
 
+            # Working-year surplus is future bridge cash, not money that
+            # disappears from the plan after paying this year's expenses.
+            cash_balance += max(0.0, net_spendable - spending_need)
+
             # Grow remaining balances (cash at its own yield, not market return)
-            deferred_balance *= (1 + annual_return)
-            roth_balance *= (1 + annual_return)
+            deferred_balance = (
+                deferred_balance * (1 + annual_return) + annual_401k_contribution
+            )
+            roth_balance = (
+                roth_balance * (1 + annual_return) + annual_roth_contribution
+            )
+            roth_accessible_basis += annual_roth_contribution
             taxable_balance *= (1 + annual_return)
             cash_balance *= (1 + cash_yield)
 
@@ -932,7 +1819,6 @@ class TaxEngine:
         config = await fire_engine.get_effective_config(scenario_id)
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
-        state_rate = tax_config["state_tax_rate"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
 
@@ -972,6 +1858,12 @@ class TaxEngine:
         total_tax = 0.0
         deferred_balance = accounts.tax_deferred_balance
         current = window_start
+        dynamic_itemized = self._itemized_config(tax_config).get("enabled", False)
+        inflation = config.expected_inflation_rate / 100
+        window_years = max(1, window_end.year - window_start.year + 1)
+        mortgage_interest_by_year = await self._mortgage_interest_by_year(
+            config, tax_config, window_start.year, window_years,
+        )
 
         while current < window_end and deferred_balance > 0:
             age = self._compute_age(config, current)
@@ -993,12 +1885,77 @@ class TaxEngine:
                     continue  # not yet started
                 baseline_income += src.annual_amount / 100
 
-            # Room to fill so POST-DEDUCTION taxable income lands exactly at
-            # the target bracket ceiling. When baseline income is below the
-            # standard deduction, the conversion absorbs the unused deduction
-            # (converting $X with zero income leaves taxable at X − std_ded).
-            taxable_baseline = max(0, baseline_income - std_deduction)
+            def tax_at_income(income: float) -> tuple[float, float, float]:
+                """Federal taxable income, federal tax, and CA tax."""
+                federal_mortgage_interest, state_mortgage_interest = (
+                    mortgage_interest_by_year.get(current.year, (0.0, 0.0))
+                )
+                state_itemized, _, _ = self._state_itemized_deduction(
+                    income,
+                    tax_config,
+                    state_mortgage_interest,
+                    year=current.year,
+                    inflation_rate=inflation,
+                )
+                state_deduction = None
+                state_method = None
+                if state_itemized is not None:
+                    state_standard = (
+                        float(tax_config["state_standard_deduction"])
+                        if tax_config.get("state_standard_deduction") is not None
+                        else CA_STANDARD_DEDUCTION_2025.get(
+                            filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                        )
+                    )
+                    state_deduction, state_method = self._select_deduction(
+                        tax_config.get("state_deduction_method", "greater_of"),
+                        state_standard,
+                        state_itemized,
+                    )
+                state_tax = self.compute_configured_state_tax(
+                    income,
+                    tax_config,
+                    deduction_override=state_deduction,
+                    deduction_method_override=state_method,
+                ).total_tax
+                federal_itemized, _ = self._federal_itemized_deduction(
+                    current.year,
+                    income,
+                    state_tax,
+                    tax_config,
+                    federal_mortgage_interest,
+                    inflation_rate=inflation,
+                )
+                federal_deduction = std_deduction
+                if federal_itemized is not None:
+                    federal_deduction = self._select_deduction(
+                        tax_config.get("federal_deduction_method", "greater_of"),
+                        self._get_federal_standard_deduction(tax_config),
+                        federal_itemized,
+                    )[0]
+                taxable = max(0.0, income - federal_deduction)
+                federal_tax = self.compute_federal_tax(
+                    taxable, filing_status, brackets,
+                ).total_federal_tax
+                return taxable, federal_tax, state_tax
+
+            # Room to fill so POST-DEDUCTION taxable income lands at the
+            # target bracket ceiling. With dynamic itemization, solve again as
+            # the SALT and California limitations respond to the conversion.
+            taxable_baseline, baseline_federal_tax, baseline_state_tax = tax_at_income(
+                baseline_income,
+            )
             room_to_target = max(0, target_ceiling + std_deduction - baseline_income)
+            if dynamic_itemized:
+                conversion_guess = room_to_target
+                for _ in range(8):
+                    taxable_guess, _, _ = tax_at_income(
+                        baseline_income + conversion_guess,
+                    )
+                    conversion_guess = max(
+                        0.0, conversion_guess + target_ceiling - taxable_guess,
+                    )
+                room_to_target = conversion_guess
 
             # Convert up to the room available (don't exceed deferred balance)
             conversion = min(room_to_target, deferred_balance)
@@ -1006,12 +1963,17 @@ class TaxEngine:
                 current += relativedelta(years=1)
                 continue
 
-            # Tax on conversion (ordinary income, after standard deduction)
-            total_taxable = max(0, baseline_income + conversion - std_deduction)
-            tax_with = self.compute_federal_tax(total_taxable, filing_status, brackets)
-            tax_without = self.compute_federal_tax(taxable_baseline, filing_status, brackets)
-            conversion_tax = tax_with.total_federal_tax - tax_without.total_federal_tax
-            conversion_tax += self.compute_state_tax(conversion, state_rate)
+            # Tax on conversion, including income-dependent itemized deductions.
+            total_taxable, federal_with, state_with = tax_at_income(
+                baseline_income + conversion,
+            )
+            conversion_tax = federal_with - baseline_federal_tax
+            if self._is_california(tax_config) or dynamic_itemized:
+                conversion_tax += state_with - baseline_state_tax
+            else:
+                conversion_tax += self.compute_state_tax(
+                    conversion, tax_config["state_tax_rate"],
+                )
 
             cumulative_converted += conversion
             total_tax += conversion_tax
@@ -1070,7 +2032,6 @@ class TaxEngine:
         config = await fire_engine.get_effective_config()
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
-        state_rate = tax_config["state_tax_rate"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
         household_size = tax_config.get("household_size", 1)
@@ -1093,16 +2054,86 @@ class TaxEngine:
             if s.income_type.value in ("salary", "bonus", "side_hustle")
             and s.is_active and s.is_taxable
         )
+        state_wage_income = sum(
+            _prorated_annual_for_year(s, current_year)
+            for s in income_sources
+            if s.income_type.value in ("salary", "bonus")
+            and s.is_active and s.is_taxable
+        )
 
-        taxable_income = max(0, total_income - std_deduction)
+        state_agi = total_income
+        if self._is_california(tax_config):
+            state_agi -= sum(
+                _prorated_annual_for_year(s, current_year)
+                for s in income_sources
+                if s.income_type.value == "social_security"
+                and s.is_active and s.is_taxable
+            )
+        mortgage_schedule = await self._mortgage_interest_by_year(
+            config, tax_config, current_year, 1,
+        )
+        federal_mortgage_interest, state_mortgage_interest = (
+            mortgage_schedule.get(current_year, (0.0, 0.0))
+        )
+        state_itemized, state_itemized_before_limit, state_itemized_limitation = (
+            self._state_itemized_deduction(
+                state_agi,
+                tax_config,
+                state_mortgage_interest,
+                year=current_year,
+                inflation_rate=config.expected_inflation_rate / 100,
+            )
+        )
+        state_deduction = None
+        state_deduction_method = None
+        if state_itemized is not None:
+            state_standard = (
+                float(tax_config["state_standard_deduction"])
+                if tax_config.get("state_standard_deduction") is not None
+                else CA_STANDARD_DEDUCTION_2025.get(
+                    filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                )
+            )
+            state_deduction, state_deduction_method = self._select_deduction(
+                tax_config.get("state_deduction_method", "greater_of"),
+                state_standard,
+                state_itemized,
+            )
+        state_breakdown = self.compute_configured_state_tax(
+            state_agi,
+            tax_config,
+            earned_income=state_wage_income,
+            deduction_override=state_deduction,
+            deduction_method_override=state_deduction_method,
+        )
+        state_tax = state_breakdown.total_tax
+        federal_itemized, salt_deduction = self._federal_itemized_deduction(
+            current_year,
+            total_income,
+            state_tax,
+            tax_config,
+            federal_mortgage_interest,
+            inflation_rate=config.expected_inflation_rate / 100,
+        )
+        federal_deduction = std_deduction
+        federal_deduction_method = self._get_federal_deduction_method(tax_config)
+        if federal_itemized is not None:
+            federal_deduction, federal_deduction_method = self._select_deduction(
+                tax_config.get("federal_deduction_method", "greater_of"),
+                self._get_federal_standard_deduction(tax_config),
+                federal_itemized,
+            )
+        taxable_income = max(0, total_income - federal_deduction)
         federal = self.compute_federal_tax(taxable_income, filing_status, brackets)
-        state_tax = self.compute_state_tax(taxable_income, state_rate)
         fica = self.compute_fica(earned_income, filing_status)
         room = self.get_bracket_room(taxable_income, filing_status, brackets)
         effective = self.compute_effective_rate(total_income, federal.total_federal_tax, state_tax, fica)
 
         # Account balances by tax treatment
         accounts = await self.get_accounts_by_tax_treatment()
+        basis_estimate = self.estimate_taxable_cost_basis(
+            accounts.taxable, tax_config.get("cost_basis_pct", 0.60),
+        )
 
         # ACA analysis — MAGI includes NON-earned income too (rental,
         # severance, dividends); previously only earned income was counted,
@@ -1119,14 +2150,31 @@ class TaxEngine:
         return {
             "filing_status": filing_status,
             "gross_income": round(total_income, 2),
-            "standard_deduction": std_deduction,
+            "standard_deduction": round(federal_deduction, 2),
+            "federal_deduction_method": federal_deduction_method,
+            "federal_itemized_deduction": round(federal_itemized or 0.0, 2),
+            "federal_salt_deduction": round(salt_deduction, 2),
+            "federal_mortgage_interest": round(federal_mortgage_interest, 2),
             "taxable_income": round(taxable_income, 2),
             "federal_tax": federal.total_federal_tax,
             "federal_brackets": federal.brackets,
             "federal_effective_rate": federal.effective_rate,
             "federal_marginal_rate": federal.marginal_rate,
             "state_tax": state_tax,
-            "state_rate": state_rate,
+            "state": str(tax_config.get("state") or "").upper(),
+            "state_gross_income": round(state_agi, 2),
+            "state_rate": round(state_breakdown.marginal_rate * 100, 2),
+            "state_tax_method": state_breakdown.method,
+            "state_taxable_income": state_breakdown.taxable_income,
+            "state_standard_deduction": state_breakdown.standard_deduction,
+            "state_deduction_method": state_breakdown.deduction_method,
+            "state_itemized_before_limit": round(state_itemized_before_limit, 2),
+            "state_itemized_limitation": round(state_itemized_limitation, 2),
+            "state_mortgage_interest": round(state_mortgage_interest, 2),
+            "state_income_tax": state_breakdown.income_tax,
+            "state_payroll_tax": state_breakdown.payroll_tax,
+            "state_effective_rate": state_breakdown.effective_rate,
+            "state_marginal_rate": state_breakdown.marginal_rate,
             "fica_tax": fica,
             "total_tax": round(federal.total_federal_tax + state_tax + fica, 2),
             "overall_effective_rate": effective,
@@ -1148,10 +2196,10 @@ class TaxEngine:
                     {"name": a.name, "balance": a.current_balance / 100}
                     for a in accounts.tax_free
                 ],
-                "taxable_accounts": [
-                    {"name": a.name, "balance": a.current_balance / 100}
-                    for a in accounts.taxable
-                ],
+                "taxable_accounts": basis_estimate["accounts"],
+                "taxable_cost_basis": basis_estimate["cost_basis"],
+                "taxable_cost_basis_pct": round(basis_estimate["cost_basis_pct"], 4),
+                "taxable_basis_coverage_pct": basis_estimate["coverage_pct"],
             },
             "aca": {
                 "magi": aca.magi,
@@ -1184,17 +2232,69 @@ class TaxEngine:
         config = await fire_engine.get_effective_config()
         tax_config = self._get_tax_config(config)
         filing_status = tax_config["filing_status"]
-        state_rate = tax_config["state_tax_rate"]
         std_deduction = self._get_standard_deduction(tax_config)
         brackets = self._get_brackets(tax_config)
 
         scenario_income = base["gross_income"] + extra_income + roth_conversion
-        scenario_deductions = std_deduction + extra_deduction
-        scenario_taxable = max(0, scenario_income - scenario_deductions)
+        scenario_state_agi = (
+            base["state_gross_income"] + extra_income + roth_conversion
+        )
+        scenario_state_itemized, _, _ = self._state_itemized_deduction(
+            scenario_state_agi,
+            tax_config,
+            base["state_mortgage_interest"],
+            year=date.today().year,
+            inflation_rate=config.expected_inflation_rate / 100,
+        )
+        scenario_state_deduction = None
+        scenario_state_method = None
+        if scenario_state_itemized is not None:
+            state_standard = (
+                float(tax_config["state_standard_deduction"])
+                if tax_config.get("state_standard_deduction") is not None
+                else CA_STANDARD_DEDUCTION_2025.get(
+                    filing_status, CA_STANDARD_DEDUCTION_2025["single"],
+                )
+            )
+            scenario_state_deduction, scenario_state_method = self._select_deduction(
+                tax_config.get("state_deduction_method", "greater_of"),
+                state_standard,
+                scenario_state_itemized,
+            )
+        scenario_state_breakdown = self.compute_configured_state_tax(
+            scenario_state_agi,
+            tax_config,
+            extra_deduction=extra_deduction,
+            deduction_override=scenario_state_deduction,
+            deduction_method_override=scenario_state_method,
+        )
+        scenario_state = scenario_state_breakdown.income_tax + base["state_payroll_tax"]
 
-        scenario_federal = self.compute_federal_tax(scenario_taxable, filing_status, brackets)
-        scenario_state = self.compute_state_tax(scenario_taxable, state_rate)
-        scenario_total = scenario_federal.total_federal_tax + scenario_state
+        scenario_federal_itemized, _ = self._federal_itemized_deduction(
+            date.today().year,
+            scenario_income,
+            scenario_state,
+            tax_config,
+            base["federal_mortgage_interest"],
+            inflation_rate=config.expected_inflation_rate / 100,
+        )
+        scenario_federal_deduction = std_deduction
+        if scenario_federal_itemized is not None:
+            scenario_federal_deduction = self._select_deduction(
+                tax_config.get("federal_deduction_method", "greater_of"),
+                self._get_federal_standard_deduction(tax_config),
+                scenario_federal_itemized,
+            )[0]
+        scenario_deductions = scenario_federal_deduction + extra_deduction
+        scenario_taxable = max(0, scenario_income - scenario_deductions)
+        scenario_federal = self.compute_federal_tax(
+            scenario_taxable, filing_status, brackets,
+        )
+        # Roth conversions and the generic extra-income input are not treated
+        # as wages, so current FICA/SDI carry through rather than increasing.
+        scenario_total = (
+            scenario_federal.total_federal_tax + scenario_state + base["fica_tax"]
+        )
 
         base_total = base["total_tax"]
 

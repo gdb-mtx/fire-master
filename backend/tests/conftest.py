@@ -16,6 +16,7 @@ engine's own defaults are neutral (zero/disabled).
 """
 
 import uuid
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -139,11 +140,12 @@ def _make_fire_config(**overrides) -> FireConfig:
     config.pension_monthly = None
     config.pension_start_age = None
     config.healthcare_monthly_cost = 60_000  # $600/mo
+    config.post_medicare_healthcare_monthly_cost = None
     config.medicare_start_age = 65
     config.rmd_start_age = 73
     config.target_legacy = 0
     config.notes = None
-    config.custom_assumptions = dict(BASE_CUSTOM_ASSUMPTIONS)
+    config.custom_assumptions = deepcopy(BASE_CUSTOM_ASSUMPTIONS)
     config.created_at = datetime(2026, 3, 15, tzinfo=timezone.utc)
     config.updated_at = datetime(2026, 4, 14, tzinfo=timezone.utc)
     for k, v in overrides.items():

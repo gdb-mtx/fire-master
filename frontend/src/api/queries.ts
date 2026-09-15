@@ -52,6 +52,7 @@ import type {
   WithdrawalPlan,
   RothConversionPlan,
   MonteCarloResult,
+  RetirementAgeAnalysis,
   SEPPResponse,
   TaxScenarioInput,
   TaxScenarioResponse,
@@ -268,6 +269,8 @@ export function useUpdateFireConfig() {
       patchJSON<FireConfig>(`${BASE}/fire/config`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["retirement"] });
+      queryClient.invalidateQueries({ queryKey: ["tax"] });
     },
   });
 }
@@ -365,6 +368,21 @@ export function useCreateIncomeSource() {
       postJSON<IncomeSource>(`${BASE}/fire/income`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["retirement"] });
+      queryClient.invalidateQueries({ queryKey: ["tax"] });
+    },
+  });
+}
+
+export function useUpdateIncomeSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Partial<IncomeSource> }) =>
+      putJSON<IncomeSource>(`${BASE}/fire/income/${id}`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["retirement"] });
+      queryClient.invalidateQueries({ queryKey: ["tax"] });
     },
   });
 }
@@ -376,6 +394,8 @@ export function useDeleteIncomeSource() {
       fetchJSON(`${BASE}/fire/income/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["retirement"] });
+      queryClient.invalidateQueries({ queryKey: ["tax"] });
     },
   });
 }
@@ -507,11 +527,34 @@ export function useRothConversionPlan(targetBracket: number = 0.22) {
   });
 }
 
-export function useMonteCarlo(runs: number = 1000) {
+export function useMonteCarlo(
+  runs: number = 1000,
+  seed: number = 42,
+  enabled: boolean = true,
+) {
   return useQuery({
-    queryKey: ["tax", "monte-carlo", runs],
+    queryKey: ["retirement", "monte-carlo", runs, seed],
     queryFn: () =>
-      fetchJSON<MonteCarloResult>(`${BASE}/tax/monte-carlo?runs=${runs}`),
+      fetchJSON<MonteCarloResult>(`${BASE}/tax/monte-carlo?runs=${runs}&seed=${seed}`),
+    enabled,
+  });
+}
+
+export function useRetirementAgeAnalysis(
+  runs: number = 1000,
+  seed: number = 42,
+  maxAge: number = 85,
+  enabled: boolean = true,
+) {
+  return useQuery({
+    queryKey: ["retirement", "confidence-ages", runs, seed, maxAge],
+    queryFn: () =>
+      fetchJSON<RetirementAgeAnalysis>(
+        `${BASE}/fire/retirement-age-analysis?runs=${runs}&seed=${seed}&max_age=${maxAge}`,
+        undefined,
+        120_000,
+      ),
+    enabled,
   });
 }
 

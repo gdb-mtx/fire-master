@@ -23,6 +23,9 @@ class BracketRoomResponse(BaseModel):
 class AccountBalanceDetail(BaseModel):
     name: str
     balance: float
+    cost_basis: float | None = None
+    cost_basis_pct: float | None = None
+    basis_source: str | None = None
 
 
 class AccountBalanceSummary(BaseModel):
@@ -33,6 +36,9 @@ class AccountBalanceSummary(BaseModel):
     tax_deferred_accounts: list[AccountBalanceDetail] = []
     tax_free_accounts: list[AccountBalanceDetail] = []
     taxable_accounts: list[AccountBalanceDetail] = []
+    taxable_cost_basis: float = 0
+    taxable_cost_basis_pct: float = 0
+    taxable_basis_coverage_pct: float = 0
 
 
 class ACASnapshot(BaseModel):
@@ -50,13 +56,30 @@ class BracketAnalysisResponse(BaseModel):
     filing_status: str
     gross_income: float
     standard_deduction: float
+    federal_deduction_method: str = "standard"
+    federal_itemized_deduction: float = 0
+    federal_salt_deduction: float = 0
+    federal_mortgage_interest: float = 0
     taxable_income: float
     federal_tax: float
     federal_brackets: list[BracketDetail]
     federal_effective_rate: float
     federal_marginal_rate: float
     state_tax: float
+    state: str = ""
+    state_gross_income: float = 0
     state_rate: float
+    state_tax_method: str = "flat_rate"
+    state_taxable_income: float = 0
+    state_standard_deduction: float = 0
+    state_deduction_method: str = "standard"
+    state_itemized_before_limit: float = 0
+    state_itemized_limitation: float = 0
+    state_mortgage_interest: float = 0
+    state_income_tax: float = 0
+    state_payroll_tax: float = 0
+    state_effective_rate: float = 0
+    state_marginal_rate: float = 0
     fica_tax: float
     total_tax: float
     overall_effective_rate: float
@@ -71,6 +94,9 @@ class BracketAnalysisResponse(BaseModel):
 class WithdrawalYearResponse(BaseModel):
     year: int
     age: float
+    spending_need: float = 0.0
+    taxes_funded: float = 0.0
+    net_spendable: float = 0.0
     from_taxable: float
     from_deferred: float
     from_roth: float
@@ -199,8 +225,25 @@ class MonteCarloResponse(BaseModel):
     percentile_curves: list[PercentileCurvePoint]
     worst_final_nw: float
     best_final_nw: float
+    starting_spendable_assets: float = 0
+    excluded_non_spendable_assets: float = 0
     # Model disclosure (additive; frontend tolerates absence)
     assumptions: dict | None = None
+
+
+class RetirementConfidenceAge(BaseModel):
+    confidence: float
+    earliest_age: int | None = None
+    success_rate: float | None = None
+    prior_age_success_rate: float | None = None
+
+
+class RetirementAgeAnalysisResponse(BaseModel):
+    configured_retirement_age: float | None = None
+    current_age: float
+    max_tested_age: int
+    runs_per_age: int
+    confidence_ages: list[RetirementConfidenceAge]
 
 
 # --- SEPP / 72(t) ---

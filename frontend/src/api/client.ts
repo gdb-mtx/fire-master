@@ -3,9 +3,10 @@ const TIMEOUT_MS = 20_000;
 async function fetchWithTimeout(
   url: string,
   opts?: RequestInit,
+  timeoutMs: number = TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...opts, signal: controller.signal });
   } finally {
@@ -22,6 +23,7 @@ function getAuthHeaders(): Record<string, string> {
 export async function fetchJSON<T>(
   url: string,
   opts?: RequestInit,
+  timeoutMs: number = TIMEOUT_MS,
 ): Promise<T> {
   const res = await fetchWithTimeout(url, {
     ...opts,
@@ -30,7 +32,7 @@ export async function fetchJSON<T>(
       ...getAuthHeaders(),
       ...opts?.headers,
     },
-  });
+  }, timeoutMs);
 
   // 401 on a normal API call = expired/invalid session -> back to login.
   // A 401 from the login endpoint itself is just "wrong credentials" — redirecting

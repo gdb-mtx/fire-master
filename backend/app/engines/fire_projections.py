@@ -14,6 +14,7 @@ Two modeling STRUCTURES remain (do not copy mechanics between them):
   bridge chart, and scenario comparisons.
 """
 
+import datetime as dt_lib
 import logging
 import uuid as uuid_mod
 from copy import deepcopy
@@ -29,7 +30,7 @@ from app.models.cashflow_event import CashflowEvent
 from app.models.fire_config import FireConfig
 from app.models.fire_scenario import FireScenario
 from app.models.goal import Goal
-from app.models.income_source import IncomeSource
+from app.models.income_source import IncomeSource, projection_annual_amount_cents
 from app.models.net_worth_snapshot import NetWorthSnapshot
 from app.engines.net_worth import NetWorthEngine
 from app.engines.tax_engine import _get_rmd_divisor
@@ -73,6 +74,302 @@ def _dollars_to_cents(dollars: float) -> int:
     return int(round(dollars * 100))
 
 
+def _healthcare_monthly_cents_at_age(config: FireConfig, age: float) -> int:
+    """Return the extra retirement healthcare budget for an age, in cents."""
+    medicare_age = config.medicare_start_age or 65
+    if age < medicare_age:
+        return config.healthcare_monthly_cost or 0
+    return config.post_medicare_healthcare_monthly_cost or 0
+
+
+def _parse_config_date(value: object) -> date | None:
+    """Parse an optional ISO date stored in custom assumptions."""
+    if isinstance(value, dt_lib.date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _household_settings(config: FireConfig) -> dict[str, object]:
+    """Return normalized two-adult planning assumptions.
+
+    The original top-level birth date/life expectancy remain Adult 1 so old
+    profiles keep their exact behavior. Adult 2 is opt-in and lives under
+    custom_assumptions.household to avoid a database migration.
+    """
+    household = (config.custom_assumptions or {}).get("household", {}) or {}
+    adult_2_dob = _parse_config_date(household.get("adult_2_date_of_birth"))
+    try:
+        adult_2_life = int(household.get("adult_2_life_expectancy") or 0)
+    except (TypeError, ValueError):
+        adult_2_life = 0
+    has_adult_2 = adult_2_dob is not None and adult_2_life > 0
+    survivor_value = household.get("survivor_spending_pct", 0.70)
+    try:
+        survivor_pct = float(0.70 if survivor_value is None else survivor_value)
+    except (TypeError, ValueError):
+        survivor_pct = 0.70
+    return {
+        "adult_2_dob": adult_2_dob if has_adult_2 else None,
+        "adult_2_life_expectancy": adult_2_life if has_adult_2 else None,
+        "survivor_spending_pct": max(0.0, min(1.0, survivor_pct)),
+    }
+
+
+def _household_projection_end_date(
+    config: FireConfig,
+    fallback: date,
+    primary_life_expectancy: int | None = None,
+) -> date:
+    """End a plan at the later modeled death in a two-adult household."""
+    end_dates: list[date] = []
+    if config.date_of_birth:
+        end_dates.append(config.date_of_birth + relativedelta(
+            years=primary_life_expectancy or config.life_expectancy,
+        ))
+    household = _household_settings(config)
+    adult_2_dob = household["adult_2_dob"]
+    adult_2_life = household["adult_2_life_expectancy"]
+    if isinstance(adult_2_dob, dt_lib.date) and isinstance(adult_2_life, int):
+        end_dates.append(adult_2_dob + relativedelta(years=adult_2_life))
+    return max(end_dates) if end_dates else fallback
+
+
+def _household_survivor_spending_multiplier(config: FireConfig, current: date) -> float:
+    """Reduce discretionary household spending after the first modeled death."""
+    household = _household_settings(config)
+    adult_2_dob = household["adult_2_dob"]
+    adult_2_life = household["adult_2_life_expectancy"]
+    if not (
+        config.date_of_birth
+        and isinstance(adult_2_dob, dt_lib.date)
+        and isinstance(adult_2_life, int)
+    ):
+        return 1.0
+    deaths = (
+        config.date_of_birth + relativedelta(years=config.life_expectancy),
+        adult_2_dob + relativedelta(years=adult_2_life),
+    )
+    if current < min(deaths):
+        return 1.0
+    if current < max(deaths):
+        return float(household["survivor_spending_pct"])
+    return 0.0
+
+
+def _household_social_security_monthly_cents(
+    config: FireConfig, current: date,
+) -> int:
+    """Time a combined, equal-benefit SS estimate for each adult separately."""
+    total = int(config.social_security_monthly or 0)
+    if not total or not config.date_of_birth:
+        return 0
+    claim_age = config.social_security_start_age or 67
+    household = _household_settings(config)
+    adult_2_dob = household["adult_2_dob"]
+    adult_2_life = household["adult_2_life_expectancy"]
+    if not (isinstance(adult_2_dob, dt_lib.date) and isinstance(adult_2_life, int)):
+        start = config.date_of_birth + relativedelta(
+            years=claim_age,
+        )
+        return total if current >= start else 0
+
+    shares = (total // 2, total - total // 2)
+    members = (
+        (config.date_of_birth, config.life_expectancy, shares[0]),
+        (adult_2_dob, adult_2_life, shares[1]),
+    )
+    active = 0
+    for dob, lifespan, benefit in members:
+        claim = dob + relativedelta(years=claim_age)
+        death = dob + relativedelta(years=lifespan)
+        if claim <= current < death:
+            active += benefit
+    return active
+
+
+def _healthcare_monthly_cents_at_date(config: FireConfig, current: date) -> int:
+    """Blend two adults' pre-/post-Medicare costs when their ages differ.
+
+    Both configured healthcare amounts are household totals for two adults, so
+    each adult contributes half of the applicable total while alive. Profiles
+    without Adult 2 retain the original age-based behavior.
+    """
+    if not config.date_of_birth:
+        return config.healthcare_monthly_cost or 0
+    household = _household_settings(config)
+    adult_2_dob = household["adult_2_dob"]
+    adult_2_life = household["adult_2_life_expectancy"]
+    primary_age = (current - config.date_of_birth).days / 365.2425
+    if not (isinstance(adult_2_dob, dt_lib.date) and isinstance(adult_2_life, int)):
+        return _healthcare_monthly_cents_at_age(config, primary_age)
+
+    members = (
+        (config.date_of_birth, config.life_expectancy),
+        (adult_2_dob, adult_2_life),
+    )
+    total = 0.0
+    for dob, lifespan in members:
+        age = (current - dob).days / 365.2425
+        if 0 <= age < lifespan:
+            total += _healthcare_monthly_cents_at_age(config, age) / 2
+    return int(round(total))
+
+
+def _retirement_savings_settings(config: FireConfig) -> dict[str, object]:
+    """Normalize the household retirement-saving and Roth-ladder assumptions.
+
+    Contribution limits are stored per worker so a two-earner household does
+    not silently receive only one person's limit.  Dollar inputs are REAL
+    annual amounts: IRS limit inflation is assumed to preserve their buying
+    power in this real-terms model.
+    """
+    assumptions = config.custom_assumptions or {}
+    savings = assumptions.get("retirement_contributions", {}) or {}
+    ladder = assumptions.get("roth_conversion_ladder", {}) or {}
+    workers = max(0, int(savings.get("worker_count", 0) or 0))
+    annual_401k_per_worker = max(
+        0.0, float(savings.get("annual_401k_per_worker", 0) or 0),
+    )
+    annual_roth_per_worker = max(
+        0.0, float(savings.get("annual_roth_ira_per_worker", 0) or 0),
+    )
+
+    def parse_date(value: object) -> date | None:
+        if isinstance(value, dt_lib.date):
+            return value
+        if isinstance(value, str) and value:
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    return {
+        "worker_count": workers,
+        "annual_401k": workers * annual_401k_per_worker,
+        "annual_roth": workers * annual_roth_per_worker,
+        # Unknown historical basis defaults to zero instead of treating Roth
+        # earnings or HSA dollars as penalty-free spending money.
+        "starting_roth_basis": max(
+            0.0, float(savings.get("starting_roth_contribution_basis", 0) or 0),
+        ),
+        "starting_hsa_qualified_balance": max(
+            0.0, float(savings.get("starting_hsa_qualified_balance", 0) or 0),
+        ),
+        "contribution_start_date": parse_date(savings.get("start_date")),
+        "contribution_end_date": parse_date(savings.get("end_date")),
+        "ladder_enabled": bool(ladder.get("enabled", False)),
+        "ladder_wait_years": max(1, int(ladder.get("wait_years", 5) or 5)),
+        # Zero means auto-size to the modeled retirement spending gap.
+        "ladder_annual_conversion": max(
+            0.0, float(ladder.get("annual_conversion", 0) or 0),
+        ),
+    }
+
+
+def _contribution_policy_active(settings: dict[str, object], target: date) -> bool:
+    """Whether the configured retirement-saving phase includes ``target``."""
+    start = settings.get("contribution_start_date")
+    end = settings.get("contribution_end_date")
+    return not (
+        (isinstance(start, dt_lib.date) and target < start)
+        or (isinstance(end, dt_lib.date) and target > end)
+    )
+
+
+def _primary_mortgage_terms(config: FireConfig) -> tuple[float, float, date | None]:
+    """Return monthly P&I dollars, annual rate, and contractual payoff date."""
+    projection = (config.custom_assumptions or {}).get("projection", {}) or {}
+    monthly_payment = float(projection.get("primary_property_mortgage_pi") or 0)
+    annual_rate = float(projection.get("primary_property_mortgage_rate") or 0)
+    payoff_raw = projection.get("primary_property_mortgage_payoff_date")
+    payoff_date: date | None = None
+    if isinstance(payoff_raw, dt_lib.date):
+        payoff_date = payoff_raw
+    elif isinstance(payoff_raw, str) and payoff_raw:
+        try:
+            payoff_date = dt_lib.date.fromisoformat(payoff_raw)
+        except ValueError:
+            payoff_date = None
+    return monthly_payment, annual_rate, payoff_date
+
+
+def _property_tax_for_year(config: FireConfig, year: int) -> tuple[float, float]:
+    """Return base and projected property tax in real dollars."""
+    tax = (config.custom_assumptions or {}).get("tax", {}) or {}
+    itemized = tax.get("itemized_deductions", {}) or {}
+    if not itemized.get("enabled", False):
+        return 0.0, 0.0
+    base_amount = float(itemized.get("annual_property_tax") or 0.0)
+    base_year = int(itemized.get("property_tax_base_year") or date.today().year)
+    nominal_growth = float(itemized.get("property_tax_growth_rate") or 0.0)
+    inflation = (config.expected_inflation_rate or 0.0) / 100
+    real_growth = (1 + nominal_growth) / (1 + inflation) - 1
+    projected = base_amount * ((1 + real_growth) ** max(0, year - base_year))
+    return base_amount, projected
+
+
+def _annual_spending_with_mortgage(
+    base_annual: float,
+    spending_multiplier: float,
+    config: FireConfig,
+    year: int,
+) -> float:
+    """Apply spending phases while stopping P&I after its maturity month.
+
+    The configured annual budget already contains twelve mortgage payments.
+    Other spending follows the retirement phase multiplier; contractual P&I
+    stays fixed in real dollars until its final scheduled payment.
+    """
+    monthly_payment, _rate, payoff_date = _primary_mortgage_terms(config)
+    property_tax_base, property_tax_projected = _property_tax_for_year(config, year)
+    mortgage_base = monthly_payment * 12 if monthly_payment > 0 and payoff_date else 0.0
+    active_months = 0
+    if mortgage_base:
+        active_months = sum(
+            1 for month in range(1, 13)
+            if dt_lib.date(year, month, 1) <= payoff_date
+        )
+    other_annual = max(0.0, base_annual - mortgage_base - property_tax_base)
+    return (
+        other_annual * spending_multiplier
+        + monthly_payment * active_months
+        + property_tax_projected
+    )
+
+
+def _monthly_spending_with_mortgage(
+    base_monthly: float,
+    spending_multiplier: float,
+    config: FireConfig,
+    target_date: date,
+) -> float:
+    """Monthly counterpart to ``_annual_spending_with_mortgage``."""
+    monthly_payment, _rate, payoff_date = _primary_mortgage_terms(config)
+    property_tax_base, property_tax_projected = _property_tax_for_year(
+        config, target_date.year,
+    )
+    mortgage_base = monthly_payment if monthly_payment > 0 and payoff_date else 0.0
+    other_monthly = max(
+        0.0, base_monthly - mortgage_base - property_tax_base / 12,
+    )
+    active_payment = (
+        monthly_payment
+        if mortgage_base and target_date.replace(day=1) <= payoff_date
+        else 0.0
+    )
+    return (
+        other_monthly * spending_multiplier
+        + active_payment
+        + property_tax_projected / 12
+    )
+
+
 # Retirement spending phases (go-go / slow-go / no-go)
 # Based on Blanchett (2013): real spending declines ~1-2%/yr in retirement
 SPENDING_PHASES = [
@@ -91,6 +388,7 @@ RETIREMENT_ROLES = {"retirement_core", "retirement_bridge", "retirement_suppleme
 RE_ASSET_ROLES = {"primary_residence", "sell_candidate", "income_producing"}
 RE_LIABILITY_ROLES = {"primary_mortgage", "sell_with_property"}
 ILLIQUID_ROLES = {"illiquid_private"}
+EDUCATION_ROLES = {"education_restricted"}
 
 
 def _spending_multiplier(age: float) -> float:
@@ -287,6 +585,7 @@ class FireProjectionsEngine:
         retirement = 0
         re_equity = 0
         illiquid = 0
+        education = 0
         other = 0
 
         for acct in accounts:
@@ -301,6 +600,8 @@ class FireProjectionsEngine:
                 re_equity += bal
             elif role in ILLIQUID_ROLES:
                 illiquid += bal
+            elif role in EDUCATION_ROLES:
+                education += bal
             elif role == "system":
                 continue  # exclude system accounts (e.g., Net Worth History)
             else:
@@ -311,13 +612,16 @@ class FireProjectionsEngine:
             retirement=_cents_to_dollars(retirement),
             real_estate_equity=_cents_to_dollars(re_equity),
             illiquid_private=_cents_to_dollars(illiquid),
+            education=_cents_to_dollars(education),
             other=_cents_to_dollars(other),
         )
 
     async def compute_fire_number(self) -> FireNumberResponse:
-        """Compute FIRE number using draw-down-to-target-legacy strategy.
+        """Compute a conventional SWR target plus a spend-down comparison.
 
-        Year-by-year PV of net withdrawals, accounting for:
+        The headline target is planned annual outflow divided by the configured
+        safe withdrawal rate.  A separate year-by-year present-value estimate
+        shows the lower draw-down-to-target-legacy result, accounting for:
         - SS/pension starting at specific ages (not day 1 of retirement)
         - Spending phases (go-go / slow-go / no-go reduction with age)
         - Target legacy as terminal value
@@ -339,17 +643,35 @@ class FireProjectionsEngine:
         volatility_drag = (DEFAULT_RETURN_STD ** 2) / 2
         real_return = arithmetic_real - volatility_drag
 
-        # Years in retirement
+        # Years in retirement. For two adults, the spend-down comparison runs
+        # through the later lifespan just like the stochastic projection.
         retirement_age = config.target_retirement_age or 55
-        years_in_retirement = config.life_expectancy - retirement_age
+        if config.date_of_birth:
+            modeled_retirement_date = config.date_of_birth + relativedelta(
+                years=retirement_age,
+            )
+            modeled_end_date = _household_projection_end_date(
+                config, modeled_retirement_date,
+            )
+            years_in_retirement = max(
+                0, modeled_end_date.year - modeled_retirement_date.year,
+            )
+            healthcare_annual_cents = (
+                _healthcare_monthly_cents_at_date(
+                    config, modeled_retirement_date,
+                ) * 12
+            )
+        else:
+            modeled_retirement_date = date.today()
+            years_in_retirement = config.life_expectancy - retirement_age
+            healthcare_annual_cents = (
+                _healthcare_monthly_cents_at_age(config, retirement_age) * 12
+            )
 
         if years_in_retirement <= 0 or real_return <= 0:
-            fire_number_cents = annual_spending_cents * max(1, years_in_retirement)
+            lifetime_spend_down_cents = annual_spending_cents * max(1, years_in_retirement)
         else:
             # Income start ages (only count if configured)
-            ss_start_age = config.social_security_start_age if config.social_security_monthly else None
-            ss_annual = (config.social_security_monthly * 12) if config.social_security_monthly else 0
-
             pension_start_age = config.pension_start_age if config.pension_monthly else None
             pension_annual = (config.pension_monthly * 12) if config.pension_monthly else 0
 
@@ -357,35 +679,76 @@ class FireProjectionsEngine:
             # Only count sources WITHOUT an end_date — they persist through retirement.
             # Sources with end_date (severance, unemployment, temp rental) are temporary.
             continuing_annual = sum(
-                s.annual_amount for s in income_sources
+                projection_annual_amount_cents(s) for s in income_sources
                 if s.income_type.value not in ("salary", "bonus", "side_hustle")
                 and s.end_date is None
             )
 
             # Year-by-year PV of net withdrawals
-            fire_number_cents = 0
+            lifetime_spend_down_cents = 0
             for yr in range(years_in_retirement):
                 age = retirement_age + yr
+                modeled_date = modeled_retirement_date + relativedelta(years=yr)
 
                 # Spending adjusted for retirement phase
-                yr_spending = annual_spending_cents * _spending_multiplier(age)
+                retirement_year = (
+                    (config.date_of_birth.year + retirement_age + yr)
+                    if config.date_of_birth
+                    else date.today().year + yr
+                )
+                yr_spending = _dollars_to_cents(_annual_spending_with_mortgage(
+                    _cents_to_dollars(annual_spending_cents),
+                    _spending_multiplier(age)
+                    * _household_survivor_spending_multiplier(config, modeled_date),
+                    config,
+                    retirement_year,
+                ))
+                yr_spending += _healthcare_monthly_cents_at_date(
+                    config, modeled_date,
+                ) * 12
 
                 # Post-retirement income at this age
                 yr_income = continuing_annual
-                if ss_start_age and age >= ss_start_age:
-                    yr_income += ss_annual
+                yr_income += _household_social_security_monthly_cents(
+                    config, modeled_date,
+                ) * 12
                 if pension_start_age and age >= pension_start_age:
                     yr_income += pension_annual
 
                 net_withdrawal = max(0, yr_spending - yr_income)
 
                 # Discount to retirement date (geometric real return)
-                fire_number_cents += int(net_withdrawal / ((1 + real_return) ** yr))
+                lifetime_spend_down_cents += int(net_withdrawal / ((1 + real_return) ** yr))
 
             # PV of target legacy
             legacy_cents = config.target_legacy or 0
             if legacy_cents > 0:
-                fire_number_cents += int(legacy_cents / ((1 + real_return) ** years_in_retirement))
+                lifetime_spend_down_cents += int(
+                    legacy_cents / ((1 + real_return) ** years_in_retirement)
+                )
+
+        # The headline target is the transparent, conventional FIRE calculation:
+        # gross portfolio outflow / withdrawal rate. It deliberately does not
+        # credit uncertain future Social Security or assume the portfolio reaches
+        # zero at life expectancy. Source-aware taxes for the first full retirement
+        # year are added when tax gross-up is enabled.
+        estimated_annual_taxes_cents = 0
+        retirement_date = self._get_retirement_date(config)
+        if retirement_date:
+            first_full_retirement_year = retirement_date.year + 1
+            tax_schedule = await self._get_tax_funding_by_year(
+                config,
+                max(1, first_full_retirement_year - date.today().year + 1),
+            )
+            estimated_annual_taxes_cents = _dollars_to_cents(
+                tax_schedule.get(first_full_retirement_year, 0.0)
+            )
+        planning_outflow_cents = (
+            annual_spending_cents + healthcare_annual_cents
+            + estimated_annual_taxes_cents
+        )
+        withdrawal_rate = max((config.safe_withdrawal_rate or 0) / 100.0, 0.0001)
+        fire_number_cents = int(planning_outflow_cents / withdrawal_rate)
 
         current_nw_cents = _dollars_to_cents(nw.net_worth)
         gap_cents = fire_number_cents - current_nw_cents
@@ -399,7 +762,12 @@ class FireProjectionsEngine:
 
         return FireNumberResponse(
             fire_number=_cents_to_dollars(fire_number_cents),
-            annual_spending=_cents_to_dollars(annual_spending_cents),
+            annual_spending=_cents_to_dollars(planning_outflow_cents),
+            base_annual_spending=_cents_to_dollars(annual_spending_cents),
+            healthcare_annual=_cents_to_dollars(healthcare_annual_cents),
+            estimated_annual_taxes=_cents_to_dollars(estimated_annual_taxes_cents),
+            lifetime_spend_down_number=_cents_to_dollars(lifetime_spend_down_cents),
+            taxes_included=estimated_annual_taxes_cents > 0,
             safe_withdrawal_rate=config.safe_withdrawal_rate,
             current_net_worth=nw.net_worth,
             gap=_cents_to_dollars(gap_cents),
@@ -449,6 +817,26 @@ class FireProjectionsEngine:
         )
         return list(result.scalars().all())
 
+    async def _get_tax_funding_by_year(
+        self,
+        config: FireConfig,
+        years: int,
+        scenario_id: uuid_mod.UUID | None = None,
+    ) -> dict[int, float]:
+        """Source-aware taxes that must be funded as additional cash outflow."""
+        tax_config = (config.custom_assumptions or {}).get("tax", {}) or {}
+        if not tax_config.get("fund_taxes_from_withdrawals", False):
+            return {}
+        from app.engines.tax_engine import TaxEngine
+
+        plan = await TaxEngine(self.db).optimize_withdrawal_sequence(
+            years=max(1, years),
+            roth_conversions_enabled=False,
+            scenario_id=scenario_id,
+            config_override=config,
+        )
+        return {year.year: year.taxes_funded for year in plan.years}
+
     async def _get_cashflow_events(self) -> list[CashflowEvent]:
         """Planned + confirmed cashflow events — the declared plan's dated flows."""
         result = await self.db.execute(
@@ -460,8 +848,8 @@ class FireProjectionsEngine:
 
     def _single_pool_event_skip(self, config: FireConfig) -> Callable[[CashflowEvent], bool]:
         """Skip predicate for engines that model ONE undifferentiated net worth
-        (project_lifetime, Monte Carlo). Their starting balance already holds
-        every asset at book value, so a CONVERSION event — a property sale's
+        (currently project_lifetime). Its starting balance already holds every
+        asset at book value, so a CONVERSION event — a property sale's
         proceeds, a private-investment vest — must not be added on top (that
         would count the asset twice). project_wealth_pools partitions those
         assets out and handles the conversion itself; single-pool models drop
@@ -546,7 +934,7 @@ class FireProjectionsEngine:
                 if retirement_date and current_date >= retirement_date and not src.end_date:
                     continue
 
-            monthly = src.annual_amount / 12
+            monthly = projection_annual_amount_cents(src) / 12
 
             # growth_rate is a NOMINAL raise — deflate to real before compounding
             if src.growth_rate and years_from_start > 0:
@@ -626,11 +1014,16 @@ class FireProjectionsEngine:
         real_return = (1 + annual_return / 100) / (1 + inflation / 100) - 1
         monthly_return = (1 + real_return) ** (1 / 12) - 1
 
-        # Determine end date from life expectancy
-        if config.date_of_birth:
-            end_date = config.date_of_birth + relativedelta(years=life_exp)
-        else:
-            end_date = today + relativedelta(years=40)
+        # A two-adult household must be solvent through the later modeled
+        # death, not merely through Adult 1's lifespan.
+        end_date = _household_projection_end_date(
+            config,
+            today + relativedelta(years=40),
+            primary_life_expectancy=life_exp,
+        )
+        tax_funding_by_year = await self._get_tax_funding_by_year(
+            config, end_date.year - today.year + 1,
+        )
 
         # Cashflow events are part of the declared plan (fire-master#17). Skip
         # conversion events (property sale proceeds, vests): this single-pool
@@ -672,19 +1065,31 @@ class FireProjectionsEngine:
             phase = "retirement" if is_retired else "accumulation"
 
             # Monthly spending: flat real (constant purchasing power) with
-            # the retirement phase step-down
-            monthly_spending = monthly_spending_base
+            # the retirement phase step-down. Mortgage P&I remains fixed until
+            # its contractual payoff, then disappears from the budget.
+            spending_mult = _spending_multiplier(age) if is_retired else 1.0
             if is_retired:
-                monthly_spending *= _spending_multiplier(age)
+                spending_mult *= _household_survivor_spending_multiplier(
+                    config, current,
+                )
+            monthly_spending = _dollars_to_cents(_monthly_spending_with_mortgage(
+                _cents_to_dollars(monthly_spending_base),
+                spending_mult,
+                config,
+                current,
+            ))
 
-            # Healthcare adjustment
-            if config.healthcare_monthly_cost and not is_retired:
-                pass  # healthcare costs already in spending
-            elif config.healthcare_monthly_cost and is_retired:
-                if config.date_of_birth:
-                    age_now = self._compute_age(config, current)
-                    if age_now < config.medicare_start_age:
-                        monthly_spending += config.healthcare_monthly_cost
+            # Extra retirement healthcare switches from private/ACA coverage
+            # to the configured Medicare-era premium and out-of-pocket budget.
+            if is_retired:
+                monthly_spending += _healthcare_monthly_cents_at_date(config, current)
+
+            # Source-aware tax gross-up from the withdrawal planner. Employment
+            # income with an explicit net cash-flow amount is treated as already
+            # withheld, so only taxes that still need cash funding appear here.
+            monthly_spending += _dollars_to_cents(
+                tax_funding_by_year.get(current.year, 0.0) / 12
+            )
 
             # Monthly income (flat real throughout)
             if is_retired:
@@ -698,11 +1103,9 @@ class FireProjectionsEngine:
 
                 # Social Security — flat real (COLA offsets inflation)
                 if config.social_security_monthly and config.date_of_birth:
-                    ss_start = config.date_of_birth + relativedelta(
-                        years=config.social_security_start_age
+                    monthly_income += _household_social_security_monthly_cents(
+                        config, current,
                     )
-                    if current >= ss_start:
-                        monthly_income += int(config.social_security_monthly)
 
                 # Pension — flat real (COLA offsets inflation)
                 if config.pension_monthly and config.pension_start_age and config.date_of_birth:
@@ -945,6 +1348,9 @@ class FireProjectionsEngine:
         ss_full = round(ss_at_start / _SSA_FACTORS[ss_start_age]) if ss_at_start else 0
         ss_early = round(ss_full * 0.70)
         healthcare_monthly = _cents_to_dollars(config.healthcare_monthly_cost or 0)
+        post_medicare_monthly = _cents_to_dollars(
+            config.post_medicare_healthcare_monthly_cost or 0
+        )
 
         def _milestone_date(age: float) -> date:
             years = int(age)
@@ -979,8 +1385,12 @@ class FireProjectionsEngine:
                 age=65,
                 date=_milestone_date(65).isoformat(),
                 label="Medicare",
-                description="Federal health insurance. Eliminates private premium.",
-                financial_impact=f"Saves ${healthcare_monthly:,.0f}/mo" if healthcare_monthly else "Healthcare cost TBD",
+                description="Private coverage ends; Medicare premiums and supplemental costs continue.",
+                financial_impact=(
+                    f"Healthcare changes ${healthcare_monthly:,.0f} → ${post_medicare_monthly:,.0f}/mo"
+                    if healthcare_monthly or post_medicare_monthly
+                    else "Healthcare cost TBD"
+                ),
                 status=_status(65),
             ),
             Milestone(
@@ -1040,6 +1450,11 @@ class FireProjectionsEngine:
         today = date.today()
         dob = config.date_of_birth
         current_age = self._compute_age(config, today)
+        default_real_return = (
+            (1 + config.expected_annual_return / 100)
+            / (1 + config.expected_inflation_rate / 100)
+            - 1
+        )
 
         # SEPP / IRA-split assumptions from custom_assumptions (inactive unless configured)
         # ALL RATES ARE REAL (after inflation) — see projection config block below.
@@ -1048,7 +1463,10 @@ class FireProjectionsEngine:
         ira_b_start = sepp_cfg.get("ira_b_balance", 0)
         sepp_monthly = sepp_cfg.get("sepp_monthly", 0)
         sepp_start_month = sepp_cfg.get("sepp_start_month", 0)
-        ira_growth_rate = sepp_cfg.get("ira_growth_rate", 0.06)  # 6% real — investment return assumption (distinct from SEPP's 5% IRS amortization rate)
+        # Unless explicitly overridden for a scenario, every invested pool uses
+        # the main nominal-return assumption converted to real terms. The old
+        # 6-6.5% real defaults materially overstated long-run wealth.
+        ira_growth_rate = sepp_cfg.get("ira_growth_rate", default_real_return)
 
         # LEGACY ("miami_sale") — superseded by custom_assumptions["property_sales"];
         # retained for author back-compat; do not use in new configs.
@@ -1101,6 +1519,7 @@ class FireProjectionsEngine:
         # ALL RATES ARE REAL (after inflation, in today's dollars).
         # Spending is flat nominal = constant purchasing power. SS is flat = COLA offsets inflation.
         proj_cfg = (config.custom_assumptions or {}).get("projection", {})
+        savings_settings = _retirement_savings_settings(config)
         # Investment & savings rates (real, after inflation)
         surplus_investment_rate = proj_cfg.get("surplus_investment_rate", 0.04)  # 4% real after-tax (balanced portfolio)
         cash_reserve_months = proj_cfg.get("cash_reserve_months", 12)  # emergency fund = N months expenses
@@ -1111,15 +1530,19 @@ class FireProjectionsEngine:
         re_appreciation_rate = proj_cfg.get("re_appreciation_rate", 0.01)  # 1% real (RE historically tracks inflation + ~1%)
         primary_property_purchase_price = proj_cfg.get("primary_property_purchase_price", 0)  # for dynamic sale calc
         primary_property_agent_fee_pct = proj_cfg.get("primary_property_agent_fee_pct", 0.06)  # 6% agent fees
-        primary_property_mortgage_pi = proj_cfg.get("primary_property_mortgage_pi", 0)  # P&I portion of primary-property cost
+        (
+            primary_property_mortgage_pi,
+            primary_property_mortgage_rate,
+            primary_property_mortgage_payoff_date,
+        ) = _primary_mortgage_terms(config)
         primary_property_cost_basis = proj_cfg.get("primary_property_cost_basis", 0)  # cost basis for the LTCG calc
         primary_property_ltcg_rate = proj_cfg.get("primary_property_ltcg_rate", 0.15)  # 15% federal LTCG rate
         # Event-label matchers (configurable; consumed when cashflow events fire)
         sell_event_label_match = proj_cfg.get("sell_event_label_match", None)  # substring marking the secondary-property sale event; None = disabled
         illiquid_vest_event_match = proj_cfg.get("illiquid_vest_event_match", ["vest"])  # substrings that reduce the illiquid pool
-        # Social Security
-        ss_early_reduction = proj_cfg.get("ss_early_reduction", 0.70)  # 70% of full at age 62
-        ss_claim_age = proj_cfg.get("ss_claim_age", 62)  # age when SS starts
+        # Social Security has one source of truth: the benefit and claiming age
+        # in the main FIRE configuration.
+        ss_claim_age = config.social_security_start_age or 67
         # Spending phases (Blanchett 2013)
         spending_phase_slow = proj_cfg.get("spending_phase_slow", 0.85)  # age 70-80 multiplier
         spending_phase_floor = proj_cfg.get("spending_phase_floor", 0.75)  # age 80+ multiplier
@@ -1147,10 +1570,6 @@ class FireProjectionsEngine:
         recast_new_pi = recast_cfg.get("new_monthly_pi", primary_property_mortgage_pi)
         mortgage_recast_done = False
 
-        # Healthcare costs (pre-Medicare)
-        healthcare_monthly = _cents_to_dollars(config.healthcare_monthly_cost or 0)
-        medicare_age = config.medicare_start_age or 65
-
         # Rental occupancy rate — multiplier on rental income from DB sources.
         # 1.0 = 100% occupancy (default). 0.7 = 70% (30% vacancy).
         rental_occupancy_rate = (config.custom_assumptions or {}).get(
@@ -1177,7 +1596,9 @@ class FireProjectionsEngine:
         # "property_sales" key — keep byte-for-byte behavior.
         taxable_cfg = (config.custom_assumptions or {}).get("taxable_pool", {})
         taxable = float(taxable_cfg.get("starting_balance", 0) or 0)
-        taxable_rate_m = (taxable_cfg.get("return_rate", 0.065) or 0.0) / 12  # real annual → monthly
+        taxable_rate_m = (
+            taxable_cfg.get("return_rate", default_real_return) or 0.0
+        ) / 12  # real annual → monthly
         property_sales = (config.custom_assumptions or {}).get("property_sales", []) or []
         # use_generic_sales gates ONLY the property-sale mechanics (legacy-vs-generic
         # sale paths, burn deltas, event suppression, markers). It does NOT gate the
@@ -1194,11 +1615,20 @@ class FireProjectionsEngine:
         # Grows at its own REAL rate (default = the IRA growth rate: same index,
         # never taxed on the way out). Drawn LAST in the waterfall — a tax-free
         # dollar is worth more than any other dollar, so it is the last one spent.
-        # No age gate: contribution basis is withdrawable at any age, earnings are
-        # not, and the engine cannot tell them apart — the user decides what balance
-        # to expose here. No RMDs (owner Roth IRAs have none).
+        # Before 59½, withdrawals are limited to explicitly configured contribution
+        # basis plus conversions whose five-year clocks have expired. This avoids
+        # silently treating Roth earnings or HSA dollars as early-retirement cash.
+        # No RMDs (owner Roth IRAs have none).
         roth_cfg = (config.custom_assumptions or {}).get("roth_pool", {}) or {}
         roth = float(roth_cfg.get("starting_balance", 0) or 0)
+        roth_accessible_basis = min(
+            roth, float(savings_settings["starting_roth_basis"]),
+        )
+        hsa_qualified_balance = min(
+            max(0.0, roth - roth_accessible_basis),
+            float(savings_settings["starting_hsa_qualified_balance"]),
+        )
+        roth_conversion_vintages: list[tuple[int, float]] = []
         _roth_rate = roth_cfg.get("return_rate")
         roth_rate_m = (ira_growth_rate if _roth_rate is None else float(_roth_rate)) / 12  # real annual → monthly
         sales_by_month: dict[int, list[dict]] = {}
@@ -1236,8 +1666,12 @@ class FireProjectionsEngine:
         primary_sold = False
         income_prop_sold = False
         primary_mortgage_eliminated = False
+        primary_mortgage_paid_off_naturally = False
 
-        # Real estate equity tracking — partition by fire_role
+        # Real estate equity tracking — partition by fire_role. When complete
+        # primary-mortgage terms are configured, track the gross home value and
+        # amortizing loan separately; otherwise preserve the legacy net-equity
+        # growth path.
         # sell_candidate + sell_with_property = secondary property (sold via cashflow event)
         # primary_residence + primary_mortgage = primary property
         # income_producing = income property
@@ -1247,33 +1681,87 @@ class FireProjectionsEngine:
         re_secondary = 0
         re_primary = 0
         re_income_prop = 0
-        for acct in result.scalars().all():
-            bal = acct.current_balance if acct.is_asset else -acct.current_balance
+        primary_home_value = 0
+        primary_mortgage_balance = 0
+        projection_accounts = list(result.scalars().all())
+        for acct in projection_accounts:
+            bal = acct.current_balance if acct.is_asset else -abs(acct.current_balance)
             role = (acct.fire_role or "").lower().strip()
             if role in ("sell_candidate", "sell_with_property"):
                 re_secondary += bal
-            elif role in ("primary_residence", "primary_mortgage"):
+            elif role == "primary_residence":
                 re_primary += bal
+                if acct.is_asset:
+                    primary_home_value += acct.current_balance
+            elif role == "primary_mortgage":
+                re_primary += bal
+                if not acct.is_asset:
+                    primary_mortgage_balance += abs(acct.current_balance)
             elif role == "income_producing":
                 re_income_prop += bal
         re_secondary = _cents_to_dollars(re_secondary)
         re_primary = _cents_to_dollars(re_primary)
         re_income_prop = _cents_to_dollars(re_income_prop)
+        primary_home_value = _cents_to_dollars(primary_home_value)
+        primary_mortgage_balance = _cents_to_dollars(primary_mortgage_balance)
+        mortgage_terms_configured = bool(
+            primary_home_value > 0
+            and primary_mortgage_balance > 0
+            and primary_property_mortgage_pi > 0
+            and primary_property_mortgage_rate > 0
+            and primary_property_mortgage_payoff_date is not None
+        )
+        if mortgage_terms_configured:
+            re_primary = primary_home_value - primary_mortgage_balance
         re_equity = re_secondary + re_primary + re_income_prop
         secondary_sold = False
         illiquid = breakdown.illiquid_private
 
         # Key month offsets (from today)
         months_to_59_5 = max(0, int((dob + relativedelta(years=59, months=6) - today).days / 30.44))
-
-        # SS from config — claim age is configurable (default 62 = early)
-        ss_monthly_dollars = _cents_to_dollars(config.social_security_monthly or 0)
-        ss_amount = ss_monthly_dollars * ss_early_reduction
-        months_to_ss = max(0, int((dob + relativedelta(years=ss_claim_age) - today).days / 30.44))
-        ss_start_month = months_to_ss
-
+        household_settings = _household_settings(config)
+        months_to_ss = max(0, int((
+            dob + relativedelta(years=ss_claim_age) - today
+        ).days / 30.44))
+        ss_chart_events = [{
+            "month": months_to_ss,
+            "age": float(ss_claim_age),
+            "label": (
+                "Adult 1 SS"
+                if household_settings["adult_2_dob"]
+                else f"SS at {ss_claim_age}"
+            ),
+            "color": "#00d4aa",
+        }]
+        adult_2_dob = household_settings["adult_2_dob"]
+        if isinstance(adult_2_dob, dt_lib.date):
+            adult_2_ss_month = max(0, int((
+                adult_2_dob + relativedelta(years=ss_claim_age) - today
+            ).days / 30.44))
+            ss_chart_events.append({
+                "month": adult_2_ss_month,
+                "age": round(current_age + adult_2_ss_month / 12, 1),
+                "label": "Adult 2 SS",
+                "color": "#00d4aa",
+            })
+        # ``end_age`` is an explicit chart horizon (expressed as Adult 1's
+        # age); full-lifetime solvency is handled by the lifetime and Monte
+        # Carlo projections using the later household lifespan.
         total_months = int((end_age - current_age) * 12)
         ira_b_monthly_growth = ira_growth_rate / 12
+        tax_funding_by_year = await self._get_tax_funding_by_year(
+            config,
+            max(1, (today + relativedelta(months=total_months)).year - today.year + 1),
+            scenario_id,
+        )
+        mortgage_payoff_month = None
+        if mortgage_terms_configured and primary_property_mortgage_payoff_date:
+            mortgage_payoff_month = max(
+                0,
+                (primary_property_mortgage_payoff_date.year - today.year) * 12
+                + primary_property_mortgage_payoff_date.month
+                - today.month,
+            )
 
         # Load cashflow events for injection into projection.
         # A generic property sale "owns" its property: suppress any legacy
@@ -1296,19 +1784,28 @@ class FireProjectionsEngine:
             cashflow_events, today, total_months, skip=_sale_suppresses,
         )
 
-        # Build income source schedule (non-salary, by month offset from today)
+        # Build the declared income schedule. Employment income continues until
+        # the configured retirement date; recurring retirement income continues
+        # according to each source's own date window.
+        retirement_date = self._get_retirement_date(config)
+
         def _source_income_at_month(m: int) -> float:
-            """Monthly non-salary income from active sources at month offset m."""
+            """Monthly income from active sources at month offset m."""
             target = today + relativedelta(months=m)
             total = 0.0
             for src in sources:
-                if src.income_type.value in ("salary", "bonus", "side_hustle"):
+                if (
+                    src.income_type.value in ("salary", "bonus", "side_hustle")
+                    and retirement_date
+                    and target >= retirement_date
+                    and not src.end_date
+                ):
                     continue
                 if src.start_date and target < src.start_date:
                     continue
                 if src.end_date and target > src.end_date:
                     continue
-                monthly = src.annual_amount / 12.0 / 100.0  # cents to dollars/mo
+                monthly = projection_annual_amount_cents(src) / 12.0 / 100.0
                 # Apply occupancy haircut to matched rental sources (every rental
                 # source when occupancy_source_match is empty)
                 if (src.income_type.value == "rental"
@@ -1320,6 +1817,36 @@ class FireProjectionsEngine:
                 total += monthly
             return total
 
+        def _employment_active_on(target: date) -> bool:
+            for src in sources:
+                if src.income_type.value not in ("salary", "bonus", "side_hustle"):
+                    continue
+                if retirement_date and target >= retirement_date and not src.end_date:
+                    continue
+                if src.start_date and target < src.start_date:
+                    continue
+                if src.end_date and target > src.end_date:
+                    continue
+                return True
+            return False
+
+        def _employment_active_at_month(m: int) -> bool:
+            return _employment_active_on(today + relativedelta(months=m))
+
+        contribution_month_counts: dict[int, int] = {}
+
+        def _contribution_months_in_year(year: int) -> int:
+            if year not in contribution_month_counts:
+                contribution_month_counts[year] = sum(
+                    1
+                    for month in range(1, 13)
+                    if _contribution_policy_active(
+                        savings_settings, date(year, month, 1),
+                    )
+                    and _employment_active_on(date(year, month, 1))
+                )
+            return contribution_month_counts[year]
+
         points: list[WealthPoolPoint] = []
         chart_events: list[dict] = []
         cash_zero_month = None
@@ -1329,12 +1856,37 @@ class FireProjectionsEngine:
             age = current_age + m / 12.0
             dt = today + relativedelta(months=m)
 
+            matured = sum(
+                amount for available_month, amount in roth_conversion_vintages
+                if available_month <= m
+            )
+            roth_accessible_basis = min(
+                max(0.0, roth - hsa_qualified_balance),
+                roth_accessible_basis + matured,
+            )
+            roth_conversion_vintages = [
+                (available_month, amount)
+                for available_month, amount in roth_conversion_vintages
+                if available_month > m
+            ]
+
+            if (
+                mortgage_payoff_month is not None
+                and m >= mortgage_payoff_month
+                and not primary_sold
+                and not primary_mortgage_eliminated
+            ):
+                primary_mortgage_balance = 0.0
+                primary_mortgage_eliminated = True
+                primary_mortgage_paid_off_naturally = True
+
             # --- Income (non-IRA) ---
             income = _source_income_at_month(m)
 
-            # Social Security
-            if m >= ss_start_month:
-                income += ss_amount
+            # The combined estimate is timed independently for each adult.
+            income += _cents_to_dollars(
+                _household_social_security_monthly_cents(config, dt)
+            )
 
             # RRSP/RRIF drawdown — tracked as visible pool, not lumped into income
             rrsp_draw = 0.0
@@ -1520,6 +2072,9 @@ class FireProjectionsEngine:
                     # (adjusted by occupancy rate — only lose what we were actually earning)
                     income -= sauvie_monthly_income_lost * rental_occupancy_rate
 
+            if primary_mortgage_paid_off_naturally and use_generic_sales:
+                base_expenses = max(0.0, base_expenses - primary_property_mortgage_pi)
+
             # Spending phases (Blanchett 2013): go-go / slow-go / no-go
             if age >= spending_phase_floor_age:
                 spending_mult = spending_phase_floor   # no-go: 75% default
@@ -1527,11 +2082,48 @@ class FireProjectionsEngine:
                 spending_mult = spending_phase_slow    # slow-go: 85% default
             else:
                 spending_mult = 1.0                    # go-go: 100%
-            expenses = base_expenses * spending_mult
+            spending_mult *= _household_survivor_spending_multiplier(config, dt)
+            if (
+                mortgage_terms_configured
+                and not primary_sold
+                and not primary_mortgage_eliminated
+            ):
+                # P&I is a fixed contractual payment; phase reductions apply
+                # only to the rest of the household budget while it is active.
+                other_expenses = max(0.0, base_expenses - primary_property_mortgage_pi)
+                expenses = other_expenses * spending_mult + primary_property_mortgage_pi
+            else:
+                expenses = base_expenses * spending_mult
 
-            # Healthcare costs (pre-Medicare only, not in base spending)
-            if healthcare_monthly > 0 and age < medicare_age:
-                expenses += healthcare_monthly
+            # Extra healthcare is not part of the base spending budget. It
+            # changes at Medicare instead of disappearing entirely.
+            expenses += _cents_to_dollars(
+                _healthcare_monthly_cents_at_date(config, dt)
+            )
+
+            modeled_taxes = tax_funding_by_year.get(dt.year, 0.0) / 12
+            expenses += modeled_taxes
+            hsa_eligible_remaining = min(
+                hsa_qualified_balance,
+                _cents_to_dollars(_healthcare_monthly_cents_at_date(config, dt)),
+            )
+
+            # Model both workers' retirement saving as a transfer from wages:
+            # it reduces spendable cash while increasing the matching account.
+            contribution_401k = 0.0
+            contribution_roth = 0.0
+            contribution_months = _contribution_months_in_year(dt.year)
+            if (
+                contribution_months > 0
+                and _employment_active_at_month(m)
+                and _contribution_policy_active(savings_settings, dt)
+            ):
+                contribution_401k = (
+                    float(savings_settings["annual_401k"]) / contribution_months
+                )
+                contribution_roth = (
+                    float(savings_settings["annual_roth"]) / contribution_months
+                )
 
             # --- IRA-A: grows + SEPP draws ---
             # IRA-A is invested (same growth rate as IRA-B) but has fixed SEPP withdrawals
@@ -1547,6 +2139,7 @@ class FireProjectionsEngine:
 
             # --- IRA-B: grows, accessible after 59½ ---
             ira_b *= (1 + ira_b_monthly_growth)
+            ira_b += contribution_401k
 
             # --- Taxable brokerage: grows at its own (market) real rate ---
             if taxable > 0:
@@ -1555,6 +2148,10 @@ class FireProjectionsEngine:
             # --- Roth: grows tax-free at its own real rate ---
             if roth > 0:
                 roth *= (1 + roth_rate_m)
+            roth += contribution_roth
+            roth_accessible_basis = min(
+                roth, roth_accessible_basis + contribution_roth,
+            )
 
             # --- Drawdown waterfall ---
             # Order: taxable brokerage → IRA-B (after 59½) → forced RMDs → Roth.
@@ -1613,11 +2210,23 @@ class FireProjectionsEngine:
 
             # --- Roth: last resort on whatever gap survives (fire-master#13) ---
             roth_draw = 0.0
-            if roth > 0:
+            roth_limit = (
+                roth if m >= months_to_59_5
+                else min(
+                    roth,
+                    roth_accessible_basis + hsa_eligible_remaining,
+                )
+            )
+            if roth_limit > 0:
                 gap_r = expenses - income - (ira_draw - rmd_redeposit) - rrsp_draw - taxable_draw
                 if gap_r > 0 and cash < gap_r * ira_b_draw_threshold_months:
-                    roth_draw = min(gap_r, roth)
+                    roth_draw = min(gap_r, roth_limit)
                     roth -= roth_draw
+                    if m < months_to_59_5:
+                        hsa_draw = min(roth_draw, hsa_eligible_remaining)
+                        hsa_eligible_remaining -= hsa_draw
+                        hsa_qualified_balance -= hsa_draw
+                        roth_accessible_basis -= roth_draw - hsa_draw
 
             # Cash repair: negative cash is genuine bridge stress only while
             # no drawable pool exists — nobody runs checking negative for
@@ -1632,11 +2241,61 @@ class FireProjectionsEngine:
                 taxable -= repair
                 taxable_draw += repair
                 deficit -= repair
-            if deficit > 0 and roth > 0:
-                repair = min(deficit, roth)
+            roth_limit = (
+                roth if m >= months_to_59_5
+                else min(
+                    roth,
+                    roth_accessible_basis + hsa_eligible_remaining,
+                )
+            )
+            if deficit > 0 and roth_limit > 0:
+                repair = min(deficit, roth_limit)
                 roth -= repair
                 roth_draw += repair
                 deficit -= repair
+                if m < months_to_59_5:
+                    hsa_draw = min(repair, hsa_eligible_remaining)
+                    hsa_eligible_remaining -= hsa_draw
+                    hsa_qualified_balance -= hsa_draw
+                    roth_accessible_basis -= repair - hsa_draw
+
+            # Start one conversion-ladder rung per retirement year. Converted
+            # principal remains locked for the configured wait and therefore
+            # cannot repair today's cash gap.
+            retirement_month = None
+            if retirement_date:
+                retirement_month = max(
+                    0,
+                    (retirement_date.year - today.year) * 12
+                    + retirement_date.month - today.month,
+                )
+            ladder_anniversary = (
+                retirement_month is not None
+                and m >= retirement_month
+                and (m - retirement_month) % 12 == 0
+            )
+            if (
+                bool(savings_settings["ladder_enabled"])
+                and ladder_anniversary
+                and age + int(savings_settings["ladder_wait_years"]) < 59.5
+                and ira_b > 0
+            ):
+                configured_conversion = float(
+                    savings_settings["ladder_annual_conversion"],
+                )
+                annual_gap = max(
+                    0.0, (expenses - modeled_taxes - income) * 12,
+                )
+                conversion = min(
+                    configured_conversion or annual_gap, ira_b,
+                )
+                if conversion > 0:
+                    ira_b -= conversion
+                    roth += conversion
+                    roth_conversion_vintages.append((
+                        m + int(savings_settings["ladder_wait_years"]) * 12,
+                        conversion,
+                    ))
 
             # --- Net cash flow ---
             # Cash earns tiered returns:
@@ -1653,7 +2312,8 @@ class FireProjectionsEngine:
                 cash_interest = max(0, cash) * (savings_rate / 12)
             # ira_draw includes any RMD redeposit, which went to taxable, not cash.
             net = (income + ira_draw - rmd_redeposit + rrsp_draw + taxable_draw
-                   + roth_draw + cash_interest - expenses)
+                   + roth_draw + cash_interest - expenses
+                   - contribution_401k - contribution_roth)
             cash += net
 
             if cash <= 0 and cash_zero_month is None:
@@ -1662,7 +2322,21 @@ class FireProjectionsEngine:
             # RE appreciation (configurable via projection.re_appreciation_rate)
             re_monthly_appr = re_appreciation_rate / 12
             re_income_prop *= (1 + re_monthly_appr)
-            re_primary *= (1 + re_monthly_appr)
+            if mortgage_terms_configured:
+                if not primary_sold:
+                    primary_home_value *= (1 + re_monthly_appr)
+                    if not primary_mortgage_eliminated and primary_mortgage_balance > 0:
+                        monthly_rate = primary_property_mortgage_rate / 12
+                        interest = primary_mortgage_balance * monthly_rate
+                        principal = max(0.0, primary_property_mortgage_pi - interest)
+                        primary_mortgage_balance = max(
+                            0.0, primary_mortgage_balance - principal,
+                        )
+                    re_primary = primary_home_value - primary_mortgage_balance
+                else:
+                    re_primary = 0.0
+            else:
+                re_primary *= (1 + re_monthly_appr)
             re_secondary *= (1 + re_monthly_appr)
             re_equity = re_income_prop + re_primary + re_secondary
 
@@ -1693,6 +2367,7 @@ class FireProjectionsEngine:
                     total=round(cash + max(0, ira_a) + max(0, ira_b) + rrsp_val + re_val + ill_val + tax_val + roth_val, 0),
                     income=round(income, 0),
                     expenses=round(expenses, 0),
+                    modeled_taxes=round(modeled_taxes, 0),
                     ira_draw=round(ira_draw, 0),
                     rmd_redeposit=round(rmd_redeposit, 0),
                     rrsp_draw=round(rrsp_draw, 0),
@@ -1730,10 +2405,23 @@ class FireProjectionsEngine:
                 {"month": sepp_start_month, "age": round(current_age + sepp_start_month / 12, 1),
                  "label": "SEPP starts", "color": "#4d8eff"},
             )
-        chart_events.extend([
+        if (
+            mortgage_payoff_month is not None
+            and mortgage_payoff_month < total_months
+            and not primary_sold
+        ):
+            chart_events.append(
+                {
+                    "month": mortgage_payoff_month,
+                    "age": round(current_age + mortgage_payoff_month / 12, 1),
+                    "label": "Home mortgage paid off",
+                    "color": "#00d4aa",
+                },
+            )
+        chart_events.append(
             {"month": months_to_59_5, "age": 59.5, "label": "59\u00BD", "color": "#4d8eff"},
-            {"month": months_to_ss, "age": float(ss_claim_age), "label": f"SS at {ss_claim_age}", "color": "#00d4aa"},
-        ])
+        )
+        chart_events.extend(ss_chart_events)
         if enforce_rmd and (ira_a_start or ira_b_start) and current_age < rmd_start_age < end_age:
             months_to_rmd = max(0, int((dob + relativedelta(years=rmd_start_age) - today).days / 30.44))
             chart_events.append(
@@ -1768,6 +2456,14 @@ class FireProjectionsEngine:
         today = date.today()
 
         monthly_burn = annual_spending_cents / 12.0 / 100.0
+        retirement_date = self._get_retirement_date(config)
+        if retirement_date is not None and today >= retirement_date:
+            if config.date_of_birth:
+                monthly_burn += _cents_to_dollars(
+                    _healthcare_monthly_cents_at_date(config, today)
+                )
+            else:
+                monthly_burn += _cents_to_dollars(config.healthcare_monthly_cost or 0)
 
         # Recurring cashflow events active THIS month are part of the "now"
         # snapshot (fire-master#17): income events join the streams (temp when
@@ -1808,7 +2504,7 @@ class FireProjectionsEngine:
                 continue
             if src.end_date and today > src.end_date:
                 continue
-            mo = src.annual_amount / 12.0 / 100.0
+            mo = projection_annual_amount_cents(src) / 12.0 / 100.0
             is_temp = src.end_date is not None
             label = f"{src.name} (temp)" if is_temp else src.name
             streams.append(IncomeStream(label=label, monthly=round(mo, 0), color=colors[ci % len(colors)]))

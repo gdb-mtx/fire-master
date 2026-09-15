@@ -2,12 +2,14 @@ import { useMemo, useState, useRef, useEffect } from "react";
 import { Link } from "react-router";
 import {
   useActivateScenario,
-  useBridgeProjection,
   useBridgeStatus,
   useFireNumber,
   useFireReadiness,
   useFireTimeline,
+  useIncomeSources,
   useMilestones,
+  useMonteCarlo,
+  useRetirementAgeAnalysis,
   useScenarios,
   useSpendingSensitivity,
   useWealthProjection,
@@ -18,7 +20,7 @@ import { useEventMarkers } from "../components/charts/EventMarkers";
 import { useIsMobile } from "../hooks/useIsMobile";
 import type { EventMarkerGroup } from "../components/charts/EventMarkers";
 import { TOOLTIP_STYLE } from "../utils/theme";
-import type { Milestone, SpendingSensitivity, WealthPoolProjection } from "../types/fire";
+import type { Milestone, SpendingSensitivity } from "../types/fire";
 import {
   Area,
   XAxis,
@@ -29,7 +31,6 @@ import {
   CartesianGrid,
   Line,
   ComposedChart,
-  ReferenceArea,
 } from "recharts";
 
 function StatCard({
@@ -179,187 +180,6 @@ function MilestoneTimeline({ milestones, currentAge }: { milestones: Milestone[]
   );
 }
 
-function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["points"]; events: WealthPoolProjection["events"]; currentCash?: number }) {
-  const bridgeData = useMemo(() => {
-    // Engine points are END-of-month states. Display month m+1 so x = months
-    // elapsed, and prepend a true t0 ("Now" = today's actual cash) so this chart
-    // opens on the same number as the Runway page.
-    const shifted = points
-      .filter((p) => p.month != null && p.month <= 60)
-      .map((p) => ({
-        ...p,
-        month: (p.month ?? 0) + 1,
-        // Mirrors the engine's net line: pool draws that reach cash, minus the
-        // RMD excess that was redeposited to taxable instead of spent.
-        net:
-          p.income +
-          p.ira_draw -
-          (p.rmd_redeposit ?? 0) +
-          p.rrsp_draw +
-          (p.taxable_draw ?? 0) +
-          (p.roth_draw ?? 0) +
-          p.cash_interest -
-          p.expenses,
-      }));
-    if (shifted.length === 0) return shifted;
-    if (currentCash == null) return shifted;
-    return [
-      { ...shifted[0], month: 0, cash: currentCash, net: 0, income: 0, expenses: 0, event: undefined },
-      ...shifted,
-    ];
-  }, [points, currentCash]);
-
-  if (bridgeData.length === 0) return null;
-
-  const minCash = Math.min(...bridgeData.map((p) => p.cash));
-  const minCashMonth = bridgeData.find((p) => p.cash === minCash);
-  const lastPoint = bridgeData[bridgeData.length - 1];
-
-  // Significant one-time events for markers. Skip month 0-1: near-term
-  // one-off clutter obscures the meaningful bridge-period markers.
-  // Amounts are embedded in the backend label strings (e.g. "Sell Primary
-  // (+$610,000→taxable)") — display verbatim, no parsing.
-  const markerGroups = useMemo<EventMarkerGroup[]>(
-    () =>
-      bridgeData
-        .filter((p) => p.event && (p.month ?? 0) >= 2)
-        .map((p) => ({
-          x: p.month!,
-          y: p.cash,
-          events: p.event!.split("; ").map((label) => ({ label })),
-        })),
-    [bridgeData],
-  );
-
-  const { markers: eventMarkers, overlay: eventOverlay, wrapperProps: chartWrapperProps } =
-    useEventMarkers(markerGroups, {
-      defaultColor: "var(--yellow)",
-      xLabel: (m) => `Month ${m}`,
-    });
-
-  return (
-    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-[var(--text-secondary)]">
-          Bridge Period
-          <span className="ml-2 text-[10px] font-normal">first 60 months</span>
-        </h3>
-        <div className="flex items-center gap-5">
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">Start</span>
-            <span className="text-xs font-mono text-[var(--green)]">{fmtCompact(bridgeData[0]?.cash ?? 0)}</span>
-          </div>
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">Lowest</span>
-            <span className="text-xs font-mono" style={{ color: minCash > 20000 ? "var(--yellow)" : "var(--red)" }}>
-              {fmtCompact(minCash)} <span className="text-[var(--text-secondary)]">mo {minCashMonth?.month}</span>
-            </span>
-          </div>
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">At End</span>
-            <span className="text-xs font-mono text-[var(--green)]">{fmtCompact(lastPoint?.cash ?? 0)}</span>
-          </div>
-        </div>
-      </div>
-
-      <div {...chartWrapperProps}>
-      <ResponsiveContainer width="100%" height={400}>
-        <ComposedChart data={bridgeData} margin={{ top: 30, right: 10, left: 10, bottom: 0 }}>
-          <defs>
-            <linearGradient id="gradBridgeCash" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#2e8b6e" stopOpacity={0.6} />
-              <stop offset="100%" stopColor="#2e8b6e" stopOpacity={0.05} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(42,42,62,0.5)" />
-          <XAxis
-            dataKey="month"
-            stroke="#5c5c6a"
-            tick={{ fontSize: 10, fill: "#5c5c6a" }}
-            tickFormatter={(m) => {
-              if (m === 0) return "Now";
-              if (m === 12) return "Yr 1";
-              if (m === 24) return "Yr 2";
-              if (m === 36) return "Yr 3";
-              if (m === 48) return "Yr 4";
-              if (m === 59) return "Yr 5";
-              return "";
-            }}
-            interval={0}
-            ticks={[0, 12, 24, 36, 48, 59]}
-          />
-          <YAxis
-            stroke="#5c5c6a"
-            tick={{ fontSize: 10, fill: "#5c5c6a" }}
-            tickFormatter={fmtAxis}
-            width={55}
-          />
-          <Tooltip
-            {...TOOLTIP_STYLE}
-            labelFormatter={(m) => `Month ${m}`}
-            formatter={(value, name) => {
-              const labels: Record<string, string> = {
-                cash: "Cash Balance",
-                net: "Net Monthly",
-                ira_draw: "SEPP Draw",
-                rrsp_draw: "RRIF Draw",
-                cash_interest: "Cash Interest",
-                income: "Income",
-                expenses: "Expenses",
-              };
-              return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
-            }}
-          />
-
-          {/* SEPP/RRIF activation zone */}
-          <ReferenceArea x1={12} x2={59} fill="var(--blue)" fillOpacity={0.03} />
-
-          {/* Zero line */}
-          <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.5} />
-
-          {/* Event markers */}
-          {eventMarkers}
-
-          {/* SEPP start marker */}
-          <ReferenceLine
-            x={12}
-            stroke="var(--purple, #7a6aaa)"
-            strokeDasharray="4 4"
-            strokeOpacity={0.5}
-            label={{ value: "SEPP+RRIF", position: "top", fill: "var(--purple, #7a6aaa)", fontSize: 9 }}
-          />
-
-          {/* Cash balance area */}
-          <Area type="monotone" dataKey="cash" stroke="var(--green)" strokeWidth={2} fill="url(#gradBridgeCash)" dot={false} />
-
-          {/* Net monthly flow line */}
-          <Line type="monotone" dataKey="net" stroke="var(--blue)" strokeWidth={1} strokeDasharray="4 3" dot={false} strokeOpacity={0.6} />
-
-        </ComposedChart>
-      </ResponsiveContainer>
-      {eventOverlay}
-      </div>
-
-      <div className="flex items-center gap-5 mt-3 pt-3 border-t border-[var(--border)]">
-        {[
-          { label: "Cash Balance", color: "var(--green)" },
-          { label: "Net Monthly", color: "var(--blue)", dashed: true },
-          { label: "Events", color: "var(--yellow)", dot: true },
-          { label: "SEPP+RRIF zone", color: "var(--purple, #7a6aaa)", dashed: true },
-        ].map((l) => (
-          <div key={l.label} className="flex items-center gap-1.5">
-            <div
-              className={l.dot ? "w-2 h-2 rounded-full" : "w-3 h-[3px] rounded-full"}
-              style={{ backgroundColor: l.color, opacity: l.dashed ? 0.6 : 0.8 }}
-            />
-            <span className="text-[10px] text-[var(--text-secondary)]">{l.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function ScenarioSelector() {
   const { data: scenarios } = useScenarios();
   const activate = useActivateScenario();
@@ -446,6 +266,11 @@ function SpendingSensitivityCard({
 
   // Recompute non-housing when user adjusts total budget
   const nonHousing = b ? displayBase - b.primary_property_all_in - b.income_property_cost - b.secondary_property_cost : 0;
+  const mortgagePayoffLabel = b?.primary_property_mortgage_payoff_date
+    ? new Date(`${b.primary_property_mortgage_payoff_date}T12:00:00`).toLocaleDateString(
+        "en-US", { month: "short", year: "numeric" },
+      )
+    : null;
 
   return (
     <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
@@ -502,7 +327,12 @@ function SpendingSensitivityCard({
               <span className="font-mono text-[var(--text-primary)]">${b.primary_property_all_in.toLocaleString()}</span>
             </div>
             <div className="flex justify-between pl-3">
-              <span className="text-[var(--text-secondary)] opacity-60">P&I ${b.primary_property_pi.toLocaleString()} + other ${(b.primary_property_all_in - b.primary_property_pi).toLocaleString()}</span>
+              <span className="text-[var(--text-secondary)] opacity-60">
+                P&amp;I ${b.primary_property_pi.toLocaleString()}
+                {b.primary_property_mortgage_rate_pct > 0 && ` · ${b.primary_property_mortgage_rate_pct}%`}
+                {mortgagePayoffLabel && ` · final payment ${mortgagePayoffLabel}`}
+                {b.primary_property_all_in > b.primary_property_pi && ` + other ${(b.primary_property_all_in - b.primary_property_pi).toLocaleString()}`}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-[var(--text-secondary)]">Income property</span>
@@ -520,6 +350,7 @@ function SpendingSensitivityCard({
             </div>
           </div>
           <div className="mt-3 text-[10px] text-[var(--text-secondary)] opacity-60 leading-relaxed">
+            {mortgagePayoffLabel && <>Mortgage P&amp;I drops from spending after {mortgagePayoffLabel}. </>}
             After primary property sale: −${b.primary_property_all_in.toLocaleString()} +${b.post_sale_rent.toLocaleString()} rent.
             After secondary sells: −${b.secondary_property_cost.toLocaleString()}.
             Healthcare ${healthcare.toLocaleString()}/mo added pre-65, drops at Medicare.
@@ -590,6 +421,32 @@ export default function RetirementPage() {
   const { data: milestones } = useMilestones();
   const { data: bridge } = useBridgeStatus();
   const { data: sensitivity } = useSpendingSensitivity();
+  const { data: incomeSources } = useIncomeSources();
+  const coreReady = Boolean(fireNum && readiness);
+  const { data: monteCarlo, isLoading: loadingMC } = useMonteCarlo(
+    1000,
+    42,
+    coreReady,
+  );
+  const {
+    data: retirementAges,
+    isLoading: loadingRetirementAges,
+    isFetching: fetchingRetirementAges,
+    isError: retirementAgeError,
+    refetch: retryRetirementAges,
+  } =
+    useRetirementAgeAnalysis(1000, 42, 85, coreReady && Boolean(monteCarlo));
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const currentEmploymentSources = (incomeSources ?? []).filter(
+    (source) =>
+      ["salary", "bonus", "side_hustle"].includes(source.income_type)
+      && (!source.start_date || source.start_date <= todayIso)
+      && (!source.end_date || source.end_date >= todayIso),
+  );
+  const grossEmploymentIncome = currentEmploymentSources
+    .reduce((total, source) => total + source.annual_amount, 0);
+  const projectedEmploymentIncome = currentEmploymentSources
+    .reduce((total, source) => total + source.projection_annual_amount, 0);
 
   // Spending sensitivity state — ephemeral, not persisted
   const [baseOverride, setBaseOverride] = useState<number | null>(null);
@@ -605,7 +462,7 @@ export default function RetirementPage() {
     : undefined;
 
   const { data: wealthProjection, isLoading: loadingWealth } = useWealthProjection(spendingOverrideCents);
-  const { data: bridgeProjection } = useBridgeProjection(spendingOverrideCents);
+  const hasSeppPlan = (wealthProjection?.sepp_monthly ?? 0) > 0;
 
   // Wealth chart data, hoisted so the milestone markers can snap to the
   // chart's own x values (category axis requires exact matches — the old
@@ -617,10 +474,37 @@ export default function RetirementPage() {
         cash: Math.max(0, p.cash), // clamp for stacked areas
         taxable: Math.max(0, p.taxable ?? 0), // clamp for stacked areas
         roth: Math.max(0, p.roth ?? 0),
-        annual_spending: p.expenses * 12,
+        annual_outflow: p.expenses * 12,
+        annual_taxes: (p.modeled_taxes ?? 0) * 12,
       })),
     [wealthProjection],
   );
+
+  const fanChartData = useMemo(() => {
+    if (!monteCarlo?.percentile_curves) return [];
+    return monteCarlo.percentile_curves.map((p) => ({
+      age: Math.round(p.age),
+      p10: p.p10,
+      p25: p.p25,
+      p50: p.p50,
+      p75: p.p75,
+      p90: p.p90,
+      band_10_25: Math.max(0, p.p25 - p.p10),
+      band_25_50: Math.max(0, p.p50 - p.p25),
+      band_50_75: Math.max(0, p.p75 - p.p50),
+      band_75_90: Math.max(0, p.p90 - p.p75),
+    }));
+  }, [monteCarlo]);
+
+  const selectedRetirementPoint = useMemo(() => {
+    const selectedAge = timeline?.moderate.retirement_age;
+    if (selectedAge == null || fanChartData.length === 0) return null;
+    return fanChartData.reduce((closest, point) =>
+      Math.abs(point.age - selectedAge) < Math.abs(closest.age - selectedAge)
+        ? point
+        : closest,
+    );
+  }, [fanChartData, timeline]);
 
   const wealthMarkerGroups = useMemo<EventMarkerGroup[]>(() => {
     if (!wealthProjection || wealthChartData.length === 0) return [];
@@ -659,14 +543,21 @@ export default function RetirementPage() {
     );
   }
 
-  const monthsLeft = timeline?.months_remaining;
-  const yearsLeft = monthsLeft != null ? Math.floor(monthsLeft / 12) : null;
-  const monthsRemainder = monthsLeft != null ? monthsLeft % 12 : null;
-  const onTrack = timeline?.on_track ?? false;
-
   const breakdown = fireNum.net_worth_breakdown;
   const accessibleNW = fireNum.accessible_net_worth;
   const accessiblePct = fireNum.accessible_progress_pct;
+  const confidence90 = retirementAges?.confidence_ages.find(
+    (point) => point.confidence === 90,
+  );
+  const selectedAge = timeline?.moderate.retirement_age;
+  const selectedMedian = selectedRetirementPoint?.p50;
+  const selectedGap = selectedMedian != null ? fireNum.fire_number - selectedMedian : null;
+  const successColor =
+    (monteCarlo?.success_rate ?? 0) >= 90
+      ? "var(--green)"
+      : (monteCarlo?.success_rate ?? 0) >= 75
+        ? "var(--yellow)"
+        : "var(--red)";
 
   return (
     <Layout>
@@ -692,55 +583,133 @@ export default function RetirementPage() {
           </div>
         </div>
 
-        {/* FIRE Countdown Hero */}
-        {timeline ? (
+        {/* Calculated retirement readiness + selected what-if */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div
-            className="bg-[var(--bg-card)] border rounded-lg p-8 text-center card-hero"
+            className="bg-[var(--bg-card)] border rounded-lg p-6 text-center card-hero"
             style={{
-              borderColor: onTrack
+              borderColor: confidence90?.earliest_age != null
                 ? "rgba(0,212,170,0.3)"
-                : "rgba(255,77,106,0.3)",
+                : "rgba(255,192,77,0.3)",
             }}
           >
             <p className="text-xs uppercase tracking-widest text-[var(--text-secondary)] mb-2">
-              Projected Retirement
+              Earliest Modeled FIRE Age
             </p>
-            {monthsLeft != null && monthsLeft > 0 ? (
+            {confidence90?.earliest_age != null ? (
               <div
-                className={`text-5xl font-bold font-mono tracking-tight mb-2 ${onTrack ? "glow-green" : "glow-red"}`}
-                style={{ color: onTrack ? "var(--green)" : "var(--red)" }}
+                className="text-5xl font-bold font-mono tracking-tight mb-2 glow-green"
+                style={{ color: "var(--green)" }}
               >
-                {yearsLeft != null && yearsLeft > 0 && `${yearsLeft}y `}
-                {monthsRemainder != null && `${monthsRemainder}m`}
+                Age {confidence90.earliest_age}
+              </div>
+            ) : loadingRetirementAges || fetchingRetirementAges ? (
+              <div className="text-2xl font-bold font-mono tracking-tight mb-2 text-[var(--text-secondary)]">
+                Calculating…
+              </div>
+            ) : retirementAgeError || !retirementAges ? (
+              <div className="mb-2">
+                <div className="text-2xl font-bold font-mono tracking-tight text-[var(--yellow)]">
+                  Calculation unavailable
+                </div>
+                <button
+                  type="button"
+                  onClick={() => retryRetirementAges()}
+                  className="mt-3 px-3 py-1.5 text-xs rounded border border-[var(--border)] text-[var(--blue)] hover:border-[var(--blue)]"
+                >
+                  Retry calculation
+                </button>
               </div>
             ) : (
-              <div className="text-5xl font-bold font-mono tracking-tight mb-2 text-[var(--green)] glow-green">
-                NOW
+              <div className="text-3xl font-bold font-mono tracking-tight mb-2 text-[var(--yellow)]">
+                After age {retirementAges?.max_tested_age ?? 85}
               </div>
             )}
-            {timeline.projected_retirement_date && (
-              <p className="text-sm text-[var(--text-secondary)]">
-                {new Date(timeline.projected_retirement_date).toLocaleDateString(
-                  "en-US",
-                  { month: "long", year: "numeric" }
-                )}
-                {timeline.moderate.retirement_age && ` (age ${Math.round(timeline.moderate.retirement_age)})`}
-              </p>
-            )}
-          </div>
-        ) : (
-          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-6 text-center">
-            <p className="text-sm text-[var(--text-secondary)] mb-2">
-              Set your date of birth and target retirement age to see projections.
+            <p className="text-sm text-[var(--text-secondary)]">
+              First whole-year age with at least 90% modeled success
             </p>
-            <Link
-              to="/settings"
-              className="text-sm text-[var(--blue)] hover:underline"
-            >
-              Configure FIRE settings
-            </Link>
+            <div className="grid grid-cols-3 gap-2 mt-5 pt-4 border-t border-[var(--border)]">
+              {[80, 90, 95].map((confidence) => {
+                const point = retirementAges?.confidence_ages.find(
+                  (item) => item.confidence === confidence,
+                );
+                return (
+                  <div key={confidence}>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
+                      {confidence}% success
+                    </div>
+                    <div className="text-lg font-mono font-bold text-[var(--text-primary)] mt-1">
+                      {loadingRetirementAges || fetchingRetirementAges
+                        ? "…"
+                        : retirementAgeError || !retirementAges
+                          ? "—"
+                        : point?.earliest_age != null
+                          ? `Age ${point.earliest_age}`
+                          : `>${retirementAges?.max_tested_age ?? 85}`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-[var(--text-secondary)] mt-3">
+              Calculated by rerunning the income, tax, spending, healthcare, and account-access
+              plan from today at each candidate age; {retirementAges?.runs_per_age ?? 1000} paths per age.
+              This includes market uncertainty before retirement, so the threshold is driven by
+              low-tail arrival balances—not by how long the median portfolio lasts after retirement.
+            </p>
           </div>
-        )}
+
+          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-6">
+            <p className="text-xs uppercase tracking-widest text-[var(--text-secondary)] mb-2">
+              Your Selected What-If
+            </p>
+            <div className="flex items-end justify-between gap-4 mb-5">
+              <div>
+                <div className="text-3xl font-bold font-mono text-[var(--text-primary)]">
+                  {selectedAge != null ? `Retire at ${Math.round(selectedAge)}` : "No age selected"}
+                </div>
+                {timeline?.projected_retirement_date && (
+                  <div className="text-xs text-[var(--text-secondary)] mt-1">
+                    {new Date(timeline.projected_retirement_date).toLocaleDateString(
+                      "en-US",
+                      { month: "long", year: "numeric" },
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="text-right">
+                <div className="text-2xl font-bold font-mono" style={{ color: successColor }}>
+                  {monteCarlo ? `${monteCarlo.success_rate}%` : "—"}
+                </div>
+                <div className="text-[10px] text-[var(--text-secondary)]">modeled success</div>
+              </div>
+            </div>
+            <div className="space-y-2 pt-4 border-t border-[var(--border)]">
+              <div className="flex justify-between text-sm">
+                <span className="text-[var(--text-secondary)]">Median spendable assets at retirement</span>
+                <span className="font-mono text-[var(--text-primary)]">
+                  {selectedMedian != null ? fmtCompact(selectedMedian) : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-[var(--text-secondary)]">Portfolio target</span>
+                <span className="font-mono text-[var(--text-primary)]">{fmtCompact(fireNum.fire_number)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-[var(--text-secondary)]">Median gap at retirement</span>
+                <span
+                  className="font-mono"
+                  style={{ color: (selectedGap ?? 0) <= 0 ? "var(--green)" : "var(--yellow)" }}
+                >
+                  {selectedGap != null ? fmtCompact(Math.max(0, selectedGap)) : "—"}
+                </span>
+              </div>
+            </div>
+            <p className="text-[10px] text-[var(--text-secondary)] mt-4">
+              This is a scenario you selected, not the app&rsquo;s recommendation.
+            </p>
+          </div>
+        </div>
 
         {/* Stat Cards — 5 columns with Cash Runway */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
@@ -748,13 +717,13 @@ export default function RetirementPage() {
             label="Cash Runway"
             value={bridge?.cash_runway_months != null ? `${bridge.cash_runway_months}mo` : "—"}
             color={(bridge?.cash_runway_months ?? 0) > 12 ? "var(--green)" : (bridge?.cash_runway_months ?? 0) > 6 ? "var(--yellow)" : "var(--red)"}
-            sub={bridge ? `${fmtCompact(bridge.monthly_deficit)}/mo deficit` : undefined}
+            sub={bridge ? `if work stopped · ${fmtCompact(bridge.monthly_deficit)}/mo` : undefined}
           />
           <StatCard
-            label="FIRE Number"
+            label="Portfolio Target"
             value={fmtCompact(fireNum.fire_number)}
             color="var(--text-primary)"
-            sub={`${fireNum.safe_withdrawal_rate}% SWR`}
+            sub={`${fireNum.safe_withdrawal_rate}% withdrawal rate · ${fmtCompact(fireNum.annual_spending)}/yr`}
           />
           <StatCard
             label="Accessible Net Worth"
@@ -788,6 +757,37 @@ export default function RetirementPage() {
           />
         </div>
 
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4 text-xs text-[var(--text-secondary)] space-y-1">
+          <p>
+            <span className="text-[var(--text-primary)] font-medium">How the target works:</span>{" "}
+            {fmt(fireNum.annual_spending)} gross annual portfolio outflow ÷ {fireNum.safe_withdrawal_rate}%.
+            This does not credit future Social Security or assume you spend the portfolio to zero.
+          </p>
+          {fireNum.taxes_included && (
+            <p>
+              Gross outflow includes {fmt(fireNum.base_annual_spending ?? 0)} after-tax spending,
+              {" "}{fmt(fireNum.healthcare_annual)} pre-Medicare healthcare, and approximately{" "}
+              {fmt(fireNum.estimated_annual_taxes)} of first-full-retirement-year withdrawal taxes.
+            </p>
+          )}
+          <p>
+            Current employment phase: {fmt(grossEmploymentIncome)} gross. The projection receives{" "}
+            {fmt(projectedEmploymentIncome)}/year before any additional modeled tax outflow. RSU
+            compensation is included once, and each dated income phase stops as configured or at
+            retirement.
+          </p>
+          {fireNum.lifetime_spend_down_number != null && (
+            <p>
+              The lower spend-down estimate is {fmt(fireNum.lifetime_spend_down_number)}; it assumes
+              Social Security, declining spending after 70, and principal depletion by life expectancy.
+            </p>
+          )}
+          <p className="text-[var(--yellow)]">
+            Withdrawal taxes are grossed up according to the projected source of funds. Actual taxes
+            will vary with future law, deductions, cost basis, and the withdrawal sequence.
+          </p>
+        </div>
+
         {/* FIRE Progress Bar — Accessible */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
@@ -818,7 +818,8 @@ export default function RetirementPage() {
                 { label: "Liquid", value: breakdown.liquid, color: "var(--green)" },
                 { label: "Retirement", value: breakdown.retirement, color: "var(--blue)" },
                 { label: "Real Estate", value: breakdown.real_estate_equity, color: "var(--yellow)" },
-                { label: "Private Venture", value: breakdown.illiquid_private, color: "var(--orange, #b06830)" },
+                { label: "Education / 529", value: breakdown.education ?? 0, color: "var(--orange, #b06830)" },
+                { label: "Private / Illiquid", value: breakdown.illiquid_private, color: "#a855f7" },
                 { label: "Other", value: breakdown.other, color: "#6b7280" },
               ]
                 .filter((b) => Math.abs(b.value) >= 100)
@@ -847,11 +848,6 @@ export default function RetirementPage() {
           sensitivity={sensitivity}
         />
 
-        {/* Bridge Chart — 60 Month Detail */}
-        {bridgeProjection && bridgeProjection.points.length > 0 && (
-          <BridgeChart points={bridgeProjection.points} events={bridgeProjection.events} currentCash={bridge?.cash_balance} />
-        )}
-
         {/* Wealth Projection — Full Width */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
             <div className="flex items-center justify-between mb-4">
@@ -870,6 +866,12 @@ export default function RetirementPage() {
                 </div>
               )}
             </div>
+            <p className="text-[11px] text-[var(--text-secondary)] mb-3">
+              Employment income stops automatically at your retirement date. Total wealth includes
+              home equity and can rise while cash or brokerage balances are being spent whenever
+              investment growth and mortgage paydown exceed withdrawals. The red outflow line includes
+              living costs and modeled taxes; the orange line isolates those taxes.
+            </p>
             {wealthProjection && wealthChartData.length > 0 ? (
               <>
                 <div {...wealthWrapperProps}>
@@ -932,14 +934,15 @@ export default function RetirementPage() {
                         const labels: Record<string, string> = {
                           real_estate: "Real Estate",
                           illiquid: "Private Venture",
-                          ira_growth: "IRA-B (growth)",
+                          ira_growth: "Traditional retirement",
                           rrsp: "RRSP/RRIF",
-                          ira_sepp: "IRA-A (SEPP)",
+                          ira_sepp: "SEPP IRA (optional)",
                           cash: "Cash (bridge)",
                           taxable: "Taxable brokerage",
                           roth: "Roth (tax-free)",
                           total: "Total",
-                          annual_spending: "Annual Spending",
+                          annual_outflow: "Total portfolio outflow",
+                          annual_taxes: "Modeled taxes",
                         };
                         return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
                       }}
@@ -954,7 +957,7 @@ export default function RetirementPage() {
                     <Area type="monotone" dataKey="ira_growth" stackId="wealth" stroke="var(--blue)" strokeWidth={0} fill="url(#gradIraB)" />
                     <Area type="monotone" dataKey="taxable" stackId="wealth" stroke="#2aa6b8" strokeWidth={0} fill="url(#gradTaxable)" />
                     <Area type="monotone" dataKey="roth" stackId="wealth" stroke="#5b8c3a" strokeWidth={0} fill="url(#gradRoth)" />
-                    <Area type="monotone" dataKey="ira_sepp" stackId="wealth" stroke="var(--purple, #7a6aaa)" strokeWidth={0} fill="url(#gradIraA)" />
+                    {hasSeppPlan && <Area type="monotone" dataKey="ira_sepp" stackId="wealth" stroke="var(--purple, #7a6aaa)" strokeWidth={0} fill="url(#gradIraA)" />}
                     <Area type="monotone" dataKey="rrsp" stackId="wealth" stroke="var(--pink, #9e4a7a)" strokeWidth={0} fill="url(#gradRRSP)" />
                     <Area type="monotone" dataKey="illiquid" stackId="wealth" stroke="var(--orange, #b06830)" strokeWidth={0} fill="url(#gradIlliquid)" />
                     <Area type="monotone" dataKey="real_estate" stackId="wealth" stroke="var(--yellow)" strokeWidth={0} fill="url(#gradRE)" />
@@ -963,7 +966,7 @@ export default function RetirementPage() {
                     {/* Total line on top */}
                     <Line type="monotone" dataKey="total" stroke="#1a1a1e" strokeWidth={2} dot={false} strokeOpacity={0.8} />
 
-                    {/* Annual spending line (right axis) */}
+                    {/* Annual portfolio outflow and its withdrawal-tax component (right axis) */}
                     <YAxis
                       yAxisId="spending"
                       orientation="right"
@@ -974,7 +977,8 @@ export default function RetirementPage() {
                       domain={[0, 200000]}
                       hide={isMobile}
                     />
-                    <Line yAxisId="spending" type="monotone" dataKey="annual_spending" stroke="var(--red)" strokeWidth={1.5} strokeDasharray="6 3" dot={false} strokeOpacity={0.7} />
+                    <Line yAxisId="spending" type="monotone" dataKey="annual_outflow" stroke="var(--red)" strokeWidth={1.5} strokeDasharray="6 3" dot={false} strokeOpacity={0.7} />
+                    <Line yAxisId="spending" type="monotone" dataKey="annual_taxes" stroke="var(--orange, #b06830)" strokeWidth={1.25} strokeDasharray="2 3" dot={false} strokeOpacity={0.85} />
                   </ComposedChart>
                 </ResponsiveContainer>
                 {wealthOverlay}
@@ -988,12 +992,13 @@ export default function RetirementPage() {
                       { label: "Private Venture", color: "var(--orange, #b06830)" },
                       { label: "Cash (bridge)", color: "var(--green)" },
                       { label: "RRSP/RRIF", color: "var(--pink, #9e4a7a)" },
-                      { label: "IRA-A (SEPP)", color: "var(--purple, #7a6aaa)" },
-                      { label: "IRA-B (growth)", color: "var(--blue)" },
+                      ...(hasSeppPlan ? [{ label: "SEPP IRA", color: "var(--purple, #7a6aaa)" }] : []),
+                      { label: "Traditional retirement", color: "var(--blue)" },
                       { label: "Taxable", color: "#2aa6b8" },
                       { label: "Roth", color: "#5b8c3a" },
                       { label: "Total", color: "#1a1a1e", dashed: true },
-                      { label: "Spending/yr", color: "var(--red)", dashed: true },
+                      { label: "Total outflow/yr", color: "var(--red)", dashed: true },
+                      { label: "Modeled taxes/yr", color: "var(--orange, #b06830)", dashed: true },
                     ].map((l) => (
                       <div key={l.label} className="flex items-center gap-1.5">
                         <div
@@ -1012,10 +1017,96 @@ export default function RetirementPage() {
               </>
             ) : (
               <div className="flex items-center justify-center h-[400px] text-[var(--text-secondary)] text-sm">
-                {loadingWealth ? "Computing wealth projection..." : "Configure FIRE settings and SEPP assumptions to see projection."}
+                {loadingWealth ? "Computing wealth projection..." : "Configure FIRE settings to see the projection."}
               </div>
             )}
           </div>
+
+        {/* Pool-aware Monte Carlo */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
+          <div className="flex items-start justify-between gap-4 mb-2">
+            <div>
+              <h3 className="text-sm font-medium text-[var(--text-secondary)]">
+                Retirement Monte Carlo
+              </h3>
+              <p className="text-[11px] text-[var(--text-secondary)] mt-1 max-w-3xl">
+                Success means cash, taxable investments, and age-accessible retirement accounts
+                fund every modeled year. Home equity, 529s, private investments, and speculative
+                assets are excluded unless a dated sale or vest makes them spendable. Working-year
+                401(k)/Roth contributions and the five-year Roth conversion ladder use the values
+                in Configure.
+              </p>
+            </div>
+            {monteCarlo && (
+              <div className="text-right shrink-0">
+                <div className="text-xl font-bold font-mono" style={{ color: successColor }}>
+                  {monteCarlo.success_rate}%
+                </div>
+                <div className="text-[10px] text-[var(--text-secondary)]">
+                  of {monteCarlo.total_runs.toLocaleString()} simulations
+                </div>
+              </div>
+            )}
+          </div>
+
+          {fanChartData.length > 0 ? (
+            <>
+              <ResponsiveContainer width="100%" height={360}>
+                <ComposedChart data={fanChartData} margin={{ top: 10, right: 10, left: 10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(42,42,62,0.5)" />
+                  <XAxis dataKey="age" stroke="#5c5c6a" tick={{ fontSize: 11, fill: "#5c5c6a" }} />
+                  <YAxis stroke="#5c5c6a" tick={{ fontSize: 11, fill: "#5c5c6a" }} tickFormatter={fmtAxis} width={65} />
+                  <Tooltip
+                    {...TOOLTIP_STYLE}
+                    labelFormatter={(age) => `Age ${age}`}
+                    formatter={(value, name) => {
+                      const labels: Record<string, string> = {
+                        p10: "10th percentile",
+                        p50: "Median",
+                        p90: "90th percentile",
+                      };
+                      return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
+                    }}
+                  />
+                  <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.6} />
+                  <Line type="monotone" dataKey="p10" stroke="var(--red)" strokeWidth={1.5} dot={false} />
+                  <Line type="monotone" dataKey="p50" stroke="var(--green)" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="p90" stroke="var(--blue)" strokeWidth={1.5} dot={false} />
+                </ComposedChart>
+              </ResponsiveContainer>
+              {monteCarlo && (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4 pt-4 border-t border-[var(--border)]">
+                    {[
+                      { label: "Starting spendable", value: monteCarlo.starting_spendable_assets, color: "var(--text-primary)" },
+                      { label: "Excluded net assets", value: monteCarlo.excluded_non_spendable_assets, color: "var(--text-secondary)" },
+                      { label: "10th percentile", value: monteCarlo.percentile_10, color: "var(--red)" },
+                      { label: "Median ending", value: monteCarlo.percentile_50, color: "var(--green)" },
+                      { label: "90th percentile", value: monteCarlo.percentile_90, color: "var(--blue)" },
+                    ].map((item) => (
+                      <div key={item.label} className="text-center">
+                        <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">{item.label}</span>
+                        <div className="text-sm font-mono font-bold mt-0.5" style={{ color: item.color }}>
+                          {fmtCompact(item.value)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-3">
+                    {String(monteCarlo.assumptions?.return_model ?? "Configured retirement return model")}.
+                    A fixed set of random paths is reused so settings comparisons do not bounce
+                    around. Projected federal and state taxes are included, using the expected-path
+                    withdrawal schedule rather than recalculating taxes inside every random path.
+                  </p>
+                </>
+              )}
+            </>
+          ) : (
+            <div className="flex items-center justify-center h-[360px] text-[var(--text-secondary)] text-sm">
+              {loadingMC ? "Running retirement simulations..." : "Configure FIRE settings to run Monte Carlo."}
+            </div>
+          )}
+        </div>
 
         {/* Milestone Timeline */}
         {milestones && milestones.milestones.length > 0 && (

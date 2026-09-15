@@ -25,6 +25,7 @@ class FireConfigResponse(BaseModel):
     pension_monthly: int | None = None
     pension_start_age: int | None = None
     healthcare_monthly_cost: int | None = None
+    post_medicare_healthcare_monthly_cost: int | None = None
     medicare_start_age: int = 65
     rmd_start_age: int = 73
     state_tax_rate: float | None = None
@@ -52,6 +53,7 @@ class FireConfigUpdate(BaseModel):
     pension_monthly: int | None = None
     pension_start_age: int | None = None
     healthcare_monthly_cost: int | None = None
+    post_medicare_healthcare_monthly_cost: int | None = None
     medicare_start_age: int | None = None
     rmd_start_age: int | None = None
     target_legacy: int | None = None
@@ -131,6 +133,23 @@ class IncomeSourceResponse(BaseModel):
     @property
     def monthly_amount(self) -> float:
         return self.annual_amount_cents / 100 / 12
+
+    @computed_field
+    @property
+    def projection_annual_amount_cents(self) -> int:
+        custom_data = self.custom_data or {}
+        net_amount = custom_data.get("net_annual_amount")
+        if net_amount is not None and not isinstance(net_amount, bool):
+            try:
+                return int(round(float(net_amount)))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return self.annual_amount_cents
+
+    @computed_field
+    @property
+    def projection_annual_amount(self) -> float:
+        return self.projection_annual_amount_cents / 100
 
     model_config = {"from_attributes": True}
 
@@ -214,12 +233,18 @@ class NetWorthBreakdown(BaseModel):
     retirement: float  # 401k, IRAs, RRSP, Roth
     real_estate_equity: float  # property values net of mortgages
     illiquid_private: float  # locked private investments
+    education: float = 0  # 529 and other education-restricted assets
     other: float  # vehicles, depreciating assets
 
 
 class FireNumberResponse(BaseModel):
     fire_number: float
     annual_spending: float
+    base_annual_spending: float | None = None
+    healthcare_annual: float = 0
+    estimated_annual_taxes: float = 0
+    lifetime_spend_down_number: float | None = None
+    taxes_included: bool = False
     safe_withdrawal_rate: float
     current_net_worth: float
     gap: float
@@ -245,7 +270,8 @@ class WealthPoolPoint(BaseModel):
     roth_draw: float = 0  # monthly withdrawal from the Roth pool to cover cash gap
     total: float  # all pools combined
     income: float  # monthly income (non-IRA)
-    expenses: float  # monthly expenses
+    expenses: float  # total monthly outflow (living costs + modeled taxes)
+    modeled_taxes: float = 0  # monthly taxes not already withheld from a net income source
     ira_draw: float  # monthly IRA withdrawal (SEPP + IRA-B gap draw + any forced RMD)
     rmd_redeposit: float = 0  # part of ira_draw forced by an RMD and redeposited to taxable (not cash)
     rrsp_draw: float = 0  # monthly RRIF withdrawal
@@ -274,6 +300,8 @@ class SpendingBreakdown(BaseModel):
     """What's inside the total monthly budget."""
     primary_property_all_in: float  # P&I + HOA + insurance + utilities
     primary_property_pi: float  # just the mortgage P&I portion
+    primary_property_mortgage_rate_pct: float = 0
+    primary_property_mortgage_payoff_date: str | None = None
     income_property_cost: float  # income-property costs saved when it sells
     secondary_property_cost: float  # secondary-property costs removed when it sells
     non_housing: float  # remainder — groceries, transport, insurance, discretionary

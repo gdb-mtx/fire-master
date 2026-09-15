@@ -18,8 +18,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.engines.fire_projections import FireProjectionsEngine, _spending_multiplier
-from app.engines.monte_carlo import MonteCarloEngine, _draw_year
+from app.data.historical_market_returns import HISTORICAL_MARKET_RETURNS
+from app.engines.monte_carlo import (
+    MonteCarloEngine,
+    _draw_year,
+    _historical_real_return,
+    _sample_historical_path,
+)
 from app.engines.net_worth import NetWorthEngine
+from app.engines.tax_engine import AccountsByTaxTreatment, TaxEngine
 
 from .conftest import FROZEN_TODAY, _make_fire_config
 
@@ -34,8 +41,19 @@ def frozen_today_mc():
 
 
 @contextmanager
-def _mc_env(config, *, net_worth=1_500_000.0, spending_cents=15_300_000, income_sources=(), events=()):
+def _mc_env(
+    config, *, net_worth=1_500_000.0, spending_cents=15_300_000,
+    income_sources=(), events=(), accounts=None, tax_funding_by_year=None,
+):
     """Patch every DB touchpoint the MC engine reaches through its sub-engines."""
+    if accounts is None:
+        taxable_account = MagicMock(
+            current_balance=round(net_worth * 100),
+            name="Taxable",
+            extra_data={},
+            custom_data={},
+        )
+        accounts = AccountsByTaxTreatment(taxable=[taxable_account])
     with ExitStack() as stack:
         stack.enter_context(patch.object(
             FireProjectionsEngine, "_get_cashflow_events",
@@ -52,6 +70,13 @@ def _mc_env(config, *, net_worth=1_500_000.0, spending_cents=15_300_000, income_
         stack.enter_context(patch.object(
             NetWorthEngine, "calculate_current",
             AsyncMock(return_value=MagicMock(net_worth=net_worth))))
+        stack.enter_context(patch.object(
+            TaxEngine, "get_accounts_by_tax_treatment",
+            AsyncMock(return_value=accounts)))
+        if tax_funding_by_year is not None:
+            stack.enter_context(patch.object(
+                FireProjectionsEngine, "_get_tax_funding_by_year",
+                AsyncMock(return_value=tax_funding_by_year)))
         yield
 
 
@@ -61,6 +86,26 @@ SS_START_YEAR = 14  # (1973 + 67) - 2026
 
 
 class TestDeterminism:
+    async def test_two_adult_plan_runs_through_later_death(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        config = base_fire_config
+        config.custom_assumptions = {
+            **config.custom_assumptions,
+            "household": {
+                "adult_2_date_of_birth": "1978-01-01",
+                "adult_2_life_expectancy": 95,
+                "survivor_spending_pct": 0.70,
+            },
+        }
+        engine = MonteCarloEngine(db=None)
+
+        with _mc_env(config):
+            result = await engine.run_simulation(n_runs=5, seed=42)
+
+        # Adult 1's death is in 2063; Adult 2's is in 2073.
+        assert len(result.percentile_curves) == (2073 - FROZEN_TODAY.year) + 1
+
     async def test_fixed_seed_reproducible(self, base_fire_config, frozen_today_mc):
         engine = MonteCarloEngine(db=None)
         with _mc_env(base_fire_config):
@@ -74,6 +119,54 @@ class TestDeterminism:
         # A different seed actually changes the draw
         assert r3.percentile_50 != r1.percentile_50
 
+    async def test_retirement_age_override_reaches_tax_schedule(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        engine = MonteCarloEngine(db=None)
+        seen_ages = []
+
+        async def capture_tax_config(config, years, scenario_id=None):
+            seen_ages.append(config.target_retirement_age)
+            return {}
+
+        with _mc_env(base_fire_config), patch.object(
+            FireProjectionsEngine,
+            "_get_tax_funding_by_year",
+            side_effect=capture_tax_config,
+        ):
+            await engine.run_simulation(
+                n_runs=10, seed=1, retirement_age_override=60,
+            )
+
+        assert seen_ages == [60]
+
+    async def test_retirement_age_analysis_finds_confidence_boundaries(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        engine = MonteCarloEngine(db=None)
+        evaluated_ages = []
+
+        async def result_for_age(*, retirement_age_override, **_kwargs):
+            evaluated_ages.append(retirement_age_override)
+            return MagicMock(success_rate=min(100.0, (retirement_age_override - 50) * 5.0))
+
+        with patch.object(
+            FireProjectionsEngine,
+            "get_effective_config",
+            AsyncMock(return_value=base_fire_config),
+        ), patch.object(engine, "run_simulation", side_effect=result_for_age):
+            result = await engine.analyze_retirement_ages(
+                targets=(80, 90, 95), n_runs=100, seed=1, max_age=75,
+            )
+
+        assert [point.earliest_age for point in result.confidence_ages] == [66, 68, 69]
+        assert [point.success_rate for point in result.confidence_ages] == [80, 90, 95]
+        assert result.runs_per_age == 100
+        # One shared search resolves all three thresholds with fewer age
+        # evaluations than three separate binary searches.
+        assert len(evaluated_ages) == 8
+        assert len(evaluated_ages) == len(set(evaluated_ages))
+
     @staticmethod
     def _hand_loop(annual_spending: float, start_nw: float, dob: date) -> float:
         """Independent replica of the zero-vol path: compound at the real
@@ -83,7 +176,11 @@ class TestDeterminism:
         nw = start_nw
         for yr in range(TOTAL_YEARS):
             # Retired from year 0 (retirement date is mid-2026, same year)
-            yr_spending = annual_spending * _spending_multiplier(start_age + yr)
+            age = start_age + yr
+            yr_spending = annual_spending * _spending_multiplier(age)
+            # Fixture carries $600/mo of extra pre-Medicare healthcare.
+            if age < 65:
+                yr_spending += 7_200
             yr_income = 55_800.0 if yr >= SS_START_YEAR else 0.0  # SS flat real
             nw = nw * (1 + r_real) + yr_income - yr_spending
             if nw < 0:
@@ -147,6 +244,32 @@ class TestDeterminism:
 
 
 class TestDrawModel:
+    def test_historical_blocks_preserve_contiguous_joint_years(self):
+        path = _sample_historical_path(random.Random(4), years=21, block_years=7)
+        assert len(path) == 21
+        historical_rows = set(HISTORICAL_MARKET_RETURNS)
+        assert all(observation in historical_rows for observation in path)
+        for start in range(0, len(path), 7):
+            years = [observation[0] for observation in path[start:start + 7]]
+            assert years == list(range(years[0], years[0] + len(years)))
+
+    def test_historical_recenter_matches_configured_geometric_means(self):
+        nominal_logs = []
+        inflation_logs = []
+        for observation in HISTORICAL_MARKET_RETURNS:
+            real_return, inflation = _historical_real_return(
+                observation, 0.80, 0.07, 0.03,
+            )
+            nominal_return = (1 + real_return) * (1 + inflation) - 1
+            nominal_logs.append(math.log1p(nominal_return))
+            inflation_logs.append(math.log1p(inflation))
+        assert sum(nominal_logs) / len(nominal_logs) == pytest.approx(
+            math.log1p(0.07), abs=1e-10,
+        )
+        assert sum(inflation_logs) / len(inflation_logs) == pytest.approx(
+            math.log1p(0.03), abs=1e-10,
+        )
+
     def test_correlation_near_target(self):
         """Recover the standard-normal drivers from 10K draws; their Pearson
         correlation must sit near rho = −0.25."""
@@ -165,15 +288,28 @@ class TestDrawModel:
         si = math.sqrt(sum((b - mi) ** 2 for b in zi) / n)
         assert cov / (sr * si) == pytest.approx(rho, abs=0.05)
 
-    def test_lognormal_median_calibration(self):
-        """Median gross growth factor equals 1 + mu_nom (z=0 → exactly mu)."""
+    def test_lognormal_mean_calibration(self):
+        """The configured return is the arithmetic mean, not a rosier median."""
         rng = random.Random(9)
-        draws = sorted(
-            _draw_year(rng, 0.07, 0.16, 0.03, 0.0, 0.0)[0] for _ in range(10_001)
+        nominal_draws = []
+        for _ in range(100_000):
+            real_return, inflation = _draw_year(rng, 0.07, 0.16, 0.03, 0.0, 0.0)
+            nominal_draws.append((1 + real_return) * (1 + inflation) - 1)
+        assert sum(nominal_draws) / len(nominal_draws) == pytest.approx(0.07, abs=0.002)
+
+    def test_geometric_mode_calibrates_compounded_return(self):
+        rng = random.Random(19)
+        log_growth = []
+        for _ in range(100_000):
+            real_return, inflation = _draw_year(
+                rng, 0.07, 0.13, 0.03, 0.0, 0.0,
+                mean_type="geometric",
+            )
+            nominal_return = (1 + real_return) * (1 + inflation) - 1
+            log_growth.append(math.log1p(nominal_return))
+        assert sum(log_growth) / len(log_growth) == pytest.approx(
+            math.log1p(0.07), abs=0.001,
         )
-        median_real = draws[5_000]
-        expected_real = 1.07 / 1.03 - 1
-        assert median_real == pytest.approx(expected_real, abs=0.01)
 
 
 class TestDepletion:
@@ -185,6 +321,161 @@ class TestDepletion:
         assert result.success_rate == 0.0
         assert result.best_final_nw < 0
         assert len(result.percentile_curves) == TOTAL_YEARS + 1
+
+    async def test_non_spendable_net_worth_does_not_fund_retirement(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        empty_accounts = AccountsByTaxTreatment()
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            base_fire_config,
+            net_worth=2_000_000,
+            spending_cents=3_000_000,
+            accounts=empty_accounts,
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.starting_spendable_assets == 0
+        assert result.excluded_non_spendable_assets == 2_000_000
+        assert result.success_rate == 0
+
+    async def test_locked_deferred_assets_cannot_cover_early_bridge(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        base_fire_config.custom_assumptions["sepp"] = {"sepp_monthly": 0}
+        deferred = MagicMock(current_balance=100_000_000)
+        accounts = AccountsByTaxTreatment(tax_deferred=[deferred])
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(base_fire_config, net_worth=1_000_000, accounts=accounts):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.success_rate == 0
+        assert result.percentile_curves[1].p50 < 0
+
+    async def test_calendar_year_taxes_are_aligned_to_rolling_projection_year(
+        self, frozen_today_mc,
+    ):
+        config = _make_fire_config(
+            social_security_monthly=0,
+            healthcare_monthly_cost=None,
+            expected_annual_return=0,
+            expected_inflation_rate=0,
+            custom_assumptions={
+                "monte_carlo": {"return_std": 0, "inflation_std": 0},
+                "sepp": {"sepp_monthly": 0},
+            },
+        )
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            config,
+            net_worth=100_000,
+            spending_cents=0,
+            tax_funding_by_year={2026: 120_000, 2027: 0},
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        # Apr-Dec is nine of the twelve months in calendar 2026. Jan-Mar 2027
+        # carries no tax, so the first rolling projection year funds $90K.
+        assert result.percentile_curves[1].p50 == pytest.approx(10_000, abs=1)
+
+    async def test_sepp_only_unlocks_configured_payment(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        base_fire_config.custom_assumptions["sepp"] = {"sepp_monthly": 1_000}
+        deferred = MagicMock(current_balance=100_000_000)
+        accounts = AccountsByTaxTreatment(tax_deferred=[deferred])
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            base_fire_config,
+            net_worth=1_000_000,
+            spending_cents=3_000_000,
+            accounts=accounts,
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.success_rate == 0
+        assert result.percentile_curves[1].p50 == pytest.approx(-25_200, abs=1)
+
+    async def test_roth_is_conservatively_locked_before_59_5(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        roth = MagicMock(current_balance=100_000_000)
+        accounts = AccountsByTaxTreatment(tax_free=[roth])
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            base_fire_config,
+            net_worth=1_000_000,
+            spending_cents=3_000_000,
+            accounts=accounts,
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.success_rate == 0
+        assert result.percentile_curves[1].p50 < 0
+
+    async def test_configured_roth_basis_is_accessible_before_59_5(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        base_fire_config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 0,
+            "starting_roth_contribution_basis": 100_000,
+        }
+        roth = MagicMock(current_balance=100_000_00)
+        accounts = AccountsByTaxTreatment(tax_free=[roth])
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            base_fire_config,
+            net_worth=100_000,
+            spending_cents=3_000_000,
+            accounts=accounts,
+            tax_funding_by_year={},
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.percentile_curves[1].p50 > 0
+
+    async def test_matured_roth_ladder_bridges_to_penalty_free_age(
+        self, frozen_today_mc,
+    ):
+        config = _make_fire_config(
+            life_expectancy=62,
+            target_annual_spending=3_000_000,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+            expected_annual_return=0,
+            expected_inflation_rate=0,
+        )
+        config.custom_assumptions = {
+            "monte_carlo": {"return_std": 0, "inflation_std": 0},
+            "sepp": {"sepp_monthly": 0},
+            "retirement_contributions": {"worker_count": 0},
+            "roth_conversion_ladder": {
+                "enabled": True,
+                "wait_years": 5,
+                "annual_conversion": 30_000,
+            },
+        }
+        cash = MagicMock(current_balance=180_000_00)
+        deferred = MagicMock(current_balance=1_000_000_00)
+        accounts = AccountsByTaxTreatment(
+            already_taxed=[cash], tax_deferred=[deferred],
+        )
+        engine = MonteCarloEngine(db=None)
+
+        with _mc_env(
+            config, net_worth=1_180_000, spending_cents=3_000_000,
+            accounts=accounts, tax_funding_by_year={},
+        ):
+            with_ladder = await engine.run_simulation(n_runs=10, seed=5)
+        config.custom_assumptions["roth_conversion_ladder"]["enabled"] = False
+        with _mc_env(
+            config, net_worth=1_180_000, spending_cents=3_000_000,
+            accounts=accounts, tax_funding_by_year={},
+        ):
+            without_ladder = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert with_ladder.success_rate == 100
+        assert without_ladder.success_rate == 0
 
 
 def _make_source(income_type, annual_cents, *, start=None, end=None, growth=None):
@@ -243,6 +534,15 @@ class TestIncomeTiming:
             stack.enter_context(patch.object(
                 NetWorthEngine, "calculate_current",
                 AsyncMock(return_value=MagicMock(net_worth=1_500_000.0))))
+            taxable_account = MagicMock(
+                current_balance=150_000_000,
+                name="Taxable",
+                extra_data={},
+                custom_data={},
+            )
+            stack.enter_context(patch.object(
+                TaxEngine, "get_accounts_by_tax_treatment",
+                AsyncMock(return_value=AccountsByTaxTreatment(taxable=[taxable_account]))))
             await engine.run_simulation(n_runs=10, seed=1, scenario_id=sid)
         eff.assert_awaited_once_with(sid)
 

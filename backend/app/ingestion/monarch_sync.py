@@ -76,6 +76,60 @@ def _snapshot_balance(current_balance: int, is_asset: bool) -> int:
     return -abs(current_balance)
 
 
+def _holding_basis_summary(payload: object) -> dict[str, int]:
+    """Reduce Monarch holdings to aggregate values without storing securities."""
+    if not isinstance(payload, dict):
+        return {
+            "holdings_value_cents": 0,
+            "basis_covered_value_cents": 0,
+            "cost_basis_cents": 0,
+            "holdings_count": 0,
+            "basis_known_count": 0,
+        }
+    edges = (
+        ((payload.get("portfolio") or {}).get("aggregateHoldings") or {}).get("edges")
+        or []
+    )
+    total_value = 0.0
+    known_value = 0.0
+    cost_basis = 0.0
+    holdings_count = 0
+    known_basis_count = 0
+    for edge in edges:
+        node = (edge or {}).get("node") or {}
+        try:
+            value = max(0.0, float(node.get("totalValue") or 0))
+        except (TypeError, ValueError):
+            value = 0.0
+        total_value += value
+        holdings_count += 1
+        try:
+            basis = float(node.get("basis"))
+        except (TypeError, ValueError):
+            basis = 0.0
+        # Several institutions send 0 when basis is unavailable. Treat it as
+        # unknown for a positive-value security rather than assuming a 100%
+        # gain. Cash and named money-market funds are basis dollar-for-dollar.
+        if basis <= 0 and value > 0:
+            security = node.get("security") or node.get("holdings") or {}
+            security_type = str(security.get("type") or "").lower()
+            security_name = str(security.get("name") or "").lower()
+            if security_type == "cash" or "money market" in security_name:
+                basis = value
+            else:
+                continue
+        known_value += value
+        cost_basis += max(0.0, basis)
+        known_basis_count += 1
+    return {
+        "holdings_value_cents": _dollars_to_cents(total_value),
+        "basis_covered_value_cents": _dollars_to_cents(known_value),
+        "cost_basis_cents": _dollars_to_cents(cost_basis),
+        "holdings_count": holdings_count,
+        "basis_known_count": known_basis_count,
+    }
+
+
 def _account_upsert_stmt(raw: dict):
     """Build the accounts upsert for one raw Monarch account payload."""
     balance = raw.get("displayBalance") or raw.get("currentBalance", 0) or 0
@@ -198,6 +252,10 @@ class MonarchSyncService:
 
         await self.db.flush()
 
+        # Pull only aggregate cost-basis figures for taxable investment
+        # accounts. Individual holdings/tickers are deliberately not persisted.
+        await self.sync_taxable_cost_basis()
+
         # Write a balance snapshot for today using each account's current balance.
         # This ensures compute_snapshot(today) matches calculate_current() even for
         # stale accounts whose historical snapshots lag behind.
@@ -226,6 +284,41 @@ class MonarchSyncService:
 
         logger.info("Synced %d accounts", count)
         return count
+
+    async def sync_taxable_cost_basis(self) -> int:
+        """Refresh aggregate basis metadata for taxable Monarch accounts."""
+        result = await self.db.execute(
+            select(Account).where(
+                Account.source == DataSource.MONARCH,
+                Account.is_asset == True,
+                Account.account_type.in_([AccountType.TAXABLE, AccountType.CRYPTO]),
+                Account.fire_role == "retirement_bridge",
+                Account.external_id.is_not(None),
+            )
+        )
+        synced = 0
+        for account in result.scalars().all():
+            try:
+                payload = await self.client.get_account_holdings(account.external_id)
+                summary = _holding_basis_summary(payload)
+                if summary["holdings_count"] == 0 and account.current_balance != 0:
+                    continue
+                account.extra_data = {
+                    **(account.extra_data or {}),
+                    "taxable_basis": {
+                        **summary,
+                        "as_of": date.today().isoformat(),
+                        "source": "monarch_holdings",
+                    },
+                }
+                synced += 1
+            except Exception as exc:
+                logger.warning(
+                    "Cost-basis sync failed for account %s: %s", account.id, exc,
+                )
+        await self.db.flush()
+        logger.info("Synced aggregate cost basis for %d taxable accounts", synced)
+        return synced
 
     async def sync_transactions(self, start_date: date | None = None) -> int:
         """Upsert transactions from Monarch in batches. Default: last INCREMENTAL_SYNC_DAYS."""

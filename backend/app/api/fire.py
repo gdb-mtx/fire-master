@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +8,7 @@ from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.core.merge import json_merge_patch
 from app.engines.fire_projections import FireProjectionsEngine
+from app.engines.monte_carlo import MonteCarloEngine
 from app.engines.net_worth import NetWorthEngine
 from app.engines.spending import SpendingEngine
 from app.models.fire_config import FireConfig
@@ -45,6 +46,7 @@ from app.schemas.fire import (
     SpendingSensitivityPoint,
     SpendingSensitivityResponse,
 )
+from app.schemas.tax import RetirementAgeAnalysisResponse
 
 router = APIRouter(prefix="/api/fire", tags=["fire"])
 
@@ -322,6 +324,31 @@ async def get_wealth_projection(
     )
 
 
+@router.get(
+    "/retirement-age-analysis",
+    response_model=RetirementAgeAnalysisResponse,
+)
+async def analyze_retirement_ages(
+    runs: int = Query(default=1000, ge=100, le=2000),
+    seed: int = Query(default=42),
+    max_age: int = Query(default=85, ge=50, le=100),
+    scenario_id: UUID | None = Query(
+        default=None,
+        description="Analyze a specific scenario; defaults to the active scenario (or base config)",
+    ),
+    _user: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Earliest modeled retirement ages at 80%, 90%, and 95% success."""
+    engine = MonteCarloEngine(db)
+    return await engine.analyze_retirement_ages(
+        n_runs=runs,
+        seed=seed,
+        max_age=max_age,
+        scenario_id=scenario_id,
+    )
+
+
 @router.get("/spending-sensitivity", response_model=SpendingSensitivityResponse)
 async def spending_sensitivity(
     step: int = 100_000,
@@ -343,8 +370,14 @@ async def spending_sensitivity(
     miami_cfg = ca.get("miami_sale", {})
     pc_cfg = ca.get("park_city", {})
     proj_cfg = ca.get("projection", {})
-    primary_all_in = miami_cfg.get("monthly_cost", 0)
     primary_pi = proj_cfg.get("primary_property_mortgage_pi", 0)
+    primary_all_in = miami_cfg.get("monthly_cost", 0) or primary_pi
+    primary_mortgage_rate_pct = (
+        proj_cfg.get("primary_property_mortgage_rate", 0) or 0
+    ) * 100
+    primary_mortgage_payoff_date = proj_cfg.get(
+        "primary_property_mortgage_payoff_date"
+    )
     income_property_cost = ca.get("sauvie_sale", {}).get("monthly_cost_saved", 0)
     secondary_property_cost = pc_cfg.get("monthly_cost", 0)
     post_sale_rent = miami_cfg.get("post_sale_rent", 0)
@@ -372,6 +405,8 @@ async def spending_sensitivity(
         breakdown=SpendingBreakdown(
             primary_property_all_in=primary_all_in,
             primary_property_pi=primary_pi,
+            primary_property_mortgage_rate_pct=primary_mortgage_rate_pct,
+            primary_property_mortgage_payoff_date=primary_mortgage_payoff_date,
             income_property_cost=income_property_cost,
             secondary_property_cost=secondary_property_cost,
             non_housing=non_housing,

@@ -11,11 +11,20 @@ Two regressions pinned here:
   real compounding. The flat-flow tests fail loudly against nominal code.
 """
 
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.engines.fire_projections import FireProjectionsEngine
+from app.engines.fire_projections import (
+    FireProjectionsEngine,
+    _annual_spending_with_mortgage,
+    _healthcare_monthly_cents_at_age,
+    _healthcare_monthly_cents_at_date,
+    _household_projection_end_date,
+    _household_social_security_monthly_cents,
+    _household_survivor_spending_multiplier,
+)
 from app.engines.net_worth import NetWorthEngine
 
 from .conftest import _make_fire_config
@@ -23,6 +32,49 @@ from .conftest import _make_fire_config
 
 def _lifetime_engine():
     return FireProjectionsEngine(db=None)
+
+
+def test_mortgage_payment_expires_in_payoff_year(base_fire_config):
+    base_fire_config.custom_assumptions = {
+        "projection": {
+            "primary_property_mortgage_pi": 5_689.74,
+            "primary_property_mortgage_rate": 0.025,
+            "primary_property_mortgage_payoff_date": "2051-03-01",
+        },
+    }
+
+    assert _annual_spending_with_mortgage(220_000, 1.0, base_fire_config, 2050) == 220_000
+    assert _annual_spending_with_mortgage(
+        220_000, 1.0, base_fire_config, 2051,
+    ) == pytest.approx(168_792.34)
+    assert _annual_spending_with_mortgage(
+        220_000, 1.0, base_fire_config, 2052,
+    ) == pytest.approx(151_723.12)
+
+
+def test_property_tax_grows_two_percent_nominal_in_real_projection(base_fire_config):
+    current_year = date.today().year
+    base_fire_config.expected_inflation_rate = 3.0
+    base_fire_config.custom_assumptions = {
+        "tax": {
+            "itemized_deductions": {
+                "enabled": True,
+                "annual_property_tax": 20_000,
+                "property_tax_growth_rate": 0.02,
+                "property_tax_base_year": current_year,
+            },
+        },
+    }
+
+    next_year_tax = 20_000 * 1.02 / 1.03
+    assert _annual_spending_with_mortgage(
+        100_000, 1.0, base_fire_config, current_year + 1,
+    ) == pytest.approx(80_000 + next_year_tax)
+    # Property tax is contractual rather than discretionary, so retirement
+    # spending-phase reductions apply only to the other $80K.
+    assert _annual_spending_with_mortgage(
+        100_000, 0.75, base_fire_config, current_year + 1,
+    ) == pytest.approx(60_000 + next_year_tax)
 
 
 def _patch_common(config, *, net_worth=1_500_000.0, spending_cents=15_300_000,
@@ -58,6 +110,91 @@ async def test_fire_number_executes_and_is_positive(base_fire_config, frozen_tod
         result = await engine.compute_fire_number()
     assert result.fire_number > 0
     assert 0 <= result.progress_pct
+
+
+async def test_fire_number_uses_withdrawal_rate_and_extra_healthcare(
+    base_fire_config, frozen_today, net_worth_breakdown,
+):
+    """The headline is an auditable SWR target, not the lower spend-to-zero PV."""
+    config = base_fire_config
+    config.safe_withdrawal_rate = 3.0
+    config.target_retirement_age = 52
+    config.medicare_start_age = 65
+    config.healthcare_monthly_cost = 100_000  # $1,000/mo extra
+    engine = _lifetime_engine()
+    patches = _patch_common(config, spending_cents=12_000_000) + [
+        patch.object(FireProjectionsEngine, "_compute_net_worth_breakdown",
+                     AsyncMock(return_value=net_worth_breakdown)),
+    ]
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        result = await engine.compute_fire_number()
+
+    assert result.annual_spending == 132_000
+    assert result.fire_number == 4_400_000
+    assert result.lifetime_spend_down_number != result.fire_number
+    assert result.taxes_included is False
+
+
+def test_healthcare_budget_switches_at_medicare(base_fire_config):
+    base_fire_config.healthcare_monthly_cost = 350_000
+    base_fire_config.post_medicare_healthcare_monthly_cost = 120_000
+    base_fire_config.medicare_start_age = 65
+
+    assert _healthcare_monthly_cents_at_age(base_fire_config, 64.9) == 350_000
+    assert _healthcare_monthly_cents_at_age(base_fire_config, 65) == 120_000
+
+
+def test_two_adult_household_uses_later_lifespan(base_fire_config):
+    base_fire_config.date_of_birth = date(1970, 1, 1)
+    base_fire_config.life_expectancy = 90
+    base_fire_config.custom_assumptions = {
+        "household": {
+            "adult_2_date_of_birth": "1975-01-01",
+            "adult_2_life_expectancy": 95,
+        },
+    }
+
+    assert _household_projection_end_date(
+        base_fire_config, date(2060, 1, 1),
+    ) == date(2070, 1, 1)
+
+
+def test_two_adult_household_transitions_each_person_separately(base_fire_config):
+    base_fire_config.date_of_birth = date(1970, 1, 1)
+    base_fire_config.life_expectancy = 80
+    base_fire_config.social_security_start_age = 67
+    base_fire_config.social_security_monthly = 600_000
+    base_fire_config.healthcare_monthly_cost = 400_000
+    base_fire_config.post_medicare_healthcare_monthly_cost = 200_000
+    base_fire_config.medicare_start_age = 65
+    base_fire_config.custom_assumptions = {
+        "household": {
+            "adult_2_date_of_birth": "1975-01-01",
+            "adult_2_life_expectancy": 90,
+            "survivor_spending_pct": 0.70,
+        },
+    }
+
+    # Adult 1 is on Medicare and claiming SS; Adult 2 is still pre-Medicare.
+    assert _healthcare_monthly_cents_at_date(
+        base_fire_config, date(2038, 1, 1),
+    ) == 300_000
+    assert _household_social_security_monthly_cents(
+        base_fire_config, date(2038, 1, 1),
+    ) == 300_000
+    # Adult 1 has reached the modeled lifespan; Adult 2 remains alive.
+    assert _household_survivor_spending_multiplier(
+        base_fire_config, date(2051, 1, 1),
+    ) == pytest.approx(0.70)
+    assert _household_social_security_monthly_cents(
+        base_fire_config, date(2051, 1, 1),
+    ) == 300_000
+    assert _healthcare_monthly_cents_at_date(
+        base_fire_config, date(2051, 1, 1),
+    ) == 100_000
 
 
 async def test_lifetime_spending_is_flat_real(base_fire_config, frozen_today):

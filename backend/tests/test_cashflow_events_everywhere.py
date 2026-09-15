@@ -12,7 +12,8 @@ _recurring_events_active_now() helpers. These tests pin:
 - the schedule expansion rules (calendar offsets, recurrence phase, inclusive
   end month, past one-offs dropped, skip predicate);
 - kirvin's reproduction: an events-only plan in Monte Carlo at zero
-  volatility must match the same plan expressed as an IncomeSource;
+  volatility must match the same plan expressed as an IncomeSource, and a
+  dated conversion makes an otherwise excluded asset spendable;
 - project_lifetime uses the declared plan (no trailing-income fallback when
   events exist) and skips conversion events it already holds at book value;
 - bridge status counts recurring events active this month;
@@ -33,6 +34,7 @@ from app.engines.fire_projections import (
 )
 from app.engines.monte_carlo import MonteCarloEngine
 from app.engines.net_worth import NetWorthEngine
+from app.engines.tax_engine import AccountsByTaxTreatment
 from app.models.cashflow_event import CashflowEvent
 from app.models.enums import IncomeType
 from app.models.income_source import IncomeSource
@@ -143,16 +145,21 @@ class TestMonteCarloEvents:
         assert r_nothing.success_rate == 0.0  # the pre-fix answer for the event plan
         assert "events applied" in r_events.assumptions["cashflow_events"]
 
-    async def test_conversion_events_are_skipped(self, frozen_today_mc):
-        """A vest / sale event converts an asset already in net worth — a
-        single-pool model must not add it on top."""
+    async def test_conversion_events_make_excluded_assets_spendable(self, frozen_today_mc):
+        """The pool-aware model excludes private assets initially, then makes
+        their proceeds spendable only when the configured vest occurs."""
         engine = MonteCarloEngine(db=None)
         vest = _event("Startup A vests", "income", 50_000_000, date(2028, 4, 1))
-        with _mc_env(self._cfg(), net_worth=1_000_000.0, events=[vest]):
+        taxable = MagicMock(current_balance=100_000_000)
+        accounts = AccountsByTaxTreatment(taxable=[taxable])
+        with _mc_env(
+            self._cfg(), net_worth=1_500_000.0, accounts=accounts, events=[vest],
+        ):
             r_vest = await engine.run_simulation(n_runs=5, seed=1)
-        with _mc_env(self._cfg(), net_worth=1_000_000.0):
+        with _mc_env(self._cfg(), net_worth=1_500_000.0, accounts=accounts):
             r_none = await engine.run_simulation(n_runs=5, seed=1)
-        assert r_vest.percentile_50 == r_none.percentile_50
+        assert r_vest.excluded_non_spendable_assets == 500_000
+        assert r_vest.percentile_50 > r_none.percentile_50
 
 
 # ---------------------------------------------------------------------------
@@ -228,13 +235,16 @@ class TestLifetimeEvents:
 
 class TestBridgeEvents:
     @staticmethod
-    async def _bridge(events, sources=()):
+    async def _bridge(events, sources=(), **config_overrides):
         db = AsyncMock()
         upcoming = MagicMock()
         upcoming.scalars.return_value.all.return_value = []
         db.execute = AsyncMock(return_value=upcoming)
         engine = FireProjectionsEngine(db)
-        cfg = _make_fire_config(target_annual_spending=12_000_000)  # $10K/mo burn
+        cfg = _make_fire_config(
+            target_annual_spending=12_000_000,
+            **config_overrides,
+        )  # $10K/mo burn
         bd = NetWorthBreakdown(liquid=60_000, retirement=0, real_estate_equity=0,
                                illiquid_private=0, other=0)  # $60K cash (dollars)
         with ExitStack() as stack:
@@ -273,6 +283,13 @@ class TestBridgeEvents:
         assert labels == {"Consulting (temp)": 3_000, "Dividends": 3_000}
         # Runway ignores temp income: (12K − 3K ongoing) = 9K deficit
         assert r.monthly_deficit == 9_000
+
+    async def test_retirement_healthcare_only_added_after_retirement(self, frozen_today):
+        working = await self._bridge([])
+        retired = await self._bridge([], target_retirement_age=50)
+
+        assert working.monthly_burn == 10_000
+        assert retired.monthly_burn == 10_600
 
 
 # ---------------------------------------------------------------------------

@@ -273,6 +273,16 @@ function PropertyEditCard({ property }: { property: Property }) {
       </div>
       <NumField label="Value" value={form.value} onChange={(v) => setForm({ ...form, value: v })} />
       <NumField label="Loan balance" value={form.loan_balance} onChange={(v) => setForm({ ...form, loan_balance: v })} />
+      {Number(property.extra_data.mortgage_rate_pct ?? 0) > 0 && (
+        <div className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-xs text-[var(--text-secondary)]">
+          Mortgage: {Number(property.extra_data.mortgage_rate_pct).toFixed(2)}% ·{" "}
+          {fmt(Number(property.extra_data.mortgage_monthly_payment ?? 0))}/month · final payment{" "}
+          {new Date(`${String(property.extra_data.mortgage_payoff_date)}T12:00:00`).toLocaleDateString(
+            "en-US", { month: "short", year: "numeric" },
+          )}
+          <div className="mt-1 text-[10px] opacity-70">Projection terms are editable in FIRE Settings.</div>
+        </div>
+      )}
       <NumField
         label="Potential rent / mo"
         value={form.potential_monthly_rental}

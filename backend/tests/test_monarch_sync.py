@@ -8,7 +8,12 @@ liabilities-negative sign convention and spiking every liability chart).
 
 import pytest
 
-from app.ingestion.monarch_sync import _account_upsert_stmt, _map_account_type, _snapshot_balance
+from app.ingestion.monarch_sync import (
+    _account_upsert_stmt,
+    _holding_basis_summary,
+    _map_account_type,
+    _snapshot_balance,
+)
 from app.models.enums import AccountType
 
 
@@ -76,6 +81,67 @@ class TestSnapshotBalance:
 
     def test_liability_zero(self):
         assert _snapshot_balance(0, False) == 0
+
+
+class TestHoldingBasisSummary:
+    def test_non_mapping_response_is_empty(self):
+        assert _holding_basis_summary([])["holdings_count"] == 0
+
+    def test_aggregates_basis_without_storing_security_details(self):
+        payload = {
+            "portfolio": {
+                "aggregateHoldings": {
+                    "edges": [
+                        {"node": {"ticker": "ONE", "totalValue": 700, "basis": 500}},
+                        {"node": {"ticker": "TWO", "totalValue": 300, "basis": 200}},
+                    ],
+                },
+            },
+        }
+        assert _holding_basis_summary(payload) == {
+            "holdings_value_cents": 100_000,
+            "basis_covered_value_cents": 100_000,
+            "cost_basis_cents": 70_000,
+            "holdings_count": 2,
+            "basis_known_count": 2,
+        }
+
+    def test_zero_basis_cash_is_basis_but_unknown_security_uses_fallback(self):
+        payload = {
+            "portfolio": {
+                "aggregateHoldings": {
+                    "edges": [
+                        {"node": {"totalValue": 100, "basis": 0, "security": {"type": "cash"}}},
+                        {"node": {"totalValue": 50, "basis": None}},
+                    ],
+                },
+            },
+        }
+        result = _holding_basis_summary(payload)
+        assert result["holdings_value_cents"] == 15_000
+        assert result["basis_covered_value_cents"] == 10_000
+        assert result["cost_basis_cents"] == 10_000
+
+    def test_named_money_market_fund_is_basis_dollar_for_dollar(self):
+        payload = {
+            "portfolio": {
+                "aggregateHoldings": {
+                    "edges": [{
+                        "node": {
+                            "totalValue": 250,
+                            "basis": 0,
+                            "security": {
+                                "type": "mutual_fund",
+                                "name": "Example Municipal Money Market Fund",
+                            },
+                        },
+                    }],
+                },
+            },
+        }
+        result = _holding_basis_summary(payload)
+        assert result["basis_covered_value_cents"] == 25_000
+        assert result["cost_basis_cents"] == 25_000
 
 
 class TestAccountUpsertStmt:

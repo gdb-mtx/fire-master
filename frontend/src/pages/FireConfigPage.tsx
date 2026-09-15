@@ -5,6 +5,7 @@ import {
   useUpdateFireConfig,
   useIncomeSources,
   useCreateIncomeSource,
+  useUpdateIncomeSource,
   useDeleteIncomeSource,
   useScenarios,
   useCreateScenario,
@@ -19,12 +20,17 @@ export default function FireConfigPage() {
   const updateConfig = useUpdateFireConfig();
   const { data: incomeSources } = useIncomeSources();
   const createIncome = useCreateIncomeSource();
+  const updateIncome = useUpdateIncomeSource();
   const deleteIncome = useDeleteIncomeSource();
 
   const [form, setForm] = useState({
+    household_type: "one_adult",
     date_of_birth: "",
     target_retirement_age: "",
     life_expectancy: "90",
+    adult_2_date_of_birth: "",
+    adult_2_life_expectancy: "",
+    survivor_spending_pct: "70",
     fire_variant: "regular",
     safe_withdrawal_rate: "4.0",
     expected_annual_return: "7.0",
@@ -35,6 +41,7 @@ export default function FireConfigPage() {
     pension_monthly: "",
     pension_start_age: "",
     healthcare_monthly_cost: "",
+    post_medicare_healthcare_monthly_cost: "",
     medicare_start_age: "65",
     rmd_start_age: "73",
     state_tax_rate: "",
@@ -45,6 +52,19 @@ export default function FireConfigPage() {
     household_size: "1",
     cost_basis_pct: "60",
     state_of_residence: "",
+    federal_deduction_method: "standard",
+    federal_itemized_deduction: "",
+    state_deduction_method: "standard",
+    state_itemized_deduction: "",
+    dynamic_itemized_enabled: false,
+    annual_property_tax: "",
+    property_tax_growth_rate: "2",
+    annual_charitable_gifts: "",
+    annual_other_federal: "",
+    annual_other_california: "",
+    annual_california_unlimited: "",
+    federal_mortgage_debt_limit: "750000",
+    california_mortgage_debt_limit: "1000000",
     // Projection assumptions (stored in custom_assumptions.projection)
     // ALL RATES ARE REAL (after inflation, in today's dollars)
     surplus_investment_rate: "4",
@@ -56,23 +76,44 @@ export default function FireConfigPage() {
     primary_property_purchase_price: "",
     primary_property_agent_fee_pct: "6",
     primary_property_mortgage_pi: "",
-    ss_early_reduction: "70",
-    ss_claim_age: "62",
+    primary_property_mortgage_rate: "",
+    primary_property_mortgage_payoff_date: "",
     spending_phase_slow: "85",
     spending_phase_floor: "75",
     spending_phase_slow_age: "70",
     spending_phase_floor_age: "80",
     ira_b_draw_threshold_months: "12",
     rental_occupancy_rate: "100",
+    worker_count: "0",
+    annual_401k_per_worker: "24500",
+    annual_roth_ira_per_worker: "7500",
+    starting_roth_contribution_basis: "",
+    starting_hsa_qualified_balance: "",
+    retirement_contribution_start_date: "",
+    retirement_contribution_end_date: "",
+    roth_conversion_ladder_enabled: false,
+    roth_conversion_wait_years: "5",
+    roth_conversion_annual_amount: "",
+    monte_carlo_return_mean_type: "geometric",
+    monte_carlo_accumulation_volatility: "13",
+    monte_carlo_retirement_volatility: "12",
+    monte_carlo_simulation_method: "historical_blocks",
+    monte_carlo_historical_block_years: "7",
+    monte_carlo_accumulation_stock_weight: "80",
+    monte_carlo_retirement_stock_weight: "70",
   });
 
   const [incomeForm, setIncomeForm] = useState({
     name: "",
     income_type: "salary",
     annual_amount: "",
+    projection_annual_amount: "",
+    start_date: "",
     end_date: "",
     growth_rate: "",
+    is_taxable: true,
   });
+  const [editingIncomeId, setEditingIncomeId] = useState<string | null>(null);
 
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved">("idle");
   const [incomeError, setIncomeError] = useState("");
@@ -83,11 +124,25 @@ export default function FireConfigPage() {
     if (config && version !== lastConfigVersion) {
       const ca = config.custom_assumptions as Record<string, unknown> | undefined;
       const tax = ca?.tax as Record<string, unknown> | undefined;
+      const itemized = tax?.itemized_deductions as Record<string, unknown> | undefined;
       const proj = ca?.projection as Record<string, unknown> | undefined;
+      const savings = ca?.retirement_contributions as Record<string, unknown> | undefined;
+      const rothLadder = ca?.roth_conversion_ladder as Record<string, unknown> | undefined;
+      const monteCarlo = ca?.monte_carlo as Record<string, unknown> | undefined;
+      const household = ca?.household as Record<string, unknown> | undefined;
+      const hasSavedSecondAdult = Boolean(
+        household?.adult_2_date_of_birth || household?.adult_2_life_expectancy,
+      );
       setForm({
+        household_type: hasSavedSecondAdult ? "two_adults" : "one_adult",
         date_of_birth: config.date_of_birth || "",
         target_retirement_age: config.target_retirement_age?.toString() || "",
         life_expectancy: config.life_expectancy.toString(),
+        adult_2_date_of_birth: (household?.adult_2_date_of_birth as string) || "",
+        adult_2_life_expectancy: (household?.adult_2_life_expectancy as number)?.toString() || "",
+        survivor_spending_pct: household?.survivor_spending_pct != null
+          ? ((household.survivor_spending_pct as number) * 100).toString()
+          : "70",
         fire_variant: config.fire_variant,
         safe_withdrawal_rate: config.safe_withdrawal_rate.toString(),
         expected_annual_return: config.expected_annual_return.toString(),
@@ -98,15 +153,31 @@ export default function FireConfigPage() {
         pension_monthly: config.pension_monthly ? (config.pension_monthly / 100).toString() : "",
         pension_start_age: config.pension_start_age?.toString() || "",
         healthcare_monthly_cost: config.healthcare_monthly_cost ? (config.healthcare_monthly_cost / 100).toString() : "",
+        post_medicare_healthcare_monthly_cost: config.post_medicare_healthcare_monthly_cost ? (config.post_medicare_healthcare_monthly_cost / 100).toString() : "",
         medicare_start_age: config.medicare_start_age.toString(),
         rmd_start_age: config.rmd_start_age.toString(),
-        state_tax_rate: config.state_tax_rate?.toString() || "",
+        state_tax_rate: ((tax?.state_tax_rate as number | undefined) ?? config.state_tax_rate)?.toString() || "",
         federal_marginal_rate: config.federal_marginal_rate?.toString() || "",
         notes: config.notes || "",
         filing_status: (tax?.filing_status as string) || "single",
         household_size: (tax?.household_size as number)?.toString() || "1",
         cost_basis_pct: (tax?.cost_basis_pct as number) != null ? ((tax!.cost_basis_pct as number) * 100).toString() : "60",
-        state_of_residence: (tax?.state as string) || "",
+        state_of_residence: ["CA", "CO"].includes(String(tax?.state || "").toUpperCase())
+          ? String(tax?.state).toUpperCase()
+          : "FLAT",
+        federal_deduction_method: (tax?.federal_deduction_method as string) || "standard",
+        federal_itemized_deduction: (tax?.federal_itemized_deduction as number)?.toString() || "",
+        state_deduction_method: (tax?.state_deduction_method as string) || "standard",
+        state_itemized_deduction: (tax?.state_itemized_deduction as number)?.toString() || "",
+        dynamic_itemized_enabled: (itemized?.enabled as boolean) || false,
+        annual_property_tax: (itemized?.annual_property_tax as number)?.toString() || "",
+        property_tax_growth_rate: itemized?.property_tax_growth_rate != null ? ((itemized.property_tax_growth_rate as number) * 100).toString() : "2",
+        annual_charitable_gifts: (itemized?.annual_charitable_gifts as number)?.toString() || "",
+        annual_other_federal: (itemized?.annual_other_federal as number)?.toString() || "",
+        annual_other_california: (itemized?.annual_other_california as number)?.toString() || "",
+        annual_california_unlimited: (itemized?.annual_california_unlimited as number)?.toString() || "",
+        federal_mortgage_debt_limit: (itemized?.federal_mortgage_debt_limit as number)?.toString() || "750000",
+        california_mortgage_debt_limit: (itemized?.california_mortgage_debt_limit as number)?.toString() || "1000000",
         // Projection assumptions — read from saved config or use defaults
         surplus_investment_rate: proj?.surplus_investment_rate != null ? ((proj.surplus_investment_rate as number) * 100).toString() : "4",
         cash_reserve_months: (proj?.cash_reserve_months as number)?.toString() || "12",
@@ -117,14 +188,39 @@ export default function FireConfigPage() {
         primary_property_purchase_price: (proj?.primary_property_purchase_price as number)?.toString() || "",
         primary_property_agent_fee_pct: proj?.primary_property_agent_fee_pct != null ? ((proj.primary_property_agent_fee_pct as number) * 100).toString() : "6",
         primary_property_mortgage_pi: (proj?.primary_property_mortgage_pi as number)?.toString() || "",
-        ss_early_reduction: proj?.ss_early_reduction != null ? ((proj.ss_early_reduction as number) * 100).toString() : "70",
-        ss_claim_age: (proj?.ss_claim_age as number)?.toString() || "62",
+        primary_property_mortgage_rate: proj?.primary_property_mortgage_rate != null ? ((proj.primary_property_mortgage_rate as number) * 100).toString() : "",
+        primary_property_mortgage_payoff_date: (proj?.primary_property_mortgage_payoff_date as string) || "",
         spending_phase_slow: proj?.spending_phase_slow != null ? ((proj.spending_phase_slow as number) * 100).toString() : "85",
         spending_phase_floor: proj?.spending_phase_floor != null ? ((proj.spending_phase_floor as number) * 100).toString() : "75",
         spending_phase_slow_age: (proj?.spending_phase_slow_age as number)?.toString() || "70",
         spending_phase_floor_age: (proj?.spending_phase_floor_age as number)?.toString() || "80",
         ira_b_draw_threshold_months: (proj?.ira_b_draw_threshold_months as number)?.toString() || "12",
         rental_occupancy_rate: ca?.rental_occupancy_rate != null ? ((ca.rental_occupancy_rate as number) * 100).toString() : "100",
+        worker_count: (savings?.worker_count as number)?.toString() || "0",
+        annual_401k_per_worker: (savings?.annual_401k_per_worker as number)?.toString() || "24500",
+        annual_roth_ira_per_worker: (savings?.annual_roth_ira_per_worker as number)?.toString() || "7500",
+        starting_roth_contribution_basis: (savings?.starting_roth_contribution_basis as number)?.toString() || "",
+        starting_hsa_qualified_balance: (savings?.starting_hsa_qualified_balance as number)?.toString() || "",
+        retirement_contribution_start_date: (savings?.start_date as string) || "",
+        retirement_contribution_end_date: (savings?.end_date as string) || "",
+        roth_conversion_ladder_enabled: (rothLadder?.enabled as boolean) || false,
+        roth_conversion_wait_years: (rothLadder?.wait_years as number)?.toString() || "5",
+        roth_conversion_annual_amount: (rothLadder?.annual_conversion as number)?.toString() || "",
+        monte_carlo_return_mean_type: (monteCarlo?.return_mean_type as string) || "geometric",
+        monte_carlo_accumulation_volatility: monteCarlo?.accumulation_return_std != null
+          ? ((monteCarlo.accumulation_return_std as number) * 100).toString()
+          : "13",
+        monte_carlo_retirement_volatility: monteCarlo?.retirement_return_std != null
+          ? ((monteCarlo.retirement_return_std as number) * 100).toString()
+          : "12",
+        monte_carlo_simulation_method: (monteCarlo?.simulation_method as string) || "historical_blocks",
+        monte_carlo_historical_block_years: (monteCarlo?.historical_block_years as number)?.toString() || "7",
+        monte_carlo_accumulation_stock_weight: monteCarlo?.accumulation_stock_weight != null
+          ? ((monteCarlo.accumulation_stock_weight as number) * 100).toString()
+          : "80",
+        monte_carlo_retirement_stock_weight: monteCarlo?.retirement_stock_weight != null
+          ? ((monteCarlo.retirement_stock_weight as number) * 100).toString()
+          : "70",
       });
       setLastConfigVersion(version);
     }
@@ -143,12 +239,24 @@ export default function FireConfigPage() {
     if (form.target_annual_spending) data.target_annual_spending = Math.round(parseFloat(form.target_annual_spending) * 100);
     if (form.social_security_monthly) data.social_security_monthly = Math.round(parseFloat(form.social_security_monthly) * 100);
     if (form.social_security_start_age) data.social_security_start_age = parseInt(form.social_security_start_age);
-    if (form.pension_monthly) data.pension_monthly = Math.round(parseFloat(form.pension_monthly) * 100);
-    if (form.pension_start_age) data.pension_start_age = parseInt(form.pension_start_age);
-    if (form.healthcare_monthly_cost) data.healthcare_monthly_cost = Math.round(parseFloat(form.healthcare_monthly_cost) * 100);
+    data.pension_monthly = form.pension_monthly
+      ? Math.round(parseFloat(form.pension_monthly) * 100)
+      : null;
+    data.pension_start_age = form.pension_start_age ? parseInt(form.pension_start_age) : null;
+    data.healthcare_monthly_cost = form.healthcare_monthly_cost
+      ? Math.round(parseFloat(form.healthcare_monthly_cost) * 100)
+      : null;
+    data.post_medicare_healthcare_monthly_cost = form.post_medicare_healthcare_monthly_cost
+      ? Math.round(parseFloat(form.post_medicare_healthcare_monthly_cost) * 100)
+      : null;
     if (form.medicare_start_age) data.medicare_start_age = parseInt(form.medicare_start_age);
     if (form.rmd_start_age) data.rmd_start_age = parseInt(form.rmd_start_age);
-    if (form.state_tax_rate) data.state_tax_rate = parseFloat(form.state_tax_rate);
+    const selectedStateTaxRate = form.state_of_residence === "CO"
+      ? 4.4
+      : form.state_of_residence === "CA"
+        ? null
+        : (form.state_tax_rate ? parseFloat(form.state_tax_rate) : null);
+    data.state_tax_rate = selectedStateTaxRate;
     if (form.federal_marginal_rate) data.federal_marginal_rate = parseFloat(form.federal_marginal_rate);
     data.notes = form.notes || null;
 
@@ -161,12 +269,41 @@ export default function FireConfigPage() {
     // survive without resending them. Clearing a field means sending null;
     // omitting a key would leave the old value in place.
     data.custom_assumptions = {
+      household: {
+        adult_2_date_of_birth: form.household_type === "two_adults"
+          ? form.adult_2_date_of_birth || null
+          : null,
+        adult_2_life_expectancy: form.household_type === "two_adults" && form.adult_2_life_expectancy
+          ? parseInt(form.adult_2_life_expectancy)
+          : null,
+        survivor_spending_pct: pf(form.survivor_spending_pct, 70) / 100,
+      },
       tax: {
         filing_status: form.filing_status,
         household_size: parseInt(form.household_size) || 1,
         cost_basis_pct: pf(form.cost_basis_pct, 60) / 100,
-        state: form.state_of_residence || null,
-        state_tax_rate: form.state_tax_rate ? parseFloat(form.state_tax_rate) : null,
+        state: form.state_of_residence,
+        state_tax_rate: selectedStateTaxRate,
+        federal_deduction_method: form.federal_deduction_method,
+        federal_itemized_deduction: form.federal_itemized_deduction
+          ? parseFloat(form.federal_itemized_deduction)
+          : null,
+        state_deduction_method: form.state_deduction_method,
+        state_itemized_deduction: form.state_itemized_deduction
+          ? parseFloat(form.state_itemized_deduction)
+          : null,
+        itemized_deductions: {
+          enabled: form.dynamic_itemized_enabled,
+          annual_property_tax: pf(form.annual_property_tax, 0),
+          property_tax_growth_rate: pf(form.property_tax_growth_rate, 2) / 100,
+          property_tax_base_year: new Date().getFullYear(),
+          annual_charitable_gifts: pf(form.annual_charitable_gifts, 0),
+          annual_other_federal: pf(form.annual_other_federal, 0),
+          annual_other_california: pf(form.annual_other_california, 0),
+          annual_california_unlimited: pf(form.annual_california_unlimited, 0),
+          federal_mortgage_debt_limit: pf(form.federal_mortgage_debt_limit, 750000),
+          california_mortgage_debt_limit: pf(form.california_mortgage_debt_limit, 1000000),
+        },
       },
       projection: {
         surplus_investment_rate: pf(form.surplus_investment_rate, 4) / 100,
@@ -180,10 +317,16 @@ export default function FireConfigPage() {
           : null,
         primary_property_agent_fee_pct: pf(form.primary_property_agent_fee_pct, 6) / 100,
         primary_property_mortgage_pi: form.primary_property_mortgage_pi
-          ? parseInt(form.primary_property_mortgage_pi)
+          ? parseFloat(form.primary_property_mortgage_pi)
           : null,
-        ss_early_reduction: pf(form.ss_early_reduction, 70) / 100,
-        ss_claim_age: parseInt(form.ss_claim_age) || 62,
+        primary_property_mortgage_rate: form.primary_property_mortgage_rate
+          ? parseFloat(form.primary_property_mortgage_rate) / 100
+          : null,
+        primary_property_mortgage_payoff_date: form.primary_property_mortgage_payoff_date || null,
+        // Legacy duplicate Social Security controls are deliberately cleared.
+        // The main household amount + start age now drive every projection.
+        ss_early_reduction: null,
+        ss_claim_age: null,
         spending_phase_slow: pf(form.spending_phase_slow, 85) / 100,
         spending_phase_floor: pf(form.spending_phase_floor, 75) / 100,
         spending_phase_slow_age: parseInt(form.spending_phase_slow_age) || 70,
@@ -191,6 +334,32 @@ export default function FireConfigPage() {
         ira_b_draw_threshold_months: parseInt(form.ira_b_draw_threshold_months) || 12,
       },
       rental_occupancy_rate: pf(form.rental_occupancy_rate, 100) / 100,
+      retirement_contributions: {
+        worker_count: Math.max(0, parseInt(form.worker_count) || 0),
+        annual_401k_per_worker: pf(form.annual_401k_per_worker, 0),
+        annual_roth_ira_per_worker: pf(form.annual_roth_ira_per_worker, 0),
+        starting_roth_contribution_basis: pf(form.starting_roth_contribution_basis, 0),
+        starting_hsa_qualified_balance: pf(form.starting_hsa_qualified_balance, 0),
+        start_date: form.retirement_contribution_start_date || null,
+        end_date: form.retirement_contribution_end_date || null,
+      },
+      roth_conversion_ladder: {
+        enabled: form.roth_conversion_ladder_enabled,
+        wait_years: Math.max(1, parseInt(form.roth_conversion_wait_years) || 5),
+        annual_conversion: pf(form.roth_conversion_annual_amount, 0),
+      },
+      monte_carlo: {
+        // Remove the legacy one-volatility override when the phase-specific
+        // settings are saved.
+        return_std: null,
+        return_mean_type: form.monte_carlo_return_mean_type,
+        simulation_method: form.monte_carlo_simulation_method,
+        historical_block_years: Math.max(1, parseInt(form.monte_carlo_historical_block_years) || 7),
+        accumulation_stock_weight: pf(form.monte_carlo_accumulation_stock_weight, 80) / 100,
+        retirement_stock_weight: pf(form.monte_carlo_retirement_stock_weight, 70) / 100,
+        accumulation_return_std: pf(form.monte_carlo_accumulation_volatility, 13) / 100,
+        retirement_return_std: pf(form.monte_carlo_retirement_volatility, 12) / 100,
+      },
     };
 
     updateConfig.mutate(data, {
@@ -201,32 +370,87 @@ export default function FireConfigPage() {
     });
   };
 
-  const handleAddIncome = () => {
-    if (!incomeForm.name || !incomeForm.annual_amount) {
-      setIncomeError("Name and annual amount are required");
+  const resetIncomeForm = () => {
+    setIncomeForm({
+      name: "",
+      income_type: "salary",
+      annual_amount: "",
+      projection_annual_amount: "",
+      start_date: "",
+      end_date: "",
+      growth_rate: "",
+      is_taxable: true,
+    });
+    setEditingIncomeId(null);
+    setIncomeError("");
+  };
+
+  const beginIncomeEdit = (source: NonNullable<typeof incomeSources>[number]) => {
+    setEditingIncomeId(source.id);
+    setIncomeForm({
+      name: source.name,
+      income_type: source.income_type,
+      annual_amount: source.annual_amount.toString(),
+      projection_annual_amount: source.projection_annual_amount.toString(),
+      start_date: source.start_date ?? "",
+      end_date: source.end_date ?? "",
+      growth_rate: source.growth_rate?.toString() ?? "",
+      is_taxable: source.is_taxable,
+    });
+    setIncomeError("");
+  };
+
+  const handleSaveIncome = () => {
+    const grossAmount = parseFloat(incomeForm.annual_amount);
+    const projectedAmount = incomeForm.projection_annual_amount
+      ? parseFloat(incomeForm.projection_annual_amount)
+      : grossAmount;
+    if (!incomeForm.name || !(grossAmount > 0) || !(projectedAmount >= 0)) {
+      setIncomeError("Name and valid annual amounts are required");
       return;
     }
-    setIncomeError("");
-    createIncome.mutate({
+
+    const existing = incomeSources?.find((source) => source.id === editingIncomeId);
+    const customData: Record<string, unknown> = { ...(existing?.custom_data ?? {}) };
+    if (Math.abs(projectedAmount - grossAmount) >= 0.01) {
+      customData.net_annual_amount = Math.round(projectedAmount * 100);
+    } else {
+      delete customData.net_annual_amount;
+    }
+
+    const payload = {
       name: incomeForm.name,
       income_type: incomeForm.income_type,
-      annual_amount: Math.round(parseFloat(incomeForm.annual_amount) * 100),
+      annual_amount: Math.round(grossAmount * 100),
       frequency: "monthly",
-      end_date: incomeForm.end_date || undefined,
-      growth_rate: incomeForm.growth_rate ? parseFloat(incomeForm.growth_rate) : undefined,
-    } as any, {
-      onSuccess: () => {
-        setIncomeForm({ name: "", income_type: "salary", annual_amount: "", end_date: "", growth_rate: "" });
-        setIncomeError("");
-      },
-      onError: (err: Error) => {
-        setIncomeError(err.message);
-      },
-    });
+      start_date: incomeForm.start_date || null,
+      end_date: incomeForm.end_date || null,
+      growth_rate: incomeForm.growth_rate ? parseFloat(incomeForm.growth_rate) : null,
+      is_taxable: incomeForm.is_taxable,
+      tax_treatment: incomeForm.is_taxable
+        ? (projectedAmount !== grossAmount ? "gross_with_net_projection" : "gross")
+        : "net_of_tax",
+      custom_data: customData,
+    };
+
+    setIncomeError("");
+    const callbacks = {
+      onSuccess: resetIncomeForm,
+      onError: (err: Error) => setIncomeError(err.message),
+    };
+    if (editingIncomeId) {
+      updateIncome.mutate({ id: editingIncomeId, data: payload as any }, callbacks);
+    } else {
+      createIncome.mutate(payload as any, callbacks);
+    }
   };
 
   const { data: activeScenarios } = useScenarios();
   const activeScenario = activeScenarios?.find((s) => s.is_active);
+  const hasSecondAdult = form.household_type === "two_adults";
+  const ssBasis = (
+    (config?.custom_assumptions as Record<string, unknown> | null)?.social_security ?? null
+  ) as Record<string, unknown> | null;
 
   if (isLoading || !config) {
     return (
@@ -271,22 +495,49 @@ export default function FireConfigPage() {
         {/* Active Scenario Banner */}
         {activeScenario && <ActiveScenarioDetails scenario={activeScenario} />}
 
-        {/* Personal */}
+        {/* Household */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
-          <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-4">Personal</h3>
+          <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-1">Household</h3>
+          <p className="text-[10px] text-[var(--text-secondary)] mb-4">
+            Choose whether the plan covers one adult or two. Two-adult plans run through the later lifespan.
+          </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
             <div>
-              <label className={labelCls}>Date of Birth</label>
+              <label className={labelCls}>Plan Covers</label>
+              <select value={form.household_type} onChange={(e) => setForm(f => ({ ...f, household_type: e.target.value }))} className={inputCls}>
+                <option value="one_adult">One adult</option>
+                <option value="two_adults">Two adults</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>Your Date of Birth</label>
               <input type="date" value={form.date_of_birth} onChange={(e) => setForm(f => ({ ...f, date_of_birth: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>Target Retirement Age</label>
-              <input type="number" value={form.target_retirement_age} onChange={(e) => setForm(f => ({ ...f, target_retirement_age: e.target.value }))} placeholder="55" className={inputCls} />
-            </div>
-            <div>
-              <label className={labelCls}>Life Expectancy</label>
+              <label className={labelCls}>Your Life Expectancy</label>
               <input type="number" value={form.life_expectancy} onChange={(e) => setForm(f => ({ ...f, life_expectancy: e.target.value }))} placeholder="90" className={inputCls} />
             </div>
+            <div>
+              <label className={labelCls}>Your Target Retirement Age</label>
+              <input type="number" value={form.target_retirement_age} onChange={(e) => setForm(f => ({ ...f, target_retirement_age: e.target.value }))} placeholder="55" className={inputCls} />
+            </div>
+            {hasSecondAdult && (
+              <>
+                <div>
+                  <label className={labelCls}>Partner Date of Birth</label>
+                  <input type="date" value={form.adult_2_date_of_birth} onChange={(e) => setForm(f => ({ ...f, adult_2_date_of_birth: e.target.value }))} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Partner Life Expectancy</label>
+                  <input type="number" value={form.adult_2_life_expectancy} onChange={(e) => setForm(f => ({ ...f, adult_2_life_expectancy: e.target.value }))} placeholder="90" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>One-Survivor Spending (% of household)</label>
+                  <input type="number" min="0" max="100" value={form.survivor_spending_pct} onChange={(e) => setForm(f => ({ ...f, survivor_spending_pct: e.target.value }))} className={inputCls} />
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-1">70% is a common planning assumption; housing and other fixed costs do not halve.</p>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -317,18 +568,37 @@ export default function FireConfigPage() {
             </div>
           </div>
           <div className="mt-4">
-            <label className={labelCls}>Target Annual Spending ($ — leave blank to use actual trailing 12mo)</label>
+            <label className={labelCls}>Target Annual Retirement Spending — After Tax ($)</label>
             <input type="number" value={form.target_annual_spending} onChange={(e) => setForm(f => ({ ...f, target_annual_spending: e.target.value }))} placeholder="Auto-computed from spending data" className={inputCls} />
+            <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+              Enter what you want available to spend. Withdrawal taxes and extra pre-Medicare healthcare are added by the model.
+            </p>
           </div>
         </div>
 
         {/* Social Security + Pension */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
           <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-4">Post-Retirement Income</h3>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className={labelCls}>Social Security Monthly ($)</label>
+              <label className={labelCls}>{hasSecondAdult ? "Combined Social Security Monthly ($)" : "Social Security Monthly ($)"}</label>
               <input type="number" value={form.social_security_monthly} onChange={(e) => setForm(f => ({ ...f, social_security_monthly: e.target.value }))} placeholder="0" className={inputCls} />
+              {ssBasis ? (
+                <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+                  Saved basis: {String(ssBasis.workers)} max-credit workers ×{" "}
+                  {formatCurrency(Number(ssBasis.reference_max_monthly_per_worker))}/month ×{" "}
+                  {Math.round(Number(ssBasis.benefit_fraction) * 100)}%.
+                </p>
+              ) : (
+                <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+                  {hasSecondAdult
+                    ? "Add both adults' estimates at the selected claiming age."
+                    : "Enter your estimate at the selected claiming age."}
+                </p>
+              )}
+              {hasSecondAdult && form.adult_2_date_of_birth && (
+                <p className="text-[10px] text-[var(--text-secondary)] mt-1">Split equally between the two adults and started when each person reaches the configured age.</p>
+              )}
             </div>
             <div>
               <label className={labelCls}>SS Start Age</label>
@@ -348,10 +618,17 @@ export default function FireConfigPage() {
         {/* Healthcare */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
           <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-4">Healthcare</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className={labelCls}>Healthcare Monthly ($)</label>
               <input type="number" value={form.healthcare_monthly_cost} onChange={(e) => setForm(f => ({ ...f, healthcare_monthly_cost: e.target.value }))} placeholder="ACA cost pre-Medicare" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Post-Medicare Healthcare ($/month)</label>
+              <input type="number" value={form.post_medicare_healthcare_monthly_cost} onChange={(e) => setForm(f => ({ ...f, post_medicare_healthcare_monthly_cost: e.target.value }))} placeholder="Medicare + supplements" className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+                {hasSecondAdult ? "For both adults: " : "Include "}Part B, Part D, supplements, and routine out-of-pocket costs.
+              </p>
             </div>
             <div>
               <label className={labelCls}>Medicare Start Age</label>
@@ -381,13 +658,126 @@ export default function FireConfigPage() {
               </select>
             </div>
             <div>
-              <label className={labelCls}>State of Residence</label>
-              <input type="text" value={form.state_of_residence} onChange={(e) => setForm(f => ({ ...f, state_of_residence: e.target.value }))} placeholder="CA" maxLength={2} className={inputCls} />
+              <label className={labelCls}>State Tax Model</label>
+              <select
+                value={form.state_of_residence}
+                onChange={(e) => setForm(f => ({
+                  ...f,
+                  state_of_residence: e.target.value,
+                  state_tax_rate: e.target.value === "CO" ? "4.4" : f.state_tax_rate,
+                }))}
+                className={inputCls}
+              >
+                <option value="CO">Colorado (4.4% flat)</option>
+                <option value="CA">California (progressive)</option>
+                <option value="FLAT">Other state (custom flat rate)</option>
+              </select>
             </div>
             <div>
-              <label className={labelCls}>State Tax Rate %</label>
-              <input type="number" step="0.01" value={form.state_tax_rate} onChange={(e) => setForm(f => ({ ...f, state_tax_rate: e.target.value }))} placeholder="5.0" className={inputCls} />
+              <label className={labelCls}>
+                {form.state_of_residence === "CA"
+                  ? "California Tax Model"
+                  : form.state_of_residence === "CO"
+                    ? "Colorado Tax Rate"
+                    : "State Tax Rate %"}
+              </label>
+              {form.state_of_residence === "CA" ? (
+                <div className={`${inputCls} text-[var(--text-secondary)]`}>Progressive (automatic)</div>
+              ) : form.state_of_residence === "CO" ? (
+                <div className={`${inputCls} text-[var(--text-secondary)]`}>4.4% flat</div>
+              ) : (
+                <input type="number" step="0.01" value={form.state_tax_rate} onChange={(e) => setForm(f => ({ ...f, state_tax_rate: e.target.value }))} placeholder="5.0" className={inputCls} />
+              )}
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">
+                {form.state_of_residence === "CA"
+                  ? "Uses published CA brackets, the CA deduction, millionaire surtax, and wage SDI. The saved flat rate is ignored."
+                  : form.state_of_residence === "CO"
+                    ? "Uses the app's original Colorado flat-rate assumption."
+                    : "Enter a flat-rate estimate for a state without a built-in schedule."}
+              </p>
             </div>
+            <div>
+              <label className={labelCls}>Federal Deduction Method</label>
+              <select value={form.federal_deduction_method} onChange={(e) => setForm(f => ({ ...f, federal_deduction_method: e.target.value }))} className={inputCls}>
+                <option value="standard">Standard deduction</option>
+                <option value="itemized">Itemized deduction</option>
+                <option value="greater_of">Best available each year</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>Federal Itemized Deductions ($/year)</label>
+              <input type="number" min={0} value={form.federal_itemized_deduction} onChange={(e) => setForm(f => ({ ...f, federal_itemized_deduction: e.target.value }))} disabled={form.federal_deduction_method !== "itemized"} placeholder="From Schedule A" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>{form.state_of_residence === "CA" ? "California Deduction Method" : "State Deduction Method"}</label>
+              <select value={form.state_deduction_method} onChange={(e) => setForm(f => ({ ...f, state_deduction_method: e.target.value }))} className={inputCls}>
+                <option value="standard">Standard deduction</option>
+                <option value="itemized">Itemized deduction</option>
+                <option value="greater_of">Best available each year</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>{form.state_of_residence === "CA" ? "California Itemized Deductions ($/year)" : "State Itemized Deductions ($/year)"}</label>
+              <input type="number" min={0} value={form.state_itemized_deduction} onChange={(e) => setForm(f => ({ ...f, state_itemized_deduction: e.target.value }))} disabled={form.state_deduction_method !== "itemized"} placeholder="From state return" className={inputCls} />
+            </div>
+            <div className="sm:col-span-2 md:col-span-3 border-t border-[var(--border)] pt-4 mt-1">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.dynamic_itemized_enabled}
+                  onChange={(e) => setForm(f => ({
+                    ...f,
+                    dynamic_itemized_enabled: e.target.checked,
+                    federal_deduction_method: e.target.checked ? "greater_of" : f.federal_deduction_method,
+                    state_deduction_method: e.target.checked ? "greater_of" : f.state_deduction_method,
+                  }))}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="block text-xs font-medium text-[var(--text-primary)]">Model itemized deductions year by year</span>
+                  <span className="block text-[10px] text-[var(--text-secondary)] mt-1">
+                    Amortizes mortgage interest, applies the income-dependent federal SALT cap, and reduces California deductions at high income.
+                  </span>
+                </span>
+              </label>
+            </div>
+            {form.dynamic_itemized_enabled && (
+              <>
+                <div>
+                  <label className={labelCls}>Annual Property Tax ($)</label>
+                  <input type="number" min={0} value={form.annual_property_tax} onChange={(e) => setForm(f => ({ ...f, annual_property_tax: e.target.value }))} placeholder="Property tax only" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Property Tax Growth (% nominal)</label>
+                  <input type="number" min={0} step="0.1" value={form.property_tax_growth_rate} onChange={(e) => setForm(f => ({ ...f, property_tax_growth_rate: e.target.value }))} className={inputCls} />
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-1">2% follows the normal Proposition 13 assessment cap.</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Annual Charitable Gifts ($)</label>
+                  <input type="number" min={0} value={form.annual_charitable_gifts} onChange={(e) => setForm(f => ({ ...f, annual_charitable_gifts: e.target.value }))} placeholder="Recurring annual amount" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Other Federal Itemized ($)</label>
+                  <input type="number" min={0} value={form.annual_other_federal} onChange={(e) => setForm(f => ({ ...f, annual_other_federal: e.target.value }))} placeholder="Excludes mortgage, SALT, gifts" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Other CA Limited Deductions ($)</label>
+                  <input type="number" min={0} value={form.annual_other_california} onChange={(e) => setForm(f => ({ ...f, annual_other_california: e.target.value }))} placeholder="Subject to CA income limitation" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>CA Unlimited Deductions ($)</label>
+                  <input type="number" min={0} value={form.annual_california_unlimited} onChange={(e) => setForm(f => ({ ...f, annual_california_unlimited: e.target.value }))} placeholder="Medical, investment interest, etc." className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Federal Mortgage Debt Limit ($)</label>
+                  <input type="number" min={0} value={form.federal_mortgage_debt_limit} onChange={(e) => setForm(f => ({ ...f, federal_mortgage_debt_limit: e.target.value }))} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>California Mortgage Debt Limit ($)</label>
+                  <input type="number" min={0} value={form.california_mortgage_debt_limit} onChange={(e) => setForm(f => ({ ...f, california_mortgage_debt_limit: e.target.value }))} className={inputCls} />
+                </div>
+              </>
+            )}
             <div>
               <label className={labelCls}>Federal Marginal Rate %</label>
               <input type="number" step="0.1" value={form.federal_marginal_rate} onChange={(e) => setForm(f => ({ ...f, federal_marginal_rate: e.target.value }))} placeholder="Auto-computed" className={inputCls} />
@@ -397,9 +787,9 @@ export default function FireConfigPage() {
               <input type="number" value={form.household_size} onChange={(e) => setForm(f => ({ ...f, household_size: e.target.value }))} placeholder="1" min={1} max={10} className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>Est. Cost Basis %</label>
+              <label className={labelCls}>Fallback Cost Basis %</label>
               <input type="number" step="1" value={form.cost_basis_pct} onChange={(e) => setForm(f => ({ ...f, cost_basis_pct: e.target.value }))} placeholder="60" min={0} max={100} className={inputCls} />
-              <span className="text-[10px] text-[var(--text-secondary)] mt-1 block">% of taxable accounts that is cost basis (not taxed on withdrawal)</span>
+              <span className="text-[10px] text-[var(--text-secondary)] mt-1 block">Used only for taxable holdings whose basis is unavailable; synced account basis takes priority.</span>
             </div>
           </div>
         </div>
@@ -411,6 +801,69 @@ export default function FireConfigPage() {
             Every number that drives the wealth projection. All rates are <strong>real (after inflation, in today's dollars)</strong>.
             Spending stays flat = constant purchasing power. SS stays flat = COLA offsets inflation.
           </p>
+
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-2">Working-Year Retirement Savings</h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <label className={labelCls}>Working Adults</label>
+              <input type="number" min={0} max={4} step="1" value={form.worker_count} onChange={(e) => setForm(f => ({ ...f, worker_count: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Limits below are applied once per working adult.</p>
+            </div>
+            <div>
+              <label className={labelCls}>401(k) / Adult ($/year)</label>
+              <input type="number" min={0} step="500" value={form.annual_401k_per_worker} onChange={(e) => setForm(f => ({ ...f, annual_401k_per_worker: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Pre-tax contribution; reduces ordinary income but not payroll tax.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Roth IRA / Adult ($/year)</label>
+              <input type="number" min={0} step="500" value={form.annual_roth_ira_per_worker} onChange={(e) => setForm(f => ({ ...f, annual_roth_ira_per_worker: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">After-tax Roth or backdoor Roth contribution.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Existing Roth Basis ($)</label>
+              <input type="number" min={0} step="1000" value={form.starting_roth_contribution_basis} onChange={(e) => setForm(f => ({ ...f, starting_roth_contribution_basis: e.target.value }))} placeholder="0 if unknown" className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Historical direct contributions only—not earnings, conversions still seasoning, or HSA assets.</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mt-3">
+            <div>
+              <label className={labelCls}>Qualified HSA Reserve ($)</label>
+              <input type="number" min={0} step="1000" value={form.starting_hsa_qualified_balance} onChange={(e) => setForm(f => ({ ...f, starting_hsa_qualified_balance: e.target.value }))} placeholder="0 if unknown" className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Available early only against modeled qualified healthcare costs.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Contribution Plan Starts</label>
+              <input type="date" value={form.retirement_contribution_start_date} onChange={(e) => setForm(f => ({ ...f, retirement_contribution_start_date: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Leave blank if the plan starts now.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Contribution Plan Ends</label>
+              <input type="date" value={form.retirement_contribution_end_date} onChange={(e) => setForm(f => ({ ...f, retirement_contribution_end_date: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Contributions stop after this phase; employment income may continue.</p>
+            </div>
+          </div>
+
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Roth Conversion Ladder</h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="sm:col-span-2">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" checked={form.roth_conversion_ladder_enabled} onChange={(e) => setForm(f => ({ ...f, roth_conversion_ladder_enabled: e.target.checked }))} className="mt-0.5" />
+                <span>
+                  <span className="block text-xs font-medium text-[var(--text-primary)]">Build a five-year early-retirement ladder</span>
+                  <span className="block text-[10px] text-[var(--text-secondary)] mt-1">Converts traditional assets after retirement, taxes the conversion, then unlocks that principal after the waiting period.</span>
+                </span>
+              </label>
+            </div>
+            <div>
+              <label className={labelCls}>Waiting Period (years)</label>
+              <input type="number" min={1} step="1" value={form.roth_conversion_wait_years} onChange={(e) => setForm(f => ({ ...f, roth_conversion_wait_years: e.target.value }))} disabled={!form.roth_conversion_ladder_enabled} className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Annual Conversion ($)</label>
+              <input type="number" min={0} step="5000" value={form.roth_conversion_annual_amount} onChange={(e) => setForm(f => ({ ...f, roth_conversion_annual_amount: e.target.value }))} disabled={!form.roth_conversion_ladder_enabled} placeholder="Auto: spending gap" className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Leave blank or zero to match the modeled annual retirement spending gap.</p>
+            </div>
+          </div>
 
           {/* Investment & Savings */}
           <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-2">Investment &amp; Savings Returns (Real, After Inflation)</h4>
@@ -453,6 +906,58 @@ export default function FireConfigPage() {
             </div>
           </div>
 
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Monte Carlo Return Model</h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <label className={labelCls}>Simulation Method</label>
+              <select value={form.monte_carlo_simulation_method} onChange={(e) => setForm(f => ({ ...f, monte_carlo_simulation_method: e.target.value }))} className={inputCls}>
+                <option value="historical_blocks">Historical multi-year blocks</option>
+                <option value="parametric">Independent annual shocks</option>
+              </select>
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Historical blocks preserve real crash, recovery, bond, and inflation sequences.</p>
+            </div>
+            {form.monte_carlo_simulation_method === "historical_blocks" ? (
+              <>
+                <div>
+                  <label className={labelCls}>Historical Block Length</label>
+                  <input type="number" min={1} max={20} step="1" value={form.monte_carlo_historical_block_years} onChange={(e) => setForm(f => ({ ...f, monte_carlo_historical_block_years: e.target.value }))} className={inputCls} />
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-1">Seven years retains market regimes without relying on a single fixed historical path.</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Working-Years Stocks %</label>
+                  <input type="number" min={0} max={100} step="5" value={form.monte_carlo_accumulation_stock_weight} onChange={(e) => setForm(f => ({ ...f, monte_carlo_accumulation_stock_weight: e.target.value }))} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Retirement Stocks %</label>
+                  <input type="number" min={0} max={100} step="5" value={form.monte_carlo_retirement_stock_weight} onChange={(e) => setForm(f => ({ ...f, monte_carlo_retirement_stock_weight: e.target.value }))} className={inputCls} />
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <label className={labelCls}>Expected Return Means</label>
+                  <select value={form.monte_carlo_return_mean_type} onChange={(e) => setForm(f => ({ ...f, monte_carlo_return_mean_type: e.target.value }))} className={inputCls}>
+                    <option value="geometric">Compounded return (CAGR)</option>
+                    <option value="arithmetic">Arithmetic annual mean</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Working-Years Volatility %</label>
+                  <input type="number" min={0} max={50} step="0.5" value={form.monte_carlo_accumulation_volatility} onChange={(e) => setForm(f => ({ ...f, monte_carlo_accumulation_volatility: e.target.value }))} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Retirement Volatility %</label>
+                  <input type="number" min={0} max={50} step="0.5" value={form.monte_carlo_retirement_volatility} onChange={(e) => setForm(f => ({ ...f, monte_carlo_retirement_volatility: e.target.value }))} className={inputCls} />
+                </div>
+              </>
+            )}
+          </div>
+          {form.monte_carlo_simulation_method === "historical_blocks" && (
+            <p className="text-[10px] text-[var(--text-secondary)] mt-2">
+              Source: NYU Stern/Damodaran annual S&amp;P 500 total returns, 10-year Treasury returns, and inflation, 1928–2025. Returns are recentered to your Expected Annual Return CAGR.
+            </p>
+          )}
+
           {/* Primary Property */}
           <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Primary Property</h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
@@ -472,24 +977,23 @@ export default function FireConfigPage() {
             </div>
             <div>
               <label className={labelCls}>Primary Property Mortgage P&amp;I $</label>
-              <input type="number" step="1" value={form.primary_property_mortgage_pi} onChange={(e) => setForm(f => ({ ...f, primary_property_mortgage_pi: e.target.value }))} className={inputCls} />
+              <input type="number" step="0.01" value={form.primary_property_mortgage_pi} onChange={(e) => setForm(f => ({ ...f, primary_property_mortgage_pi: e.target.value }))} className={inputCls} />
               <p className="text-[10px] text-[var(--text-secondary)] mt-1">P&amp;I portion of the all-in monthly cost (removed when mortgage paid off)</p>
+            </div>
+            <div>
+              <label className={labelCls}>Mortgage Rate %</label>
+              <input type="number" step="0.01" value={form.primary_property_mortgage_rate} onChange={(e) => setForm(f => ({ ...f, primary_property_mortgage_rate: e.target.value }))} className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Final Mortgage Payment</label>
+              <input type="date" value={form.primary_property_mortgage_payoff_date} onChange={(e) => setForm(f => ({ ...f, primary_property_mortgage_payoff_date: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">The monthly budget automatically drops after this payment.</p>
             </div>
           </div>
 
-          {/* Social Security & Spending */}
-          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Social Security &amp; Spending Phases</h4>
+          {/* Spending phases */}
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Spending Phases</h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <div>
-              <label className={labelCls}>SS Claim Age</label>
-              <input type="number" step="1" value={form.ss_claim_age} onChange={(e) => setForm(f => ({ ...f, ss_claim_age: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">62=early (70%), 67=full (100%)</p>
-            </div>
-            <div>
-              <label className={labelCls}>SS Benefit %</label>
-              <input type="number" step="1" value={form.ss_early_reduction} onChange={(e) => setForm(f => ({ ...f, ss_early_reduction: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">% of full benefit at claim age</p>
-            </div>
             <div>
               <label className={labelCls}>Slow-Go Age</label>
               <input type="number" step="1" value={form.spending_phase_slow_age} onChange={(e) => setForm(f => ({ ...f, spending_phase_slow_age: e.target.value }))} className={inputCls} />
@@ -516,11 +1020,17 @@ export default function FireConfigPage() {
         {/* Income Sources */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
           <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-4">
-            Income Sources
+            Income Plan
             <span className="ml-2 text-xs font-normal">
               ({incomeSources?.length ?? 0})
             </span>
           </h3>
+          <p className="text-xs text-[var(--text-secondary)] mb-4">
+            Use dated phases to model a future pay cut: give the current phase an end date,
+            then add the lower-income phase with the following start date. Gross income feeds
+            the tax calculation. If you enter observed take-home cash, the difference from gross
+            is credited as tax already withheld. Leave it equal to gross to calculate tax separately.
+          </p>
 
           {/* Existing sources */}
           {incomeSources && incomeSources.length > 0 && (
@@ -530,22 +1040,31 @@ export default function FireConfigPage() {
                   <div>
                     <span className="text-sm text-[var(--text-primary)]">{src.name}</span>
                     <span className="ml-2 text-xs text-[var(--text-secondary)]">{src.income_type}</span>
+                    {src.start_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">starts {src.start_date}</span>}
                     {src.end_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">ends {src.end_date}</span>}
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="text-sm font-mono text-[var(--green)]">{formatCurrency(src.annual_amount)}/yr</span>
-                    <button onClick={() => deleteIncome.mutate(src.id)} className="text-xs text-[var(--text-secondary)] hover:text-[var(--red)] transition-colors">&times;</button>
+                    <div className="text-right">
+                      <div className="text-sm font-mono text-[var(--green)]">{formatCurrency(src.annual_amount)}/yr gross</div>
+                      {src.projection_annual_amount !== src.annual_amount && (
+                        <div className="text-[10px] text-[var(--text-secondary)]">
+                          {formatCurrency(src.projection_annual_amount)}/yr cash available; difference treated as withholding
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={() => beginIncomeEdit(src)} className="text-xs text-[var(--blue)] hover:text-[var(--text-primary)] transition-colors">Edit</button>
+                    <button onClick={() => deleteIncome.mutate(src.id)} className="text-xs text-[var(--text-secondary)] hover:text-[var(--red)] transition-colors">Delete</button>
                   </div>
                 </div>
               ))}
             </div>
           )}
 
-          {/* Add new */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3 items-end">
+          {/* Add or edit an income phase */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 items-end">
             <div>
-              <label className={labelCls}>Name</label>
-              <input type="text" value={incomeForm.name} onChange={(e) => setIncomeForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g., Salary" className={inputCls} />
+              <label className={labelCls}>Phase Name</label>
+              <input type="text" value={incomeForm.name} onChange={(e) => setIncomeForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g., Current compensation" className={inputCls} />
             </div>
             <div>
               <label className={labelCls}>Type</label>
@@ -559,16 +1078,39 @@ export default function FireConfigPage() {
               </select>
             </div>
             <div>
-              <label className={labelCls}>Annual ($)</label>
+              <label className={labelCls}>Gross Annual ($)</label>
               <input type="number" value={incomeForm.annual_amount} onChange={(e) => setIncomeForm(f => ({ ...f, annual_amount: e.target.value }))} placeholder="0" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Cash Available to Projection ($)</label>
+              <input type="number" value={incomeForm.projection_annual_amount} onChange={(e) => setIncomeForm(f => ({ ...f, projection_annual_amount: e.target.value }))} placeholder="Equal to gross = calculate tax separately" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Start Date</label>
+              <input type="date" value={incomeForm.start_date} onChange={(e) => setIncomeForm(f => ({ ...f, start_date: e.target.value }))} className={inputCls} />
             </div>
             <div>
               <label className={labelCls}>End Date</label>
               <input type="date" value={incomeForm.end_date} onChange={(e) => setIncomeForm(f => ({ ...f, end_date: e.target.value }))} className={inputCls} />
             </div>
-            <button onClick={handleAddIncome} disabled={createIncome.isPending} className="px-3 py-2 text-xs font-medium bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--blue)] transition-colors disabled:opacity-50">
-              Add
-            </button>
+            <div>
+              <label className={labelCls}>Annual Raise %</label>
+              <input type="number" step="0.1" value={incomeForm.growth_rate} onChange={(e) => setIncomeForm(f => ({ ...f, growth_rate: e.target.value }))} placeholder="0" className={inputCls} />
+            </div>
+            <label className="flex items-center gap-2 pb-2 text-xs text-[var(--text-secondary)]">
+              <input type="checkbox" checked={incomeForm.is_taxable} onChange={(e) => setIncomeForm(f => ({ ...f, is_taxable: e.target.checked }))} />
+              Gross amount is taxable
+            </label>
+            <div className="sm:col-span-2 md:col-span-4 flex gap-2">
+              <button onClick={handleSaveIncome} disabled={createIncome.isPending || updateIncome.isPending} className="px-3 py-2 text-xs font-medium bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--blue)] transition-colors disabled:opacity-50">
+                {editingIncomeId ? "Save Income Phase" : "Add Income Phase"}
+              </button>
+              {editingIncomeId && (
+                <button onClick={resetIncomeForm} className="px-3 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+                  Cancel
+                </button>
+              )}
+            </div>
           </div>
           {incomeError && (
             <p className="text-xs text-[var(--red)] mt-2">{incomeError}</p>
@@ -784,6 +1326,9 @@ function ExpenseBreakdown({
   const healthcareMo = config?.healthcare_monthly_cost
     ? Math.round(config.healthcare_monthly_cost / 100)
     : 0;
+  const postMedicareMo = config?.post_medicare_healthcare_monthly_cost
+    ? Math.round(config.post_medicare_healthcare_monthly_cost / 100)
+    : 0;
 
   const Row = ({ label, value, color, indent }: { label: string; value: string; color?: string; indent?: boolean }) => (
     <div className={`flex justify-between ${indent ? "ml-3" : ""}`}>
@@ -840,7 +1385,8 @@ function ExpenseBreakdown({
           ))}
         </div>
         <p className="text-[10px] text-[var(--text-secondary)] mt-3 italic">
-          Source: fire_config.target_annual_spending + healthcare_monthly_cost (${healthcareMo}/mo, drops at Medicare)
+          Source: base spending + pre-Medicare healthcare (${healthcareMo}/mo), then
+          post-Medicare healthcare (${postMedicareMo}/mo)
           + custom_assumptions.property_sales. Spending phases apply on top.
         </p>
       </div>
@@ -871,7 +1417,7 @@ function ExpenseBreakdown({
   const phase2 = hasSauvieSale
     ? baseBurn - miamiCost + postSaleRent - sauvieCost + healthcareMo // after primary sale too
     : baseBurn - miamiCost + postSaleRent + healthcareMo;
-  const phase2noHC = phase2 - healthcareMo; // post-Medicare
+  const phase2Medicare = phase2 - healthcareMo + postMedicareMo;
 
   return (
     <div className="bg-[var(--bg-card)] rounded p-3 border border-[var(--border)] md:col-span-2">
@@ -920,12 +1466,12 @@ function ExpenseBreakdown({
           <Row label="Healthcare (until Medicare)" value={`+$${healthcareMo}`} color="red" />
           <div className="border-t border-[var(--border)] pt-1 mt-1">
             <Row label="Pre-Medicare" value={`$${phase2.toLocaleString()}/mo`} color="red" />
-            <Row label="Post-Medicare" value={`$${phase2noHC.toLocaleString()}/mo`} />
+            <Row label="Post-Medicare" value={`$${phase2Medicare.toLocaleString()}/mo`} />
           </div>
         </div>
       </div>
       <p className="text-[10px] text-[var(--text-secondary)] mt-3 italic">
-        Source: fire_config.target_annual_spending + healthcare_monthly_cost + scenario property adjustments (legacy keys).
+        Source: base spending + pre/post-Medicare healthcare + scenario property adjustments (legacy keys).
         P&amp;I from custom_assumptions.projection.primary_property_mortgage_pi. Spending phases apply on top.
       </p>
     </div>

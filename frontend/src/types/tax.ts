@@ -17,6 +17,9 @@ export interface BracketRoomInfo {
 export interface AccountBalanceDetail {
   name: string;
   balance: number;
+  cost_basis?: number | null;
+  cost_basis_pct?: number | null;
+  basis_source?: string | null;
 }
 
 export interface AccountBalanceSummary {
@@ -27,6 +30,9 @@ export interface AccountBalanceSummary {
   tax_deferred_accounts: AccountBalanceDetail[];
   tax_free_accounts: AccountBalanceDetail[];
   taxable_accounts: AccountBalanceDetail[];
+  taxable_cost_basis: number;
+  taxable_cost_basis_pct: number;
+  taxable_basis_coverage_pct: number;
 }
 
 export interface ACASnapshot {
@@ -44,13 +50,30 @@ export interface BracketAnalysis {
   filing_status: string;
   gross_income: number;
   standard_deduction: number;
+  federal_deduction_method: string;
+  federal_itemized_deduction: number;
+  federal_salt_deduction: number;
+  federal_mortgage_interest: number;
   taxable_income: number;
   federal_tax: number;
   federal_brackets: BracketDetail[];
   federal_effective_rate: number;
   federal_marginal_rate: number;
   state_tax: number;
+  state: string;
+  state_gross_income: number;
   state_rate: number;
+  state_tax_method: string;
+  state_taxable_income: number;
+  state_standard_deduction: number;
+  state_deduction_method: string;
+  state_itemized_before_limit: number;
+  state_itemized_limitation: number;
+  state_mortgage_interest: number;
+  state_income_tax: number;
+  state_payroll_tax: number;
+  state_effective_rate: number;
+  state_marginal_rate: number;
   fica_tax: number;
   total_tax: number;
   overall_effective_rate: number;
@@ -64,6 +87,9 @@ export interface BracketAnalysis {
 export interface WithdrawalYear {
   year: number;
   age: number;
+  spending_need: number;
+  taxes_funded: number;
+  net_spendable: number;
   from_taxable: number;
   from_deferred: number;
   from_roth: number;
@@ -194,4 +220,22 @@ export interface MonteCarloResult {
   percentile_curves: PercentileCurvePoint[];
   worst_final_nw: number;
   best_final_nw: number;
+  starting_spendable_assets: number;
+  excluded_non_spendable_assets: number;
+  assumptions?: Record<string, unknown> | null;
+}
+
+export interface RetirementConfidenceAge {
+  confidence: number;
+  earliest_age: number | null;
+  success_rate: number | null;
+  prior_age_success_rate: number | null;
+}
+
+export interface RetirementAgeAnalysis {
+  configured_retirement_age: number | null;
+  current_age: number;
+  max_tested_age: number;
+  runs_per_age: number;
+  confidence_ages: RetirementConfidenceAge[];
 }

@@ -76,8 +76,8 @@ class TestVocabulary:
     def test_vocabulary_is_complete(self):
         s = _status()
         all_roles = {r for group in s.valid_fire_roles.values() for r in group}
-        assert len(all_roles) == 15  # 13 pool roles + depreciating (inert) + system
-        assert {"system", "retirement_core", "depreciating"} <= all_roles
+        assert len(all_roles) == 16  # pool roles + education + depreciating + system
+        assert {"system", "retirement_core", "education_restricted", "depreciating"} <= all_roles
 
     def test_demo_mode_lock_noted(self):
         s = _status(demo_mode=True, demo_persona=True, accounts_total=17)

@@ -38,6 +38,7 @@ class FireConfig(Base):
 
     # Healthcare + Medicare
     healthcare_monthly_cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    post_medicare_healthcare_monthly_cost: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     medicare_start_age: Mapped[int] = mapped_column(Integer, nullable=False, default=65)
 
     # Tax + RMDs

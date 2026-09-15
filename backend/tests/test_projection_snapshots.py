@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.engines.fire_projections import FireProjectionsEngine
+from app.models.enums import IncomeType
 from app.models.fire_config import FireConfig
 from app.schemas.fire import NetWorthBreakdown
 from tests.conftest import (
@@ -66,6 +67,137 @@ def _make_engine(
     return engine
 
 
+def _account(role: str, dollars: float, *, is_asset: bool = True):
+    account = MagicMock()
+    account.fire_role = role
+    account.current_balance = round(dollars * 100)
+    account.is_asset = is_asset
+    account.include_in_net_worth = True
+    return account
+
+
+class TestProjectionIncome:
+    @pytest.mark.asyncio
+    async def test_social_security_uses_main_amount_and_age_once(self, frozen_today):
+        config = _make_fire_config(target_annual_spending=0)
+        config.social_security_monthly = 100_000
+        config.social_security_start_age = 53
+        config.custom_assumptions = {
+            "projection": {"ss_claim_age": 62, "ss_early_reduction": 0.10},
+        }
+        breakdown = NetWorthBreakdown(
+            liquid=20_000, retirement=0, real_estate_equity=0,
+            illiquid_private=0, other=0,
+        )
+        engine = _make_engine(config, breakdown, [], [])
+
+        result = await engine.project_wealth_pools(end_age=54)
+
+        assert any(point.age >= 53 and point.income == 1_000 for point in result.points)
+        assert all(point.income != 100 for point in result.points)
+
+    @pytest.mark.asyncio
+    async def test_salary_flows_until_configured_retirement_date(self, frozen_today):
+        config = _make_fire_config(target_annual_spending=12_000_000)
+        config.target_retirement_age = 53
+        config.healthcare_monthly_cost = None
+        config.social_security_monthly = None
+        config.custom_assumptions = {}
+        salary = MagicMock()
+        salary.name = "Household take-home pay"
+        salary.income_type = IncomeType.SALARY
+        salary.annual_amount = 12_000_000
+        salary.start_date = None
+        salary.end_date = None
+        salary.growth_rate = None
+        breakdown = NetWorthBreakdown(
+            liquid=20_000, retirement=0, real_estate_equity=0,
+            illiquid_private=0, other=0,
+        )
+        engine = _make_engine(config, breakdown, [], [], [salary])
+
+        result = await engine.project_wealth_pools(end_age=54, bridge_months=12)
+
+        assert result.points[0].income == 10_000
+        assert any(point.age >= 53 and point.income == 0 for point in result.points)
+
+    @pytest.mark.asyncio
+    async def test_working_contributions_move_wages_into_retirement_pools(
+        self, frozen_today,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=0,
+            target_retirement_age=80,
+            expected_annual_return=0,
+            expected_inflation_rate=0,
+        )
+        config.healthcare_monthly_cost = None
+        config.social_security_monthly = None
+        config.custom_assumptions = {
+            "projection": {"cash_reserve_months": 0},
+            "retirement_contributions": {
+                "worker_count": 1,
+                "annual_401k_per_worker": 12_000,
+                "annual_roth_ira_per_worker": 12_000,
+            },
+        }
+        salary = MagicMock()
+        salary.name = "Salary"
+        salary.income_type = IncomeType.SALARY
+        salary.annual_amount = 2_400_000
+        salary.start_date = None
+        salary.end_date = None
+        salary.growth_rate = None
+        breakdown = NetWorthBreakdown(
+            liquid=0, retirement=0, real_estate_equity=0,
+            illiquid_private=0, other=0,
+        )
+        engine = _make_engine(config, breakdown, [], [], [salary])
+
+        result = await engine.project_wealth_pools(end_age=54, bridge_months=1)
+        first = result.points[0]
+
+        assert first.income == 2_000
+        assert first.ira_growth == 1_000
+        assert first.roth == 1_000
+        assert first.cash == 0
+        assert first.total == 2_000
+
+    @pytest.mark.asyncio
+    async def test_primary_mortgage_amortizes_and_payment_ends(self, frozen_today):
+        config = _make_fire_config(target_annual_spending=12_000_000)
+        config.healthcare_monthly_cost = None
+        config.social_security_monthly = None
+        config.custom_assumptions = {
+            "projection": {
+                "re_appreciation_rate": 0.0,
+                "primary_property_mortgage_pi": 5_689.74,
+                "primary_property_mortgage_rate": 0.025,
+                "primary_property_mortgage_payoff_date": "2051-03-01",
+                "spending_phase_slow_age": 100,
+                "spending_phase_floor_age": 110,
+            },
+        }
+        accounts = [
+            _account("primary_residence", 2_000_000),
+            _account("primary_mortgage", 1_249_905.13, is_asset=False),
+        ]
+        breakdown = NetWorthBreakdown(
+            liquid=10_000_000, retirement=0, real_estate_equity=750_094.87,
+            illiquid_private=0, other=0,
+        )
+        engine = _make_engine(config, breakdown, accounts, [])
+
+        result = await engine.project_wealth_pools(end_age=79, bridge_months=400)
+        before = next(p for p in result.points if p.date.startswith("2051-02"))
+        after = next(p for p in result.points if p.date.startswith("2051-03"))
+
+        assert before.expenses == 10_000
+        assert after.expenses == pytest.approx(4_310, abs=1)
+        assert after.real_estate == pytest.approx(2_000_000, abs=1)
+        assert any(e["label"] == "Home mortgage paid off" for e in result.events)
+
+
 # ---------------------------------------------------------------------------
 # Snapshot tests
 # ---------------------------------------------------------------------------
@@ -84,8 +216,8 @@ class TestKeepBothOptimized:
     @pytest.mark.asyncio
     async def test_final_wealth(self, engine, frozen_today):
         result = await engine.project_wealth_pools(end_age=82)
-        assert abs(result.total_at_end - 2_370_000) < TOLERANCE, (
-            f"Keep Both total_at_end={result.total_at_end:.0f}, expected ~2,370,000"
+        assert abs(result.total_at_end - 2_265_000) < TOLERANCE, (
+            f"Keep Both total_at_end={result.total_at_end:.0f}, expected ~2,265,000"
         )
 
     @pytest.mark.asyncio
@@ -124,8 +256,11 @@ class TestPrimaryExit5Year:
     @pytest.mark.asyncio
     async def test_final_wealth(self, engine, frozen_today):
         result = await engine.project_wealth_pools(end_age=82)
-        assert abs(result.total_at_end - 2_240_000) < TOLERANCE, (
-            f"Primary 5yr total_at_end={result.total_at_end:.0f}, expected ~2,240,000"
+        # The configured benefit now begins at the main FIRE config's claim
+        # age (67), rather than being reduced again and started at the legacy
+        # projection-only age (62).
+        assert abs(result.total_at_end - 2_080_000) < TOLERANCE, (
+            f"Primary 5yr total_at_end={result.total_at_end:.0f}, expected ~2,080,000"
         )
 
     @pytest.mark.asyncio
@@ -251,8 +386,8 @@ class TestSpendingOverride:
         engine_2 = _make_engine(config, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources)
         result_default = await engine_2.project_wealth_pools(end_age=82)
 
-        assert abs(result_default.total_at_end - 2_370_000) < TOLERANCE, (
-            f"Default run after override: {result_default.total_at_end:.0f}, expected ~2,370,000"
+        assert abs(result_default.total_at_end - 2_265_000) < TOLERANCE, (
+            f"Default run after override: {result_default.total_at_end:.0f}, expected ~2,265,000"
         )
 
 

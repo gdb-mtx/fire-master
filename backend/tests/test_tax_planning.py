@@ -11,9 +11,10 @@ Documented simplifications (asserted here as intended behavior, not bugs):
   cliff_warning only fires on the *approaching* side of the 400% FPL cliff.
 - The withdrawal sequencer runs in REAL terms: spending flat, balances at
   the real return ((1.07/1.03)−1 for the persona), brackets frozen at
-  today's levels (≈ IRS inflation indexing). Taxes are reported but not
-  deducted from balances. Shortfalls draw through the waterfall
-  pre-retirement too.
+  today's levels (≈ IRS inflation indexing). By default, taxes are reported
+  but not deducted from balances; the source-aware gross-up tests explicitly
+  enable funding taxes from withdrawals. Shortfalls draw through the
+  waterfall pre-retirement too.
 - total_withdrawn excludes cash draws (cash is already-taxed money).
   average_effective_rate = total tax / total GROSS income (income sources +
   all draws), matching each year's effective_rate — fire-master#4 killed the
@@ -56,6 +57,9 @@ def frozen_today_tax():
 def _acct(dollars: float) -> MagicMock:
     a = MagicMock()
     a.current_balance = round(dollars * 100)
+    a.name = "Test account"
+    a.extra_data = {}
+    a.custom_data = {}
     return a
 
 
@@ -255,7 +259,230 @@ class TestRothConversionPlan:
 # ---------------------------------------------------------------------------
 
 class TestWithdrawalSequence:
+    def test_synced_basis_is_weighted_and_fallback_only_fills_gaps(self):
+        synced = _acct(1_000)
+        synced.name = "Partially covered"
+        synced.extra_data = {
+            "taxable_basis": {
+                "holdings_value_cents": 80_000,
+                "basis_covered_value_cents": 60_000,
+                "cost_basis_cents": 30_000,
+            },
+        }
+        manual = _acct(500)
+        manual.name = "Manual basis"
+        manual.custom_data = {"taxable_cost_basis_cents": 40_000}
+
+        result = TaxEngine.estimate_taxable_cost_basis(
+            [synced, manual], fallback_pct=0.60,
+        )
+
+        # Synced: $300 known basis + $200 cash + 60% of $200 unknown = $620.
+        # Manual: $400. Aggregate = $1,020 / $1,500 = 68% basis.
+        assert result["cost_basis"] == pytest.approx(1_020)
+        assert result["cost_basis_pct"] == pytest.approx(0.68)
+        assert result["coverage_pct"] == pytest.approx(1_300 / 1_500, abs=0.0001)
+
+    async def test_taxable_basis_does_not_grow_with_market_value(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=10_000,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions = {
+            "tax": {"cost_basis_pct": 0.60},
+            "sepp": {"sepp_monthly": 0},
+            "projection": {"cash_reserve_months": 0},
+        }
+        account = _acct(1_000)
+        account.custom_data = {"taxable_cost_basis_cents": 50_000}
+        engine = _make_planning_engine(taxable=1_000)
+        engine.get_accounts_by_tax_treatment.return_value.taxable = [account]
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=2, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].capital_gains_income == pytest.approx(50)
+        assert plan.years[1].capital_gains_income > 50
+
+    async def test_pre_59_half_deferred_is_locked_without_sepp(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(healthcare_monthly_cost=None)
+        config.custom_assumptions["sepp"] = {"sepp_monthly": 0}
+        config.custom_assumptions["sepp_bridge"] = False
+        engine = _make_planning_engine(deferred=1_000_000)
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].age < 59.5
+        assert plan.years[0].from_deferred == 0
+
+    async def test_working_surplus_becomes_future_bridge_cash(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=6_000_000,
+            target_retirement_age=80,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        salary = _income_source(
+            "One-year salary", IncomeType.SALARY, 100_000,
+            end=date(2026, 12, 31), taxable=False,
+        )
+        engine = _make_planning_engine(income_sources=[salary])
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=2, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].from_cash == 0
+        assert plan.years[1].from_cash == pytest.approx(40_000)
+
+    async def test_cash_above_reserve_is_used_before_taxable(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.target_annual_spending = 6_000_000
+        base_fire_config.healthcare_monthly_cost = None
+        engine = _make_planning_engine(cash=200_000, taxable=200_000)
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].from_cash == pytest.approx(60_000)
+        assert plan.years[0].from_taxable == 0
+
+    async def test_unused_itemized_deduction_shields_taxable_gains(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.custom_assumptions["tax"] = {
+            **base_fire_config.custom_assumptions["tax"],
+            "state": "CA",
+            "filing_status": "married_filing_jointly",
+            "fund_taxes_from_withdrawals": True,
+            "federal_deduction_method": "greater_of",
+            "state_deduction_method": "greater_of",
+            "itemized_deductions": {
+                "enabled": True,
+                "annual_charitable_gifts": 100_000,
+            },
+        }
+        engine = _make_planning_engine(taxable=1_000_000)
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.capital_gains_income > 0
+        assert year.federal_tax == 0
+        assert year.state_tax == 0
+        assert year.taxes_funded == 0
+        assert year.net_spendable == pytest.approx(year.spending_need)
+
+    async def test_california_excludes_social_security(self, base_fire_config, frozen_today_tax):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.target_annual_spending = 4_000_000
+        base_fire_config.custom_assumptions["tax"] = {
+            **base_fire_config.custom_assumptions["tax"],
+            "state": "CA",
+            "filing_status": "married_filing_jointly",
+        }
+        social_security = _income_source(
+            "Social Security", IncomeType.SOCIAL_SECURITY, 50_000,
+        )
+        engine = _make_planning_engine(income_sources=[social_security])
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.state_tax == 0
+        assert year.from_taxable == 0
+        assert year.from_deferred == 0
+
+    async def test_tax_deferred_withdrawals_are_grossed_up_to_fund_tax(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.healthcare_monthly_cost = None
+        # This test isolates tax gross-up, so make the deferred pool fully
+        # accessible instead of relying on the fixture's capped SEPP payment.
+        base_fire_config.custom_assumptions["penalty_free_age"] = 0
+        base_fire_config.custom_assumptions["tax"]["fund_taxes_from_withdrawals"] = True
+        engine = _make_planning_engine(deferred=1_000_000)
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.from_deferred > year.spending_need
+        assert year.taxes_funded == pytest.approx(year.total_tax, abs=0.02)
+        assert year.net_spendable == pytest.approx(year.spending_need, abs=0.05)
+
+    async def test_net_salary_credits_only_implied_withholding(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.target_annual_spending = 12_000_000
+        base_fire_config.target_retirement_age = 60
+        base_fire_config.custom_assumptions["tax"]["fund_taxes_from_withdrawals"] = True
+        salary = _income_source("Gross salary", IncomeType.SALARY, 200_000)
+        salary.custom_data = {"net_annual_amount": 19_000_000}
+        engine = _make_planning_engine(deferred=1_000_000, income_sources=[salary])
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.from_deferred == 0
+        assert year.taxes_funded == pytest.approx(year.total_tax - 10_000, abs=0.02)
+        assert year.net_spendable == pytest.approx(190_000 - year.taxes_funded, abs=0.05)
+
+    async def test_one_net_source_does_not_prepay_tax_for_another_source(
+        self, base_fire_config, frozen_today_tax,
+    ):
+        base_fire_config.healthcare_monthly_cost = None
+        base_fire_config.target_annual_spending = 12_000_000
+        base_fire_config.target_retirement_age = 60
+        base_fire_config.custom_assumptions["tax"]["fund_taxes_from_withdrawals"] = True
+        net_salary = _income_source("Net salary", IncomeType.SALARY, 200_000)
+        net_salary.custom_data = {"net_annual_amount": 15_000_000}
+        gross_bonus = _income_source("Gross bonus", IncomeType.BONUS, 200_000)
+        engine = _make_planning_engine(
+            deferred=1_000_000,
+            income_sources=[net_salary, gross_bonus],
+        )
+
+        with _patch_config(base_fire_config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.taxes_funded == pytest.approx(year.total_tax - 50_000, abs=0.02)
+        assert year.taxes_funded > 0
+
     async def test_waterfall_order_taxable_first(self, base_fire_config, frozen_today_tax):
+        base_fire_config.healthcare_monthly_cost = None
         engine = _make_planning_engine(taxable=800_000, deferred=400_000, roth=200_000)
         with _patch_config(base_fire_config):
             plan = await engine.optimize_withdrawal_sequence(
@@ -270,9 +497,17 @@ class TestWithdrawalSequence:
         assert y1.from_taxable == pytest.approx(153_000, rel=1e-6)
         assert y1.from_deferred == 0
         assert y1.from_roth == 0
-        assert y1.capital_gains_income == pytest.approx(y1.from_taxable * 0.4)
+        # Basis is reduced pro rata when sold but does not grow with the market,
+        # so the gain share rises in year 1 instead of staying fixed at 40%.
+        remaining_basis = 800_000 * 0.60 - 153_000 * 0.60
+        grown_balance = (800_000 - 153_000) * (1.07 / 1.03)
+        expected_gain = 153_000 * (1 - remaining_basis / grown_balance)
+        assert y1.capital_gains_income == pytest.approx(expected_gain, rel=1e-6)
 
     async def test_depletion_cascades(self, base_fire_config, frozen_today_tax):
+        base_fire_config.healthcare_monthly_cost = None
+        # This test isolates pool order; accessibility is covered separately.
+        base_fire_config.custom_assumptions["penalty_free_age"] = 0
         engine = _make_planning_engine(taxable=150_000, deferred=300_000, roth=500_000)
         with _patch_config(base_fire_config):
             plan = await engine.optimize_withdrawal_sequence(
@@ -284,6 +519,131 @@ class TestWithdrawalSequence:
         # Year 1: taxable is empty — everything from deferred (flat real need).
         assert y1.from_taxable == 0
         assert y1.from_deferred == pytest.approx(153_000, rel=1e-6)
+
+    async def test_working_contributions_are_transfers_and_reduce_taxable_wages(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=4_000_000,
+            target_retirement_age=80,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 1,
+            "annual_401k_per_worker": 20_000,
+            "annual_roth_ira_per_worker": 10_000,
+            "starting_roth_contribution_basis": 0,
+        }
+        salary = _income_source(
+            "Salary", IncomeType.SALARY, 100_000,
+            end=date(2026, 12, 31), taxable=True,
+        )
+        engine = _make_planning_engine(income_sources=[salary])
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.total_income == pytest.approx(100_000)
+        assert year.net_spendable == pytest.approx(70_000)
+        assert year.ordinary_income == pytest.approx(80_000)
+        assert year.fica_tax == pytest.approx(
+            engine.compute_fica(100_000, "single"),
+        )
+
+    async def test_contributions_stop_before_lower_income_phase(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=4_000_000,
+            target_retirement_age=80,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 1,
+            "annual_401k_per_worker": 20_000,
+            "annual_roth_ira_per_worker": 10_000,
+            "end_date": "2026-12-31",
+        }
+        salary = _income_source(
+            "Salary", IncomeType.SALARY, 100_000, taxable=True,
+        )
+        engine = _make_planning_engine(income_sources=[salary])
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=2, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].ordinary_income == pytest.approx(80_000)
+        assert plan.years[0].net_spendable == pytest.approx(70_000)
+        assert plan.years[1].ordinary_income == pytest.approx(100_000)
+        assert plan.years[1].net_spendable == pytest.approx(100_000)
+
+    async def test_hsa_reserve_only_funds_qualified_healthcare_costs(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=3_000_000,
+            target_retirement_age=52,
+            healthcare_monthly_cost=100_000,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions["sepp"] = {"sepp_monthly": 0}
+        config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 0,
+            "starting_roth_contribution_basis": 0,
+            "starting_hsa_qualified_balance": 20_000,
+        }
+        engine = _make_planning_engine(roth=100_000)
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        # Base spending is not HSA-qualified. Only the separate $12K annual
+        # healthcare budget can come from the configured HSA reserve.
+        assert plan.years[0].spending_need == pytest.approx(42_000)
+        assert plan.years[0].from_roth == pytest.approx(12_000)
+
+    async def test_roth_basis_and_matured_conversion_are_early_accessible(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=3_000_000,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions["sepp"] = {"sepp_monthly": 0}
+        config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 0,
+            "starting_roth_contribution_basis": 40_000,
+        }
+        config.custom_assumptions["roth_conversion_ladder"] = {
+            "enabled": True,
+            "wait_years": 5,
+            "annual_conversion": 30_000,
+        }
+        engine = _make_planning_engine(cash=180_000, deferred=1_000_000, roth=100_000)
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=7, roth_conversions_enabled=False,
+            )
+
+        # Existing contribution basis bridges the last year before the first
+        # conversion matures.
+        assert plan.years[5].from_roth == pytest.approx(30_000)
+        # First retired calendar year creates the rung; it is not a withdrawal.
+        assert plan.years[1].roth_conversion == pytest.approx(30_000)
+        # Five tax years later, the conversion principal can fund the gap.
+        assert plan.years[6].age < 59.5
+        assert plan.years[6].from_roth == pytest.approx(30_000)
 
     async def test_rmd_forced_at_73_excess_lands_in_taxable(self, frozen_today_tax):
         """Age 73+: the full RMD comes out of deferred even when spending needs
@@ -360,7 +720,10 @@ class TestWithdrawalSequence:
         yield compounds. Cash-only plan, $170K vs $60K flat spending —
         year 2's partial draw pins the behavior exactly."""
         # Default: real yield 0 → cash balance just depletes
-        config = _make_fire_config(target_annual_spending=6_000_000)  # $60K
+        config = _make_fire_config(
+            target_annual_spending=6_000_000,
+            healthcare_monthly_cost=None,
+        )  # $60K
         engine = _make_planning_engine(cash=170_000)
         with _patch_config(config):
             plan = await engine.optimize_withdrawal_sequence(
@@ -374,7 +737,10 @@ class TestWithdrawalSequence:
         assert y0.after_tax_income == pytest.approx(y0.from_cash - y0.total_tax)
 
         # Configured +2% REAL yield (HYSA above inflation) → compounds
-        config2 = _make_fire_config(target_annual_spending=6_000_000)
+        config2 = _make_fire_config(
+            target_annual_spending=6_000_000,
+            healthcare_monthly_cost=None,
+        )
         config2.custom_assumptions["tax"] = {
             **config2.custom_assumptions["tax"], "cash_yield_rate": 0.02,
         }

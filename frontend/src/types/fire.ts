@@ -14,6 +14,7 @@ export interface FireConfig {
   pension_monthly: number | null;
   pension_start_age: number | null;
   healthcare_monthly_cost: number | null;
+  post_medicare_healthcare_monthly_cost: number | null;
   medicare_start_age: number;
   rmd_start_age: number;
   state_tax_rate: number | null;
@@ -30,6 +31,8 @@ export interface IncomeSource {
   annual_amount_cents: number;
   annual_amount: number;
   monthly_amount: number;
+  projection_annual_amount_cents: number;
+  projection_annual_amount: number;
   frequency: string;
   start_date: string | null;
   end_date: string | null;
@@ -70,12 +73,18 @@ export interface NetWorthBreakdown {
   retirement: number;
   real_estate_equity: number;
   illiquid_private: number;
+  education: number;
   other: number;
 }
 
 export interface FireNumber {
   fire_number: number;
   annual_spending: number;
+  base_annual_spending: number | null;
+  healthcare_annual: number;
+  estimated_annual_taxes: number;
+  lifetime_spend_down_number: number | null;
+  taxes_included: boolean;
   safe_withdrawal_rate: number;
   current_net_worth: number;
   gap: number;
@@ -124,6 +133,8 @@ export interface SpendingSensitivityPoint {
 export interface SpendingBreakdown {
   primary_property_all_in: number;
   primary_property_pi: number;
+  primary_property_mortgage_rate_pct: number;
+  primary_property_mortgage_payoff_date: string | null;
   income_property_cost: number;
   secondary_property_cost: number;
   non_housing: number;
@@ -193,7 +204,8 @@ export interface WealthPoolPoint {
   roth_draw?: number;
   total: number;
   income: number;
-  expenses: number;
+  expenses: number; // total outflow: living costs plus modeled taxes
+  modeled_taxes?: number;
   ira_draw: number; // SEPP + IRA-B gap draw + any forced RMD
   rmd_redeposit?: number; // part of ira_draw redeposited to taxable by an RMD (never reaches cash)
   rrsp_draw: number;
