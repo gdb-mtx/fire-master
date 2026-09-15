@@ -1180,7 +1180,9 @@ class TaxEngine:
             FireProjectionsEngine,
             _annual_spending_with_mortgage,
             _contribution_policy_active,
-            _healthcare_monthly_cents_at_age,
+            _healthcare_monthly_cents_at_date,
+            _household_social_security_monthly_cents,
+            _household_survivor_spending_multiplier,
             _retirement_savings_settings,
         )
 
@@ -1267,14 +1269,21 @@ class TaxEngine:
 
             # Spending: flat in real terms (constant purchasing power)
             spending_need = _annual_spending_with_mortgage(
-                annual_need, 1.0, config, current_year,
+                annual_need,
+                _household_survivor_spending_multiplier(config, current_date),
+                config,
+                current_year,
             )
-            if is_retired:
-                spending_need += (
-                    _healthcare_monthly_cents_at_age(config, age) * 12 / 100
+            annual_healthcare = sum(
+                _healthcare_monthly_cents_at_date(
+                    config, date(current_year, month, 1),
                 )
+                for month in range(1, 13)
+            ) / 100
+            if is_retired:
+                spending_need += annual_healthcare
             qualified_healthcare_spending = (
-                _healthcare_monthly_cents_at_age(config, age) * 12 / 100
+                annual_healthcare
                 if is_retired else 0.0
             )
             hsa_eligible_remaining = min(
@@ -1353,9 +1362,12 @@ class TaxEngine:
             # Social Security from config (if not in income sources) —
             # prorated in its first year (a mid-year start is half a year)
             if config.social_security_monthly and config.date_of_birth and ss_income == 0:
-                ss_start = config.date_of_birth + relativedelta(years=config.social_security_start_age)
-                ss_income = (config.social_security_monthly * 12 / 100) * _year_fraction(
-                    current_year, start=ss_start)
+                ss_income = sum(
+                    _household_social_security_monthly_cents(
+                        config, date(current_year, month, 1),
+                    )
+                    for month in range(1, 13)
+                ) / 100
                 taxable_ss = ss_income
                 gross_non_withdrawal_income += ss_income
 

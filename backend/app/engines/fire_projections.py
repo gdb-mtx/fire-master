@@ -82,6 +82,144 @@ def _healthcare_monthly_cents_at_age(config: FireConfig, age: float) -> int:
     return config.post_medicare_healthcare_monthly_cost or 0
 
 
+def _parse_config_date(value: object) -> date | None:
+    """Parse an optional ISO date stored in custom assumptions."""
+    if isinstance(value, dt_lib.date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _household_settings(config: FireConfig) -> dict[str, object]:
+    """Return normalized two-adult planning assumptions.
+
+    The original top-level birth date/life expectancy remain Adult 1 so old
+    profiles keep their exact behavior. Adult 2 is opt-in and lives under
+    custom_assumptions.household to avoid a database migration.
+    """
+    household = (config.custom_assumptions or {}).get("household", {}) or {}
+    adult_2_dob = _parse_config_date(household.get("adult_2_date_of_birth"))
+    try:
+        adult_2_life = int(household.get("adult_2_life_expectancy") or 0)
+    except (TypeError, ValueError):
+        adult_2_life = 0
+    has_adult_2 = adult_2_dob is not None and adult_2_life > 0
+    survivor_value = household.get("survivor_spending_pct", 0.70)
+    try:
+        survivor_pct = float(0.70 if survivor_value is None else survivor_value)
+    except (TypeError, ValueError):
+        survivor_pct = 0.70
+    return {
+        "adult_2_dob": adult_2_dob if has_adult_2 else None,
+        "adult_2_life_expectancy": adult_2_life if has_adult_2 else None,
+        "survivor_spending_pct": max(0.0, min(1.0, survivor_pct)),
+    }
+
+
+def _household_projection_end_date(
+    config: FireConfig,
+    fallback: date,
+    primary_life_expectancy: int | None = None,
+) -> date:
+    """End a plan at the later modeled death in a two-adult household."""
+    end_dates: list[date] = []
+    if config.date_of_birth:
+        end_dates.append(config.date_of_birth + relativedelta(
+            years=primary_life_expectancy or config.life_expectancy,
+        ))
+    household = _household_settings(config)
+    adult_2_dob = household["adult_2_dob"]
+    adult_2_life = household["adult_2_life_expectancy"]
+    if isinstance(adult_2_dob, dt_lib.date) and isinstance(adult_2_life, int):
+        end_dates.append(adult_2_dob + relativedelta(years=adult_2_life))
+    return max(end_dates) if end_dates else fallback
+
+
+def _household_survivor_spending_multiplier(config: FireConfig, current: date) -> float:
+    """Reduce discretionary household spending after the first modeled death."""
+    household = _household_settings(config)
+    adult_2_dob = household["adult_2_dob"]
+    adult_2_life = household["adult_2_life_expectancy"]
+    if not (
+        config.date_of_birth
+        and isinstance(adult_2_dob, dt_lib.date)
+        and isinstance(adult_2_life, int)
+    ):
+        return 1.0
+    deaths = (
+        config.date_of_birth + relativedelta(years=config.life_expectancy),
+        adult_2_dob + relativedelta(years=adult_2_life),
+    )
+    if current < min(deaths):
+        return 1.0
+    if current < max(deaths):
+        return float(household["survivor_spending_pct"])
+    return 0.0
+
+
+def _household_social_security_monthly_cents(
+    config: FireConfig, current: date,
+) -> int:
+    """Time a combined, equal-benefit SS estimate for each adult separately."""
+    total = int(config.social_security_monthly or 0)
+    if not total or not config.date_of_birth:
+        return 0
+    claim_age = config.social_security_start_age or 67
+    household = _household_settings(config)
+    adult_2_dob = household["adult_2_dob"]
+    adult_2_life = household["adult_2_life_expectancy"]
+    if not (isinstance(adult_2_dob, dt_lib.date) and isinstance(adult_2_life, int)):
+        start = config.date_of_birth + relativedelta(
+            years=claim_age,
+        )
+        return total if current >= start else 0
+
+    shares = (total // 2, total - total // 2)
+    members = (
+        (config.date_of_birth, config.life_expectancy, shares[0]),
+        (adult_2_dob, adult_2_life, shares[1]),
+    )
+    active = 0
+    for dob, lifespan, benefit in members:
+        claim = dob + relativedelta(years=claim_age)
+        death = dob + relativedelta(years=lifespan)
+        if claim <= current < death:
+            active += benefit
+    return active
+
+
+def _healthcare_monthly_cents_at_date(config: FireConfig, current: date) -> int:
+    """Blend two adults' pre-/post-Medicare costs when their ages differ.
+
+    Both configured healthcare amounts are household totals for two adults, so
+    each adult contributes half of the applicable total while alive. Profiles
+    without Adult 2 retain the original age-based behavior.
+    """
+    if not config.date_of_birth:
+        return config.healthcare_monthly_cost or 0
+    household = _household_settings(config)
+    adult_2_dob = household["adult_2_dob"]
+    adult_2_life = household["adult_2_life_expectancy"]
+    primary_age = (current - config.date_of_birth).days / 365.2425
+    if not (isinstance(adult_2_dob, dt_lib.date) and isinstance(adult_2_life, int)):
+        return _healthcare_monthly_cents_at_age(config, primary_age)
+
+    members = (
+        (config.date_of_birth, config.life_expectancy),
+        (adult_2_dob, adult_2_life),
+    )
+    total = 0.0
+    for dob, lifespan in members:
+        age = (current - dob).days / 365.2425
+        if 0 <= age < lifespan:
+            total += _healthcare_monthly_cents_at_age(config, age) / 2
+    return int(round(total))
+
+
 def _retirement_savings_settings(config: FireConfig) -> dict[str, object]:
     """Normalize the household retirement-saving and Roth-ladder assumptions.
 
@@ -505,20 +643,35 @@ class FireProjectionsEngine:
         volatility_drag = (DEFAULT_RETURN_STD ** 2) / 2
         real_return = arithmetic_real - volatility_drag
 
-        # Years in retirement
+        # Years in retirement. For two adults, the spend-down comparison runs
+        # through the later lifespan just like the stochastic projection.
         retirement_age = config.target_retirement_age or 55
-        years_in_retirement = config.life_expectancy - retirement_age
-        healthcare_annual_cents = (
-            _healthcare_monthly_cents_at_age(config, retirement_age) * 12
-        )
+        if config.date_of_birth:
+            modeled_retirement_date = config.date_of_birth + relativedelta(
+                years=retirement_age,
+            )
+            modeled_end_date = _household_projection_end_date(
+                config, modeled_retirement_date,
+            )
+            years_in_retirement = max(
+                0, modeled_end_date.year - modeled_retirement_date.year,
+            )
+            healthcare_annual_cents = (
+                _healthcare_monthly_cents_at_date(
+                    config, modeled_retirement_date,
+                ) * 12
+            )
+        else:
+            modeled_retirement_date = date.today()
+            years_in_retirement = config.life_expectancy - retirement_age
+            healthcare_annual_cents = (
+                _healthcare_monthly_cents_at_age(config, retirement_age) * 12
+            )
 
         if years_in_retirement <= 0 or real_return <= 0:
             lifetime_spend_down_cents = annual_spending_cents * max(1, years_in_retirement)
         else:
             # Income start ages (only count if configured)
-            ss_start_age = config.social_security_start_age if config.social_security_monthly else None
-            ss_annual = (config.social_security_monthly * 12) if config.social_security_monthly else 0
-
             pension_start_age = config.pension_start_age if config.pension_monthly else None
             pension_annual = (config.pension_monthly * 12) if config.pension_monthly else 0
 
@@ -535,6 +688,7 @@ class FireProjectionsEngine:
             lifetime_spend_down_cents = 0
             for yr in range(years_in_retirement):
                 age = retirement_age + yr
+                modeled_date = modeled_retirement_date + relativedelta(years=yr)
 
                 # Spending adjusted for retirement phase
                 retirement_year = (
@@ -544,16 +698,20 @@ class FireProjectionsEngine:
                 )
                 yr_spending = _dollars_to_cents(_annual_spending_with_mortgage(
                     _cents_to_dollars(annual_spending_cents),
-                    _spending_multiplier(age),
+                    _spending_multiplier(age)
+                    * _household_survivor_spending_multiplier(config, modeled_date),
                     config,
                     retirement_year,
                 ))
-                yr_spending += _healthcare_monthly_cents_at_age(config, age) * 12
+                yr_spending += _healthcare_monthly_cents_at_date(
+                    config, modeled_date,
+                ) * 12
 
                 # Post-retirement income at this age
                 yr_income = continuing_annual
-                if ss_start_age and age >= ss_start_age:
-                    yr_income += ss_annual
+                yr_income += _household_social_security_monthly_cents(
+                    config, modeled_date,
+                ) * 12
                 if pension_start_age and age >= pension_start_age:
                     yr_income += pension_annual
 
@@ -856,11 +1014,13 @@ class FireProjectionsEngine:
         real_return = (1 + annual_return / 100) / (1 + inflation / 100) - 1
         monthly_return = (1 + real_return) ** (1 / 12) - 1
 
-        # Determine end date from life expectancy
-        if config.date_of_birth:
-            end_date = config.date_of_birth + relativedelta(years=life_exp)
-        else:
-            end_date = today + relativedelta(years=40)
+        # A two-adult household must be solvent through the later modeled
+        # death, not merely through Adult 1's lifespan.
+        end_date = _household_projection_end_date(
+            config,
+            today + relativedelta(years=40),
+            primary_life_expectancy=life_exp,
+        )
         tax_funding_by_year = await self._get_tax_funding_by_year(
             config, end_date.year - today.year + 1,
         )
@@ -908,6 +1068,10 @@ class FireProjectionsEngine:
             # the retirement phase step-down. Mortgage P&I remains fixed until
             # its contractual payoff, then disappears from the budget.
             spending_mult = _spending_multiplier(age) if is_retired else 1.0
+            if is_retired:
+                spending_mult *= _household_survivor_spending_multiplier(
+                    config, current,
+                )
             monthly_spending = _dollars_to_cents(_monthly_spending_with_mortgage(
                 _cents_to_dollars(monthly_spending_base),
                 spending_mult,
@@ -918,7 +1082,7 @@ class FireProjectionsEngine:
             # Extra retirement healthcare switches from private/ACA coverage
             # to the configured Medicare-era premium and out-of-pocket budget.
             if is_retired:
-                monthly_spending += _healthcare_monthly_cents_at_age(config, age)
+                monthly_spending += _healthcare_monthly_cents_at_date(config, current)
 
             # Source-aware tax gross-up from the withdrawal planner. Employment
             # income with an explicit net cash-flow amount is treated as already
@@ -939,11 +1103,9 @@ class FireProjectionsEngine:
 
                 # Social Security — flat real (COLA offsets inflation)
                 if config.social_security_monthly and config.date_of_birth:
-                    ss_start = config.date_of_birth + relativedelta(
-                        years=config.social_security_start_age
+                    monthly_income += _household_social_security_monthly_cents(
+                        config, current,
                     )
-                    if current >= ss_start:
-                        monthly_income += int(config.social_security_monthly)
 
                 # Pension — flat real (COLA offsets inflation)
                 if config.pension_monthly and config.pension_start_age and config.date_of_birth:
@@ -1378,9 +1540,9 @@ class FireProjectionsEngine:
         # Event-label matchers (configurable; consumed when cashflow events fire)
         sell_event_label_match = proj_cfg.get("sell_event_label_match", None)  # substring marking the secondary-property sale event; None = disabled
         illiquid_vest_event_match = proj_cfg.get("illiquid_vest_event_match", ["vest"])  # substrings that reduce the illiquid pool
-        # Social Security
-        ss_early_reduction = proj_cfg.get("ss_early_reduction", 0.70)  # 70% of full at age 62
-        ss_claim_age = proj_cfg.get("ss_claim_age", 62)  # age when SS starts
+        # Social Security has one source of truth: the benefit and claiming age
+        # in the main FIRE configuration.
+        ss_claim_age = config.social_security_start_age or 67
         # Spending phases (Blanchett 2013)
         spending_phase_slow = proj_cfg.get("spending_phase_slow", 0.85)  # age 70-80 multiplier
         spending_phase_floor = proj_cfg.get("spending_phase_floor", 0.75)  # age 80+ multiplier
@@ -1557,13 +1719,34 @@ class FireProjectionsEngine:
 
         # Key month offsets (from today)
         months_to_59_5 = max(0, int((dob + relativedelta(years=59, months=6) - today).days / 30.44))
-
-        # SS from config — claim age is configurable (default 62 = early)
-        ss_monthly_dollars = _cents_to_dollars(config.social_security_monthly or 0)
-        ss_amount = ss_monthly_dollars * ss_early_reduction
-        months_to_ss = max(0, int((dob + relativedelta(years=ss_claim_age) - today).days / 30.44))
-        ss_start_month = months_to_ss
-
+        household_settings = _household_settings(config)
+        months_to_ss = max(0, int((
+            dob + relativedelta(years=ss_claim_age) - today
+        ).days / 30.44))
+        ss_chart_events = [{
+            "month": months_to_ss,
+            "age": float(ss_claim_age),
+            "label": (
+                "Adult 1 SS"
+                if household_settings["adult_2_dob"]
+                else f"SS at {ss_claim_age}"
+            ),
+            "color": "#00d4aa",
+        }]
+        adult_2_dob = household_settings["adult_2_dob"]
+        if isinstance(adult_2_dob, dt_lib.date):
+            adult_2_ss_month = max(0, int((
+                adult_2_dob + relativedelta(years=ss_claim_age) - today
+            ).days / 30.44))
+            ss_chart_events.append({
+                "month": adult_2_ss_month,
+                "age": round(current_age + adult_2_ss_month / 12, 1),
+                "label": "Adult 2 SS",
+                "color": "#00d4aa",
+            })
+        # ``end_age`` is an explicit chart horizon (expressed as Adult 1's
+        # age); full-lifetime solvency is handled by the lifetime and Monte
+        # Carlo projections using the later household lifespan.
         total_months = int((end_age - current_age) * 12)
         ira_b_monthly_growth = ira_growth_rate / 12
         tax_funding_by_year = await self._get_tax_funding_by_year(
@@ -1700,9 +1883,10 @@ class FireProjectionsEngine:
             # --- Income (non-IRA) ---
             income = _source_income_at_month(m)
 
-            # Social Security
-            if m >= ss_start_month:
-                income += ss_amount
+            # The combined estimate is timed independently for each adult.
+            income += _cents_to_dollars(
+                _household_social_security_monthly_cents(config, dt)
+            )
 
             # RRSP/RRIF drawdown — tracked as visible pool, not lumped into income
             rrsp_draw = 0.0
@@ -1898,6 +2082,7 @@ class FireProjectionsEngine:
                 spending_mult = spending_phase_slow    # slow-go: 85% default
             else:
                 spending_mult = 1.0                    # go-go: 100%
+            spending_mult *= _household_survivor_spending_multiplier(config, dt)
             if (
                 mortgage_terms_configured
                 and not primary_sold
@@ -1913,14 +2098,14 @@ class FireProjectionsEngine:
             # Extra healthcare is not part of the base spending budget. It
             # changes at Medicare instead of disappearing entirely.
             expenses += _cents_to_dollars(
-                _healthcare_monthly_cents_at_age(config, age)
+                _healthcare_monthly_cents_at_date(config, dt)
             )
 
             modeled_taxes = tax_funding_by_year.get(dt.year, 0.0) / 12
             expenses += modeled_taxes
             hsa_eligible_remaining = min(
                 hsa_qualified_balance,
-                _cents_to_dollars(_healthcare_monthly_cents_at_age(config, age)),
+                _cents_to_dollars(_healthcare_monthly_cents_at_date(config, dt)),
             )
 
             # Model both workers' retirement saving as a transfer from wages:
@@ -2233,10 +2418,10 @@ class FireProjectionsEngine:
                     "color": "#00d4aa",
                 },
             )
-        chart_events.extend([
+        chart_events.append(
             {"month": months_to_59_5, "age": 59.5, "label": "59\u00BD", "color": "#4d8eff"},
-            {"month": months_to_ss, "age": float(ss_claim_age), "label": f"SS at {ss_claim_age}", "color": "#00d4aa"},
-        ])
+        )
+        chart_events.extend(ss_chart_events)
         if enforce_rmd and (ira_a_start or ira_b_start) and current_age < rmd_start_age < end_age:
             months_to_rmd = max(0, int((dob + relativedelta(years=rmd_start_age) - today).days / 30.44))
             chart_events.append(
@@ -2272,9 +2457,8 @@ class FireProjectionsEngine:
 
         monthly_burn = annual_spending_cents / 12.0 / 100.0
         if config.date_of_birth:
-            current_age = self._compute_age(config, today)
             monthly_burn += _cents_to_dollars(
-                _healthcare_monthly_cents_at_age(config, current_age)
+                _healthcare_monthly_cents_at_date(config, today)
             )
         else:
             monthly_burn += _cents_to_dollars(config.healthcare_monthly_cost or 0)

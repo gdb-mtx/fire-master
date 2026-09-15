@@ -86,6 +86,26 @@ SS_START_YEAR = 14  # (1973 + 67) - 2026
 
 
 class TestDeterminism:
+    async def test_two_adult_plan_runs_through_later_death(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        config = base_fire_config
+        config.custom_assumptions = {
+            **config.custom_assumptions,
+            "household": {
+                "adult_2_date_of_birth": "1978-01-01",
+                "adult_2_life_expectancy": 95,
+                "survivor_spending_pct": 0.70,
+            },
+        }
+        engine = MonteCarloEngine(db=None)
+
+        with _mc_env(config):
+            result = await engine.run_simulation(n_runs=5, seed=42)
+
+        # Adult 1's death is in 2063; Adult 2's is in 2073.
+        assert len(result.percentile_curves) == (2073 - FROZEN_TODAY.year) + 1
+
     async def test_fixed_seed_reproducible(self, base_fire_config, frozen_today_mc):
         engine = MonteCarloEngine(db=None)
         with _mc_env(base_fire_config):

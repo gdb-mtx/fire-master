@@ -20,6 +20,10 @@ from app.engines.fire_projections import (
     FireProjectionsEngine,
     _annual_spending_with_mortgage,
     _healthcare_monthly_cents_at_age,
+    _healthcare_monthly_cents_at_date,
+    _household_projection_end_date,
+    _household_social_security_monthly_cents,
+    _household_survivor_spending_multiplier,
 )
 from app.engines.net_worth import NetWorthEngine
 
@@ -141,6 +145,56 @@ def test_healthcare_budget_switches_at_medicare(base_fire_config):
 
     assert _healthcare_monthly_cents_at_age(base_fire_config, 64.9) == 350_000
     assert _healthcare_monthly_cents_at_age(base_fire_config, 65) == 120_000
+
+
+def test_two_adult_household_uses_later_lifespan(base_fire_config):
+    base_fire_config.date_of_birth = date(1970, 1, 1)
+    base_fire_config.life_expectancy = 90
+    base_fire_config.custom_assumptions = {
+        "household": {
+            "adult_2_date_of_birth": "1975-01-01",
+            "adult_2_life_expectancy": 95,
+        },
+    }
+
+    assert _household_projection_end_date(
+        base_fire_config, date(2060, 1, 1),
+    ) == date(2070, 1, 1)
+
+
+def test_two_adult_household_transitions_each_person_separately(base_fire_config):
+    base_fire_config.date_of_birth = date(1970, 1, 1)
+    base_fire_config.life_expectancy = 80
+    base_fire_config.social_security_start_age = 67
+    base_fire_config.social_security_monthly = 600_000
+    base_fire_config.healthcare_monthly_cost = 400_000
+    base_fire_config.post_medicare_healthcare_monthly_cost = 200_000
+    base_fire_config.medicare_start_age = 65
+    base_fire_config.custom_assumptions = {
+        "household": {
+            "adult_2_date_of_birth": "1975-01-01",
+            "adult_2_life_expectancy": 90,
+            "survivor_spending_pct": 0.70,
+        },
+    }
+
+    # Adult 1 is on Medicare and claiming SS; Adult 2 is still pre-Medicare.
+    assert _healthcare_monthly_cents_at_date(
+        base_fire_config, date(2038, 1, 1),
+    ) == 300_000
+    assert _household_social_security_monthly_cents(
+        base_fire_config, date(2038, 1, 1),
+    ) == 300_000
+    # Adult 1 has reached the modeled lifespan; Adult 2 remains alive.
+    assert _household_survivor_spending_multiplier(
+        base_fire_config, date(2051, 1, 1),
+    ) == pytest.approx(0.70)
+    assert _household_social_security_monthly_cents(
+        base_fire_config, date(2051, 1, 1),
+    ) == 300_000
+    assert _healthcare_monthly_cents_at_date(
+        base_fire_config, date(2051, 1, 1),
+    ) == 100_000
 
 
 async def test_lifetime_spending_is_flat_real(base_fire_config, frozen_today):

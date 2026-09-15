@@ -59,7 +59,10 @@ from app.data.historical_market_returns import HISTORICAL_MARKET_RETURNS
 from app.engines.fire_projections import (
     _annual_spending_with_mortgage,
     _contribution_policy_active,
-    _healthcare_monthly_cents_at_age,
+    _healthcare_monthly_cents_at_date,
+    _household_projection_end_date,
+    _household_social_security_monthly_cents,
+    _household_survivor_spending_multiplier,
     _retirement_savings_settings,
     _spending_multiplier,
     build_cashflow_schedule,
@@ -250,10 +253,9 @@ class MonteCarloEngine:
         retirement_date = fire_engine._get_retirement_date(config)
         today = date.today()
 
-        if config.date_of_birth:
-            end_date = config.date_of_birth + relativedelta(years=config.life_expectancy)
-        else:
-            end_date = today + relativedelta(years=40)
+        end_date = _household_projection_end_date(
+            config, today + relativedelta(years=40),
+        )
 
         total_years = max(1, (end_date.year - today.year))
         tax_funding_by_year = await fire_engine._get_tax_funding_by_year(
@@ -335,14 +337,6 @@ class MonteCarloEngine:
         has_ss_source = any(
             source.income_type.value == "social_security" for source in income_sources
         )
-        ss_annual = 0.0
-        if config.social_security_monthly and not has_ss_source:
-            ss_annual = config.social_security_monthly * 12 / 100
-        ss_start_year = 0
-        if config.date_of_birth:
-            ss_start_date = config.date_of_birth + relativedelta(years=config.social_security_start_age)
-            ss_start_year = max(0, ss_start_date.year - today.year)
-
         has_pension_source = any(
             source.income_type.value == "pension" for source in income_sources
         )
@@ -495,7 +489,11 @@ class MonteCarloEngine:
                     taxable += rmd_amount
 
                 # Spending: constant purchasing power + retirement phase step-down
+                current_year_date = today + relativedelta(years=yr)
                 spending_mult = _spending_multiplier(age) if is_retired else 1.0
+                spending_mult *= _household_survivor_spending_multiplier(
+                    config, current_year_date,
+                )
                 living_spending = _annual_spending_with_mortgage(
                     annual_spending,
                     spending_mult,
@@ -504,10 +502,14 @@ class MonteCarloEngine:
                 )
                 if is_retired:
                     living_spending += (
-                        _healthcare_monthly_cents_at_age(config, age) * 12 / 100
+                        _healthcare_monthly_cents_at_date(
+                            config, current_year_date,
+                        ) * 12 / 100
                     )
                 qualified_healthcare_spending = (
-                    _healthcare_monthly_cents_at_age(config, age) * 12 / 100
+                    _healthcare_monthly_cents_at_date(
+                        config, current_year_date,
+                    ) * 12 / 100
                     if is_retired else 0.0
                 )
                 hsa_eligible_remaining = min(
@@ -517,8 +519,15 @@ class MonteCarloEngine:
 
                 # Income: flat real, from the shared per-year precompute
                 yr_income = income_by_year[yr]
-                if yr >= ss_start_year:
-                    yr_income += ss_annual
+                if not has_ss_source:
+                    yr_income += (
+                        _household_social_security_monthly_cents(
+                            # Preserve the engine's existing annual convention:
+                            # a benefit beginning anywhere in a calendar year
+                            # is counted for that projection year.
+                            config, date(current_year_date.year, 12, 31),
+                        ) * 12 / 100
+                    )
                 if yr >= pension_start_year:
                     yr_income += pension_annual
 
