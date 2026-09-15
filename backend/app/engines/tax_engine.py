@@ -1179,7 +1179,9 @@ class TaxEngine:
         from app.engines.fire_projections import (
             FireProjectionsEngine,
             _annual_spending_with_mortgage,
+            _contribution_policy_active,
             _healthcare_monthly_cents_at_age,
+            _retirement_savings_settings,
         )
 
         fire_engine = FireProjectionsEngine(self.db)
@@ -1205,6 +1207,7 @@ class TaxEngine:
         penalty_free_age = float(assumptions.get("penalty_free_age", 59.5))
         rule_of_55_eligible = bool(assumptions.get("rule_of_55_eligible", False))
         sepp_monthly = float((assumptions.get("sepp", {}) or {}).get("sepp_monthly", 0) or 0)
+        savings_settings = _retirement_savings_settings(config)
         cash_reserve_months = max(
             0.0, float(projection_config.get("cash_reserve_months", 12) or 0),
         )
@@ -1224,6 +1227,14 @@ class TaxEngine:
         # Track account balances across years
         deferred_balance = accounts.tax_deferred_balance
         roth_balance = accounts.tax_free_balance
+        roth_accessible_basis = min(
+            roth_balance, float(savings_settings["starting_roth_basis"]),
+        )
+        hsa_qualified_balance = min(
+            max(0.0, roth_balance - roth_accessible_basis),
+            float(savings_settings["starting_hsa_qualified_balance"]),
+        )
+        roth_conversion_vintages: list[tuple[int, float]] = []
         taxable_balance = accounts.taxable_balance
         taxable_basis_balance = basis_estimate["cost_basis"]
         cash_balance = accounts.already_taxed_balance
@@ -1238,6 +1249,22 @@ class TaxEngine:
             age = self._compute_age(config, current_date)
             is_retired = retirement_date and current_date >= retirement_date
 
+            # Each conversion becomes penalty-free after its own five-tax-year
+            # clock. Contributions were already basis and need no waiting period.
+            matured = sum(
+                amount for available_year, amount in roth_conversion_vintages
+                if available_year <= current_year
+            )
+            roth_accessible_basis = min(
+                max(0.0, roth_balance - hsa_qualified_balance),
+                roth_accessible_basis + matured,
+            )
+            roth_conversion_vintages = [
+                (available_year, amount)
+                for available_year, amount in roth_conversion_vintages
+                if available_year > current_year
+            ]
+
             # Spending: flat in real terms (constant purchasing power)
             spending_need = _annual_spending_with_mortgage(
                 annual_need, 1.0, config, current_year,
@@ -1246,6 +1273,13 @@ class TaxEngine:
                 spending_need += (
                     _healthcare_monthly_cents_at_age(config, age) * 12 / 100
                 )
+            qualified_healthcare_spending = (
+                _healthcare_monthly_cents_at_age(config, age) * 12 / 100
+                if is_retired else 0.0
+            )
+            hsa_eligible_remaining = min(
+                hsa_qualified_balance, qualified_healthcare_spending,
+            )
 
             # Income from sources (SS, pension, rental, etc.). Each type
             # bucket tracks ALL income (it offsets spending need either way)
@@ -1261,6 +1295,7 @@ class TaxEngine:
             taxable_pension = 0.0
             taxable_other = 0.0
             taxable_state_wages = 0.0
+            fica_earned = 0.0
             gross_non_withdrawal_income = 0.0
             prepaid_withholding = 0.0
 
@@ -1308,6 +1343,7 @@ class TaxEngine:
                 elif src.income_type.value in ("salary", "bonus", "side_hustle"):
                     earned_income += annual_cash
                     taxable_earned += annual if src.is_taxable else 0.0
+                    fica_earned += annual if src.is_taxable else 0.0
                     if src.income_type.value in ("salary", "bonus") and src.is_taxable:
                         taxable_state_wages += annual
                 else:
@@ -1331,7 +1367,32 @@ class TaxEngine:
                 taxable_pension = pension_income
                 gross_non_withdrawal_income += pension_income
 
-            total_non_withdrawal_income = earned_income + ss_income + pension_income + other_income
+            # Employee contributions are transfers from wages into modeled
+            # retirement pools, not free extra income. Traditional 401(k)
+            # deferrals reduce federal/CA ordinary income but remain subject to
+            # payroll tax; Roth/backdoor-Roth contributions are after tax.
+            annual_401k_contribution = 0.0
+            annual_roth_contribution = 0.0
+            contribution_phase_active = any(
+                _contribution_policy_active(
+                    savings_settings, date(current_year, month, 1),
+                )
+                for month in range(1, 13)
+            )
+            if earned_income > 0.01 and contribution_phase_active:
+                annual_401k_contribution = min(
+                    float(savings_settings["annual_401k"]), earned_income,
+                )
+                annual_roth_contribution = min(
+                    float(savings_settings["annual_roth"]),
+                    max(0.0, earned_income - annual_401k_contribution),
+                )
+            taxable_earned = max(0.0, taxable_earned - annual_401k_contribution)
+            contribution_outflow = annual_401k_contribution + annual_roth_contribution
+            total_non_withdrawal_income = (
+                earned_income + ss_income + pension_income + other_income
+                - contribution_outflow
+            )
             withdrawal_needed = max(0, spending_need - total_non_withdrawal_income)
 
             # Withdrawal sequencing — runs whenever spending exceeds income,
@@ -1346,8 +1407,8 @@ class TaxEngine:
             traditional_accessible = (
                 age >= penalty_free_age
                 or (rule_of_55_eligible and age >= 55)
-                or sepp_monthly > 0
             )
+            sepp_remaining = sepp_monthly * 12 if not traditional_accessible else 0.0
             cash_reserve = withdrawal_needed / 12 * cash_reserve_months
 
             if remaining_need > 0:
@@ -1374,18 +1435,34 @@ class TaxEngine:
 
                 # Traditional accounts are unavailable before 59½ unless the
                 # household explicitly configured Rule of 55 or a SEPP plan.
-                if traditional_accessible and deferred_balance > 0 and remaining_need > 0:
-                    draw = min(remaining_need, deferred_balance)
+                deferred_limit = deferred_balance if traditional_accessible else sepp_remaining
+                if deferred_limit > 0 and deferred_balance > 0 and remaining_need > 0:
+                    draw = min(remaining_need, deferred_balance, deferred_limit)
                     from_deferred = draw
                     deferred_balance -= draw
                     remaining_need -= draw
+                    if not traditional_accessible:
+                        sepp_remaining -= draw
 
-                # Roth is the last invested pool.
-                if roth_balance > 0 and remaining_need > 0:
-                    draw = min(remaining_need, roth_balance)
+                # Before 59½, only contribution basis and conversions whose
+                # five-year clocks have expired are spendable without penalty.
+                roth_limit = (
+                    roth_balance if age >= penalty_free_age
+                    else min(
+                        roth_balance,
+                        roth_accessible_basis + hsa_eligible_remaining,
+                    )
+                )
+                if roth_limit > 0 and remaining_need > 0:
+                    draw = min(remaining_need, roth_limit)
                     from_roth = draw
                     roth_balance -= draw
                     remaining_need -= draw
+                    if age < penalty_free_age:
+                        hsa_draw = min(draw, hsa_eligible_remaining)
+                        hsa_eligible_remaining -= hsa_draw
+                        hsa_qualified_balance -= hsa_draw
+                        roth_accessible_basis -= draw - hsa_draw
 
                 # Finally permit the operating reserve itself to be depleted.
                 if cash_balance > 0 and remaining_need > 0:
@@ -1410,6 +1487,31 @@ class TaxEngine:
                     taxable_basis_balance += extra_rmd
                     rmd_redeposit = extra_rmd
 
+            # A configured conversion ladder deliberately converts the future
+            # spending gap during early retirement. The converted principal is
+            # taxed now and becomes accessible only after its five-year clock.
+            if (
+                bool(savings_settings["ladder_enabled"])
+                and is_retired
+                and age + int(savings_settings["ladder_wait_years"]) < penalty_free_age
+                and deferred_balance > 0
+            ):
+                configured_conversion = float(
+                    savings_settings["ladder_annual_conversion"],
+                )
+                automatic_conversion = max(
+                    0.0,
+                    spending_need - (
+                        earned_income + ss_income + pension_income + other_income
+                    ),
+                )
+                roth_conversion = min(
+                    configured_conversion or automatic_conversion,
+                    deferred_balance,
+                )
+                deferred_balance -= roth_conversion
+                roth_balance += roth_conversion
+
             # Golden-window Roth conversion: retired, pre-SS, pre-RMD — fill
             # ordinary income up to the target bracket ceiling. Conversion is
             # taxed as ordinary income this year but moves dollars out of the
@@ -1433,9 +1535,18 @@ class TaxEngine:
                 # bracket ceiling — the conversion also absorbs any unused
                 # standard deduction.
                 room = max(0.0, target_ceiling + std_deduction - ordinary_so_far)
-                roth_conversion = min(room, deferred_balance)
-                deferred_balance -= roth_conversion
-                roth_balance += roth_conversion
+                extra_conversion = min(
+                    max(0.0, room - roth_conversion), deferred_balance,
+                )
+                roth_conversion += extra_conversion
+                deferred_balance -= extra_conversion
+                roth_balance += extra_conversion
+
+            if roth_conversion > 0 and age < penalty_free_age:
+                roth_conversion_vintages.append((
+                    current_year + int(savings_settings["ladder_wait_years"]),
+                    roth_conversion,
+                ))
 
             def calculate_year_tax() -> tuple[float, float, float, float, float]:
                 """Return ordinary income and federal/state/FICA/total tax."""
@@ -1506,7 +1617,7 @@ class TaxEngine:
                     taxable_capital_gains, taxable_total, filing_status,
                 )
                 federal = federal_breakdown.total_federal_tax + gains_tax
-                fica = self.compute_fica(taxable_earned, filing_status)
+                fica = self.compute_fica(fica_earned, filing_status)
                 return ordinary, federal, state, fica, federal + state + fica
 
             # An explicit projected-cash amount is net of withholding. Credit
@@ -1554,18 +1665,33 @@ class TaxEngine:
                     capital_gains += amount - basis_used
                     extra_needed -= amount
                     drawn += amount
-                if traditional_accessible and deferred_balance > 0 and extra_needed > 0:
-                    amount = min(extra_needed, deferred_balance)
+                deferred_limit = deferred_balance if traditional_accessible else sepp_remaining
+                if deferred_limit > 0 and deferred_balance > 0 and extra_needed > 0:
+                    amount = min(extra_needed, deferred_balance, deferred_limit)
                     deferred_balance -= amount
                     from_deferred += amount
                     extra_needed -= amount
                     drawn += amount
-                if roth_balance > 0 and extra_needed > 0:
-                    amount = min(extra_needed, roth_balance)
+                    if not traditional_accessible:
+                        sepp_remaining -= amount
+                roth_limit = (
+                    roth_balance if age >= penalty_free_age
+                    else min(
+                        roth_balance,
+                        roth_accessible_basis + hsa_eligible_remaining,
+                    )
+                )
+                if roth_limit > 0 and extra_needed > 0:
+                    amount = min(extra_needed, roth_limit)
                     roth_balance -= amount
                     from_roth += amount
                     extra_needed -= amount
                     drawn += amount
+                    if age < penalty_free_age:
+                        hsa_draw = min(amount, hsa_eligible_remaining)
+                        hsa_eligible_remaining -= hsa_draw
+                        hsa_qualified_balance -= hsa_draw
+                        roth_accessible_basis -= amount - hsa_draw
                 if cash_balance > 0 and extra_needed > 0:
                     amount = min(extra_needed, cash_balance)
                     cash_balance -= amount
@@ -1638,8 +1764,13 @@ class TaxEngine:
             cash_balance += max(0.0, net_spendable - spending_need)
 
             # Grow remaining balances (cash at its own yield, not market return)
-            deferred_balance *= (1 + annual_return)
-            roth_balance *= (1 + annual_return)
+            deferred_balance = (
+                deferred_balance * (1 + annual_return) + annual_401k_contribution
+            )
+            roth_balance = (
+                roth_balance * (1 + annual_return) + annual_roth_contribution
+            )
+            roth_accessible_basis += annual_roth_contribution
             taxable_balance *= (1 + annual_return)
             cash_balance *= (1 + cash_yield)
 

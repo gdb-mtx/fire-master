@@ -52,7 +52,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engines.fire_projections import (
     _annual_spending_with_mortgage,
+    _contribution_policy_active,
     _healthcare_monthly_cents_at_age,
+    _retirement_savings_settings,
     _spending_multiplier,
     build_cashflow_schedule,
     cashflow_by_year,
@@ -137,7 +139,7 @@ class MonteCarloEngine:
         """
         from app.engines.fire_projections import FireProjectionsEngine
         from app.engines.net_worth import NetWorthEngine
-        from app.engines.tax_engine import TaxEngine
+        from app.engines.tax_engine import TaxEngine, _get_rmd_divisor
 
         fire_engine = FireProjectionsEngine(self.db)
         config = await fire_engine.get_effective_config(scenario_id)
@@ -201,6 +203,9 @@ class MonteCarloEngine:
         sepp_monthly = float(
             (assumptions.get("sepp", {}) or {}).get("sepp_monthly", 0) or 0,
         )
+        savings_settings = _retirement_savings_settings(config)
+        enforce_rmd = bool(projection_cfg.get("enforce_rmd", True))
+        rmd_start_age = int(config.rmd_start_age or 73)
 
         # Social Security and pension (annual dollars, FLAT REAL — COLA
         # offsets inflation, mirroring project_wealth_pools).
@@ -233,8 +238,16 @@ class MonteCarloEngine:
         # retirement and source start/end dates land in the right year.
         inflation_pct = config.expected_inflation_rate
         income_by_year: list[float] = []
+        employment_income_by_year: list[float] = []
+        contribution_phase_by_year: list[bool] = []
+        employment_sources = [
+            source for source in income_sources
+            if source.income_type.value in ("salary", "bonus", "side_hustle")
+        ]
         for yr in range(total_years):
             year_cents = 0
+            employment_cents = 0
+            contribution_phase_active = False
             for m in range(12):
                 month_idx = yr * 12 + m
                 current = today + relativedelta(months=month_idx)
@@ -242,7 +255,19 @@ class MonteCarloEngine:
                     income_sources, current, retirement_date,
                     month_idx / 12.0, inflation_pct,
                 )
+                month_employment_cents = fire_engine._income_at_month(
+                    employment_sources, current, retirement_date,
+                    month_idx / 12.0, inflation_pct,
+                )
+                employment_cents += month_employment_cents
+                if (
+                    month_employment_cents > 0
+                    and _contribution_policy_active(savings_settings, current)
+                ):
+                    contribution_phase_active = True
             income_by_year.append(year_cents / 100)
+            employment_income_by_year.append(employment_cents / 100)
+            contribution_phase_by_year.append(contribution_phase_active)
 
         # Cashflow events: same schedule the projection engines use, net
         # signed dollars per year (probability-weighted, flat real). Unlike the
@@ -279,10 +304,32 @@ class MonteCarloEngine:
             taxable = starting_taxable
             deferred = starting_deferred
             roth = starting_roth
+            roth_accessible_basis = min(
+                roth, float(savings_settings["starting_roth_basis"]),
+            )
+            hsa_qualified_balance = min(
+                max(0.0, roth - roth_accessible_basis),
+                float(savings_settings["starting_hsa_qualified_balance"]),
+            )
+            roth_conversion_vintages: list[tuple[int, float]] = []
             yearly_nw: list[float] = [starting_spendable]
             money_lasted = True
 
             for yr in range(total_years):
+                matured = sum(
+                    amount for available_year, amount in roth_conversion_vintages
+                    if available_year <= yr
+                )
+                roth_accessible_basis = min(
+                    max(0.0, roth - hsa_qualified_balance),
+                    roth_accessible_basis + matured,
+                )
+                roth_conversion_vintages = [
+                    (available_year, amount)
+                    for available_year, amount in roth_conversion_vintages
+                    if available_year > yr
+                ]
+
                 r_real, _infl = _draw_year(rng, mu_nom, sigma, mu_i, sigma_i, rho)
 
                 # Only invested, spendable accounts receive the stochastic
@@ -291,24 +338,44 @@ class MonteCarloEngine:
                 taxable = max(0.0, taxable * (1 + r_real))
                 deferred = max(0.0, deferred * (1 + r_real))
                 roth = max(0.0, roth * (1 + r_real))
+                roth_accessible_basis = min(roth, roth_accessible_basis)
                 cash = max(0.0, cash * (1 + cash_real_yield))
 
                 age = start_age + yr
                 is_retired = yr >= years_to_retirement
 
+                # RMDs are a transfer from deferred to already-taxed assets,
+                # not spending. The expected-path tax schedule includes the
+                # resulting ordinary income, so the random path must also
+                # retain the distributed principal instead of charging tax
+                # while leaving the same dollars stranded in the IRA.
+                if enforce_rmd and age >= rmd_start_age and deferred > 0:
+                    rmd_amount = min(
+                        deferred, deferred / _get_rmd_divisor(int(age)),
+                    )
+                    deferred -= rmd_amount
+                    taxable += rmd_amount
+
                 # Spending: constant purchasing power + retirement phase step-down
                 spending_mult = _spending_multiplier(age) if is_retired else 1.0
-                yr_spending = _annual_spending_with_mortgage(
+                living_spending = _annual_spending_with_mortgage(
                     annual_spending,
                     spending_mult,
                     config,
                     today.year + yr,
                 )
                 if is_retired:
-                    yr_spending += (
+                    living_spending += (
                         _healthcare_monthly_cents_at_age(config, age) * 12 / 100
                     )
-                yr_spending += tax_funding_by_projection_year[yr]
+                qualified_healthcare_spending = (
+                    _healthcare_monthly_cents_at_age(config, age) * 12 / 100
+                    if is_retired else 0.0
+                )
+                hsa_eligible_remaining = min(
+                    hsa_qualified_balance, qualified_healthcare_spending,
+                )
+                yr_spending = living_spending + tax_funding_by_projection_year[yr]
 
                 # Income: flat real, from the shared per-year precompute
                 yr_income = income_by_year[yr]
@@ -317,8 +384,26 @@ class MonteCarloEngine:
                 if yr >= pension_start_year:
                     yr_income += pension_annual
 
+                employment_income = employment_income_by_year[yr]
+                annual_401k_contribution = 0.0
+                annual_roth_contribution = 0.0
+                if employment_income > 0.01 and contribution_phase_by_year[yr]:
+                    annual_401k_contribution = min(
+                        float(savings_settings["annual_401k"]), employment_income,
+                    )
+                    annual_roth_contribution = min(
+                        float(savings_settings["annual_roth"]),
+                        max(0.0, employment_income - annual_401k_contribution),
+                    )
+                deferred += annual_401k_contribution
+                roth += annual_roth_contribution
+                roth_accessible_basis += annual_roth_contribution
+
                 event_cashflow = events_by_year[yr]
-                net_cash = yr_income - yr_spending + event_cashflow
+                net_cash = (
+                    yr_income - yr_spending + event_cashflow
+                    - annual_401k_contribution - annual_roth_contribution
+                )
                 if net_cash >= 0:
                     cash += net_cash
                     # Keep the configured operating reserve in cash; invest
@@ -359,17 +444,55 @@ class MonteCarloEngine:
                         deferred -= draw
                         remaining_need -= draw
 
-                    # Roth contribution basis is not tracked separately. Treat
-                    # the aggregate Roth/HSA bucket as locked before 59½ rather
-                    # than optimistically assuming every dollar is accessible.
-                    if age >= penalty_free_age:
-                        draw = min(remaining_need, roth)
+                    roth_limit = (
+                        roth if age >= penalty_free_age
+                        else min(
+                            roth,
+                            roth_accessible_basis + hsa_eligible_remaining,
+                        )
+                    )
+                    if roth_limit > 0:
+                        draw = min(remaining_need, roth_limit)
                         roth -= draw
                         remaining_need -= draw
+                        if age < penalty_free_age:
+                            hsa_draw = min(draw, hsa_eligible_remaining)
+                            hsa_eligible_remaining -= hsa_draw
+                            hsa_qualified_balance -= hsa_draw
+                            roth_accessible_basis -= draw - hsa_draw
 
                     draw = min(remaining_need, cash)
                     cash -= draw
                     remaining_need -= draw
+
+                # Build the ladder only while a conversion can mature before
+                # normal penalty-free access. It is a transfer between pools,
+                # so total wealth does not change; its tax cost is already in
+                # the expected-path tax schedule above.
+                if (
+                    bool(savings_settings["ladder_enabled"])
+                    and is_retired
+                    and age + int(savings_settings["ladder_wait_years"]) < penalty_free_age
+                    and deferred > 0
+                ):
+                    nonemployment_income = (
+                        yr_income - employment_income
+                    )
+                    configured_conversion = float(
+                        savings_settings["ladder_annual_conversion"],
+                    )
+                    conversion = min(
+                        configured_conversion
+                        or max(0.0, living_spending - nonemployment_income),
+                        deferred,
+                    )
+                    if conversion > 0:
+                        deferred -= conversion
+                        roth += conversion
+                        roth_conversion_vintages.append((
+                            yr + int(savings_settings["ladder_wait_years"]),
+                            conversion,
+                        ))
 
                 portfolio_value = cash + taxable + deferred + roth
                 if remaining_need > 0.01:
@@ -430,7 +553,16 @@ class MonteCarloEngine:
                 "inflation_model": f"normal, mean {mu_i:.2%}, sigma {sigma_i:.2%}, corr {rho:+.2f} with returns",
                 "real_return": "(1+r_nom)/(1+inflation) - 1 per year",
                 "success": "cash, taxable, and age-accessible retirement assets fund every modeled year",
-                "early_access": "traditional accounts are age-gated; SEPP access is capped at the configured annual payment; Roth/HSA is conservatively locked before 59.5 because contribution basis is unavailable",
+                "early_access": "traditional accounts are age-gated; SEPP is capped; Roth contribution basis and five-year-matured conversions are available before 59.5; the configured HSA reserve is limited to modeled qualified healthcare costs",
+                "working_savings": (
+                    f"{int(savings_settings['worker_count'])} workers; "
+                    f"${float(savings_settings['annual_401k']):,.0f}/yr to traditional 401(k)s "
+                    f"and ${float(savings_settings['annual_roth']):,.0f}/yr to Roth IRAs during the configured contribution phase"
+                ),
+                "roth_ladder": (
+                    f"enabled with {int(savings_settings['ladder_wait_years'])}-year conversion seasoning"
+                    if savings_settings["ladder_enabled"] else "disabled"
+                ),
                 "excluded_assets": "home equity, 529s, private investments, and speculative assets unless a dated conversion event makes them spendable",
                 "taxes": (
                     "projected federal and state taxes included from the expected-path withdrawal schedule; taxes are not recalculated within each random path"

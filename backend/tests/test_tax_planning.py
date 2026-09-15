@@ -420,6 +420,9 @@ class TestWithdrawalSequence:
         self, base_fire_config, frozen_today_tax,
     ):
         base_fire_config.healthcare_monthly_cost = None
+        # This test isolates tax gross-up, so make the deferred pool fully
+        # accessible instead of relying on the fixture's capped SEPP payment.
+        base_fire_config.custom_assumptions["penalty_free_age"] = 0
         base_fire_config.custom_assumptions["tax"]["fund_taxes_from_withdrawals"] = True
         engine = _make_planning_engine(deferred=1_000_000)
 
@@ -503,6 +506,8 @@ class TestWithdrawalSequence:
 
     async def test_depletion_cascades(self, base_fire_config, frozen_today_tax):
         base_fire_config.healthcare_monthly_cost = None
+        # This test isolates pool order; accessibility is covered separately.
+        base_fire_config.custom_assumptions["penalty_free_age"] = 0
         engine = _make_planning_engine(taxable=150_000, deferred=300_000, roth=500_000)
         with _patch_config(base_fire_config):
             plan = await engine.optimize_withdrawal_sequence(
@@ -514,6 +519,131 @@ class TestWithdrawalSequence:
         # Year 1: taxable is empty — everything from deferred (flat real need).
         assert y1.from_taxable == 0
         assert y1.from_deferred == pytest.approx(153_000, rel=1e-6)
+
+    async def test_working_contributions_are_transfers_and_reduce_taxable_wages(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=4_000_000,
+            target_retirement_age=80,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 1,
+            "annual_401k_per_worker": 20_000,
+            "annual_roth_ira_per_worker": 10_000,
+            "starting_roth_contribution_basis": 0,
+        }
+        salary = _income_source(
+            "Salary", IncomeType.SALARY, 100_000,
+            end=date(2026, 12, 31), taxable=True,
+        )
+        engine = _make_planning_engine(income_sources=[salary])
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        year = plan.years[0]
+        assert year.total_income == pytest.approx(100_000)
+        assert year.net_spendable == pytest.approx(70_000)
+        assert year.ordinary_income == pytest.approx(80_000)
+        assert year.fica_tax == pytest.approx(
+            engine.compute_fica(100_000, "single"),
+        )
+
+    async def test_contributions_stop_before_lower_income_phase(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=4_000_000,
+            target_retirement_age=80,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 1,
+            "annual_401k_per_worker": 20_000,
+            "annual_roth_ira_per_worker": 10_000,
+            "end_date": "2026-12-31",
+        }
+        salary = _income_source(
+            "Salary", IncomeType.SALARY, 100_000, taxable=True,
+        )
+        engine = _make_planning_engine(income_sources=[salary])
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=2, roth_conversions_enabled=False,
+            )
+
+        assert plan.years[0].ordinary_income == pytest.approx(80_000)
+        assert plan.years[0].net_spendable == pytest.approx(70_000)
+        assert plan.years[1].ordinary_income == pytest.approx(100_000)
+        assert plan.years[1].net_spendable == pytest.approx(100_000)
+
+    async def test_hsa_reserve_only_funds_qualified_healthcare_costs(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=3_000_000,
+            target_retirement_age=52,
+            healthcare_monthly_cost=100_000,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions["sepp"] = {"sepp_monthly": 0}
+        config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 0,
+            "starting_roth_contribution_basis": 0,
+            "starting_hsa_qualified_balance": 20_000,
+        }
+        engine = _make_planning_engine(roth=100_000)
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=1, roth_conversions_enabled=False,
+            )
+
+        # Base spending is not HSA-qualified. Only the separate $12K annual
+        # healthcare budget can come from the configured HSA reserve.
+        assert plan.years[0].spending_need == pytest.approx(42_000)
+        assert plan.years[0].from_roth == pytest.approx(12_000)
+
+    async def test_roth_basis_and_matured_conversion_are_early_accessible(
+        self, frozen_today_tax,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=3_000_000,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+        )
+        config.custom_assumptions["sepp"] = {"sepp_monthly": 0}
+        config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 0,
+            "starting_roth_contribution_basis": 40_000,
+        }
+        config.custom_assumptions["roth_conversion_ladder"] = {
+            "enabled": True,
+            "wait_years": 5,
+            "annual_conversion": 30_000,
+        }
+        engine = _make_planning_engine(cash=180_000, deferred=1_000_000, roth=100_000)
+
+        with _patch_config(config):
+            plan = await engine.optimize_withdrawal_sequence(
+                years=7, roth_conversions_enabled=False,
+            )
+
+        # Existing contribution basis bridges the last year before the first
+        # conversion matures.
+        assert plan.years[5].from_roth == pytest.approx(30_000)
+        # First retired calendar year creates the rung; it is not a withdrawal.
+        assert plan.years[1].roth_conversion == pytest.approx(30_000)
+        # Five tax years later, the conversion principal can fund the gap.
+        assert plan.years[6].age < 59.5
+        assert plan.years[6].from_roth == pytest.approx(30_000)
 
     async def test_rmd_forced_at_73_excess_lands_in_taxable(self, frozen_today_tax):
         """Age 73+: the full RMD comes out of deferred even when spending needs

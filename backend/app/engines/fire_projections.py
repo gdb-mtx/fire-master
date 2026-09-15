@@ -82,6 +82,68 @@ def _healthcare_monthly_cents_at_age(config: FireConfig, age: float) -> int:
     return config.post_medicare_healthcare_monthly_cost or 0
 
 
+def _retirement_savings_settings(config: FireConfig) -> dict[str, object]:
+    """Normalize the household retirement-saving and Roth-ladder assumptions.
+
+    Contribution limits are stored per worker so a two-earner household does
+    not silently receive only one person's limit.  Dollar inputs are REAL
+    annual amounts: IRS limit inflation is assumed to preserve their buying
+    power in this real-terms model.
+    """
+    assumptions = config.custom_assumptions or {}
+    savings = assumptions.get("retirement_contributions", {}) or {}
+    ladder = assumptions.get("roth_conversion_ladder", {}) or {}
+    workers = max(0, int(savings.get("worker_count", 0) or 0))
+    annual_401k_per_worker = max(
+        0.0, float(savings.get("annual_401k_per_worker", 0) or 0),
+    )
+    annual_roth_per_worker = max(
+        0.0, float(savings.get("annual_roth_ira_per_worker", 0) or 0),
+    )
+
+    def parse_date(value: object) -> date | None:
+        if isinstance(value, dt_lib.date):
+            return value
+        if isinstance(value, str) and value:
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    return {
+        "worker_count": workers,
+        "annual_401k": workers * annual_401k_per_worker,
+        "annual_roth": workers * annual_roth_per_worker,
+        # Unknown historical basis defaults to zero instead of treating Roth
+        # earnings or HSA dollars as penalty-free spending money.
+        "starting_roth_basis": max(
+            0.0, float(savings.get("starting_roth_contribution_basis", 0) or 0),
+        ),
+        "starting_hsa_qualified_balance": max(
+            0.0, float(savings.get("starting_hsa_qualified_balance", 0) or 0),
+        ),
+        "contribution_start_date": parse_date(savings.get("start_date")),
+        "contribution_end_date": parse_date(savings.get("end_date")),
+        "ladder_enabled": bool(ladder.get("enabled", False)),
+        "ladder_wait_years": max(1, int(ladder.get("wait_years", 5) or 5)),
+        # Zero means auto-size to the modeled retirement spending gap.
+        "ladder_annual_conversion": max(
+            0.0, float(ladder.get("annual_conversion", 0) or 0),
+        ),
+    }
+
+
+def _contribution_policy_active(settings: dict[str, object], target: date) -> bool:
+    """Whether the configured retirement-saving phase includes ``target``."""
+    start = settings.get("contribution_start_date")
+    end = settings.get("contribution_end_date")
+    return not (
+        (isinstance(start, dt_lib.date) and target < start)
+        or (isinstance(end, dt_lib.date) and target > end)
+    )
+
+
 def _primary_mortgage_terms(config: FireConfig) -> tuple[float, float, date | None]:
     """Return monthly P&I dollars, annual rate, and contractual payoff date."""
     projection = (config.custom_assumptions or {}).get("projection", {}) or {}
@@ -1295,6 +1357,7 @@ class FireProjectionsEngine:
         # ALL RATES ARE REAL (after inflation, in today's dollars).
         # Spending is flat nominal = constant purchasing power. SS is flat = COLA offsets inflation.
         proj_cfg = (config.custom_assumptions or {}).get("projection", {})
+        savings_settings = _retirement_savings_settings(config)
         # Investment & savings rates (real, after inflation)
         surplus_investment_rate = proj_cfg.get("surplus_investment_rate", 0.04)  # 4% real after-tax (balanced portfolio)
         cash_reserve_months = proj_cfg.get("cash_reserve_months", 12)  # emergency fund = N months expenses
@@ -1390,11 +1453,20 @@ class FireProjectionsEngine:
         # Grows at its own REAL rate (default = the IRA growth rate: same index,
         # never taxed on the way out). Drawn LAST in the waterfall — a tax-free
         # dollar is worth more than any other dollar, so it is the last one spent.
-        # No age gate: contribution basis is withdrawable at any age, earnings are
-        # not, and the engine cannot tell them apart — the user decides what balance
-        # to expose here. No RMDs (owner Roth IRAs have none).
+        # Before 59½, withdrawals are limited to explicitly configured contribution
+        # basis plus conversions whose five-year clocks have expired. This avoids
+        # silently treating Roth earnings or HSA dollars as early-retirement cash.
+        # No RMDs (owner Roth IRAs have none).
         roth_cfg = (config.custom_assumptions or {}).get("roth_pool", {}) or {}
         roth = float(roth_cfg.get("starting_balance", 0) or 0)
+        roth_accessible_basis = min(
+            roth, float(savings_settings["starting_roth_basis"]),
+        )
+        hsa_qualified_balance = min(
+            max(0.0, roth - roth_accessible_basis),
+            float(savings_settings["starting_hsa_qualified_balance"]),
+        )
+        roth_conversion_vintages: list[tuple[int, float]] = []
         _roth_rate = roth_cfg.get("return_rate")
         roth_rate_m = (ira_growth_rate if _roth_rate is None else float(_roth_rate)) / 12  # real annual → monthly
         sales_by_month: dict[int, list[dict]] = {}
@@ -1562,6 +1634,36 @@ class FireProjectionsEngine:
                 total += monthly
             return total
 
+        def _employment_active_on(target: date) -> bool:
+            for src in sources:
+                if src.income_type.value not in ("salary", "bonus", "side_hustle"):
+                    continue
+                if retirement_date and target >= retirement_date and not src.end_date:
+                    continue
+                if src.start_date and target < src.start_date:
+                    continue
+                if src.end_date and target > src.end_date:
+                    continue
+                return True
+            return False
+
+        def _employment_active_at_month(m: int) -> bool:
+            return _employment_active_on(today + relativedelta(months=m))
+
+        contribution_month_counts: dict[int, int] = {}
+
+        def _contribution_months_in_year(year: int) -> int:
+            if year not in contribution_month_counts:
+                contribution_month_counts[year] = sum(
+                    1
+                    for month in range(1, 13)
+                    if _contribution_policy_active(
+                        savings_settings, date(year, month, 1),
+                    )
+                    and _employment_active_on(date(year, month, 1))
+                )
+            return contribution_month_counts[year]
+
         points: list[WealthPoolPoint] = []
         chart_events: list[dict] = []
         cash_zero_month = None
@@ -1570,6 +1672,20 @@ class FireProjectionsEngine:
         for m in range(total_months):
             age = current_age + m / 12.0
             dt = today + relativedelta(months=m)
+
+            matured = sum(
+                amount for available_month, amount in roth_conversion_vintages
+                if available_month <= m
+            )
+            roth_accessible_basis = min(
+                max(0.0, roth - hsa_qualified_balance),
+                roth_accessible_basis + matured,
+            )
+            roth_conversion_vintages = [
+                (available_month, amount)
+                for available_month, amount in roth_conversion_vintages
+                if available_month > m
+            ]
 
             if (
                 mortgage_payoff_month is not None
@@ -1802,6 +1918,27 @@ class FireProjectionsEngine:
 
             modeled_taxes = tax_funding_by_year.get(dt.year, 0.0) / 12
             expenses += modeled_taxes
+            hsa_eligible_remaining = min(
+                hsa_qualified_balance,
+                _cents_to_dollars(_healthcare_monthly_cents_at_age(config, age)),
+            )
+
+            # Model both workers' retirement saving as a transfer from wages:
+            # it reduces spendable cash while increasing the matching account.
+            contribution_401k = 0.0
+            contribution_roth = 0.0
+            contribution_months = _contribution_months_in_year(dt.year)
+            if (
+                contribution_months > 0
+                and _employment_active_at_month(m)
+                and _contribution_policy_active(savings_settings, dt)
+            ):
+                contribution_401k = (
+                    float(savings_settings["annual_401k"]) / contribution_months
+                )
+                contribution_roth = (
+                    float(savings_settings["annual_roth"]) / contribution_months
+                )
 
             # --- IRA-A: grows + SEPP draws ---
             # IRA-A is invested (same growth rate as IRA-B) but has fixed SEPP withdrawals
@@ -1817,6 +1954,7 @@ class FireProjectionsEngine:
 
             # --- IRA-B: grows, accessible after 59½ ---
             ira_b *= (1 + ira_b_monthly_growth)
+            ira_b += contribution_401k
 
             # --- Taxable brokerage: grows at its own (market) real rate ---
             if taxable > 0:
@@ -1825,6 +1963,10 @@ class FireProjectionsEngine:
             # --- Roth: grows tax-free at its own real rate ---
             if roth > 0:
                 roth *= (1 + roth_rate_m)
+            roth += contribution_roth
+            roth_accessible_basis = min(
+                roth, roth_accessible_basis + contribution_roth,
+            )
 
             # --- Drawdown waterfall ---
             # Order: taxable brokerage → IRA-B (after 59½) → forced RMDs → Roth.
@@ -1883,11 +2025,23 @@ class FireProjectionsEngine:
 
             # --- Roth: last resort on whatever gap survives (fire-master#13) ---
             roth_draw = 0.0
-            if roth > 0:
+            roth_limit = (
+                roth if m >= months_to_59_5
+                else min(
+                    roth,
+                    roth_accessible_basis + hsa_eligible_remaining,
+                )
+            )
+            if roth_limit > 0:
                 gap_r = expenses - income - (ira_draw - rmd_redeposit) - rrsp_draw - taxable_draw
                 if gap_r > 0 and cash < gap_r * ira_b_draw_threshold_months:
-                    roth_draw = min(gap_r, roth)
+                    roth_draw = min(gap_r, roth_limit)
                     roth -= roth_draw
+                    if m < months_to_59_5:
+                        hsa_draw = min(roth_draw, hsa_eligible_remaining)
+                        hsa_eligible_remaining -= hsa_draw
+                        hsa_qualified_balance -= hsa_draw
+                        roth_accessible_basis -= roth_draw - hsa_draw
 
             # Cash repair: negative cash is genuine bridge stress only while
             # no drawable pool exists — nobody runs checking negative for
@@ -1902,11 +2056,61 @@ class FireProjectionsEngine:
                 taxable -= repair
                 taxable_draw += repair
                 deficit -= repair
-            if deficit > 0 and roth > 0:
-                repair = min(deficit, roth)
+            roth_limit = (
+                roth if m >= months_to_59_5
+                else min(
+                    roth,
+                    roth_accessible_basis + hsa_eligible_remaining,
+                )
+            )
+            if deficit > 0 and roth_limit > 0:
+                repair = min(deficit, roth_limit)
                 roth -= repair
                 roth_draw += repair
                 deficit -= repair
+                if m < months_to_59_5:
+                    hsa_draw = min(repair, hsa_eligible_remaining)
+                    hsa_eligible_remaining -= hsa_draw
+                    hsa_qualified_balance -= hsa_draw
+                    roth_accessible_basis -= repair - hsa_draw
+
+            # Start one conversion-ladder rung per retirement year. Converted
+            # principal remains locked for the configured wait and therefore
+            # cannot repair today's cash gap.
+            retirement_month = None
+            if retirement_date:
+                retirement_month = max(
+                    0,
+                    (retirement_date.year - today.year) * 12
+                    + retirement_date.month - today.month,
+                )
+            ladder_anniversary = (
+                retirement_month is not None
+                and m >= retirement_month
+                and (m - retirement_month) % 12 == 0
+            )
+            if (
+                bool(savings_settings["ladder_enabled"])
+                and ladder_anniversary
+                and age + int(savings_settings["ladder_wait_years"]) < 59.5
+                and ira_b > 0
+            ):
+                configured_conversion = float(
+                    savings_settings["ladder_annual_conversion"],
+                )
+                annual_gap = max(
+                    0.0, (expenses - modeled_taxes - income) * 12,
+                )
+                conversion = min(
+                    configured_conversion or annual_gap, ira_b,
+                )
+                if conversion > 0:
+                    ira_b -= conversion
+                    roth += conversion
+                    roth_conversion_vintages.append((
+                        m + int(savings_settings["ladder_wait_years"]) * 12,
+                        conversion,
+                    ))
 
             # --- Net cash flow ---
             # Cash earns tiered returns:
@@ -1923,7 +2127,8 @@ class FireProjectionsEngine:
                 cash_interest = max(0, cash) * (savings_rate / 12)
             # ira_draw includes any RMD redeposit, which went to taxable, not cash.
             net = (income + ira_draw - rmd_redeposit + rrsp_draw + taxable_draw
-                   + roth_draw + cash_interest - expenses)
+                   + roth_draw + cash_interest - expenses
+                   - contribution_401k - contribution_roth)
             cash += net
 
             if cash <= 0 and cash_zero_month is None:

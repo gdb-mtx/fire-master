@@ -1004,7 +1004,9 @@ export default function RetirementPage() {
               <p className="text-[11px] text-[var(--text-secondary)] mt-1 max-w-3xl">
                 Success means cash, taxable investments, and age-accessible retirement accounts
                 fund every modeled year. Home equity, 529s, private investments, and speculative
-                assets are excluded unless a dated sale or vest makes them spendable.
+                assets are excluded unless a dated sale or vest makes them spendable. Working-year
+                401(k)/Roth contributions and the five-year Roth conversion ladder use the values
+                in Configure.
               </p>
             </div>
             {monteCarlo && (

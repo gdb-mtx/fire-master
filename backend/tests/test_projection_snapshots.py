@@ -122,6 +122,48 @@ class TestProjectionIncome:
         assert any(point.age >= 53 and point.income == 0 for point in result.points)
 
     @pytest.mark.asyncio
+    async def test_working_contributions_move_wages_into_retirement_pools(
+        self, frozen_today,
+    ):
+        config = _make_fire_config(
+            target_annual_spending=0,
+            target_retirement_age=80,
+            expected_annual_return=0,
+            expected_inflation_rate=0,
+        )
+        config.healthcare_monthly_cost = None
+        config.social_security_monthly = None
+        config.custom_assumptions = {
+            "projection": {"cash_reserve_months": 0},
+            "retirement_contributions": {
+                "worker_count": 1,
+                "annual_401k_per_worker": 12_000,
+                "annual_roth_ira_per_worker": 12_000,
+            },
+        }
+        salary = MagicMock()
+        salary.name = "Salary"
+        salary.income_type = IncomeType.SALARY
+        salary.annual_amount = 2_400_000
+        salary.start_date = None
+        salary.end_date = None
+        salary.growth_rate = None
+        breakdown = NetWorthBreakdown(
+            liquid=0, retirement=0, real_estate_equity=0,
+            illiquid_private=0, other=0,
+        )
+        engine = _make_engine(config, breakdown, [], [], [salary])
+
+        result = await engine.project_wealth_pools(end_age=54, bridge_months=1)
+        first = result.points[0]
+
+        assert first.income == 2_000
+        assert first.ira_growth == 1_000
+        assert first.roth == 1_000
+        assert first.cash == 0
+        assert first.total == 2_000
+
+    @pytest.mark.asyncio
     async def test_primary_mortgage_amortizes_and_payment_ends(self, frozen_today):
         config = _make_fire_config(target_annual_spending=12_000_000)
         config.healthcare_monthly_cost = None

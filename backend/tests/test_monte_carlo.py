@@ -341,6 +341,70 @@ class TestDepletion:
         assert result.success_rate == 0
         assert result.percentile_curves[1].p50 < 0
 
+    async def test_configured_roth_basis_is_accessible_before_59_5(
+        self, base_fire_config, frozen_today_mc,
+    ):
+        base_fire_config.custom_assumptions["retirement_contributions"] = {
+            "worker_count": 0,
+            "starting_roth_contribution_basis": 100_000,
+        }
+        roth = MagicMock(current_balance=100_000_00)
+        accounts = AccountsByTaxTreatment(tax_free=[roth])
+        engine = MonteCarloEngine(db=None)
+        with _mc_env(
+            base_fire_config,
+            net_worth=100_000,
+            spending_cents=3_000_000,
+            accounts=accounts,
+            tax_funding_by_year={},
+        ):
+            result = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert result.percentile_curves[1].p50 > 0
+
+    async def test_matured_roth_ladder_bridges_to_penalty_free_age(
+        self, frozen_today_mc,
+    ):
+        config = _make_fire_config(
+            life_expectancy=62,
+            target_annual_spending=3_000_000,
+            healthcare_monthly_cost=None,
+            social_security_monthly=None,
+            expected_annual_return=0,
+            expected_inflation_rate=0,
+        )
+        config.custom_assumptions = {
+            "monte_carlo": {"return_std": 0, "inflation_std": 0},
+            "sepp": {"sepp_monthly": 0},
+            "retirement_contributions": {"worker_count": 0},
+            "roth_conversion_ladder": {
+                "enabled": True,
+                "wait_years": 5,
+                "annual_conversion": 30_000,
+            },
+        }
+        cash = MagicMock(current_balance=180_000_00)
+        deferred = MagicMock(current_balance=1_000_000_00)
+        accounts = AccountsByTaxTreatment(
+            already_taxed=[cash], tax_deferred=[deferred],
+        )
+        engine = MonteCarloEngine(db=None)
+
+        with _mc_env(
+            config, net_worth=1_180_000, spending_cents=3_000_000,
+            accounts=accounts, tax_funding_by_year={},
+        ):
+            with_ladder = await engine.run_simulation(n_runs=10, seed=5)
+        config.custom_assumptions["roth_conversion_ladder"]["enabled"] = False
+        with _mc_env(
+            config, net_worth=1_180_000, spending_cents=3_000_000,
+            accounts=accounts, tax_funding_by_year={},
+        ):
+            without_ladder = await engine.run_simulation(n_runs=10, seed=5)
+
+        assert with_ladder.success_rate == 100
+        assert without_ladder.success_rate == 0
+
 
 def _make_source(income_type, annual_cents, *, start=None, end=None, growth=None):
     from unittest.mock import MagicMock

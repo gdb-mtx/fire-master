@@ -80,6 +80,16 @@ export default function FireConfigPage() {
     spending_phase_floor_age: "80",
     ira_b_draw_threshold_months: "12",
     rental_occupancy_rate: "100",
+    worker_count: "0",
+    annual_401k_per_worker: "24500",
+    annual_roth_ira_per_worker: "7500",
+    starting_roth_contribution_basis: "",
+    starting_hsa_qualified_balance: "",
+    retirement_contribution_start_date: "",
+    retirement_contribution_end_date: "",
+    roth_conversion_ladder_enabled: false,
+    roth_conversion_wait_years: "5",
+    roth_conversion_annual_amount: "",
   });
 
   const [incomeForm, setIncomeForm] = useState({
@@ -105,6 +115,8 @@ export default function FireConfigPage() {
       const tax = ca?.tax as Record<string, unknown> | undefined;
       const itemized = tax?.itemized_deductions as Record<string, unknown> | undefined;
       const proj = ca?.projection as Record<string, unknown> | undefined;
+      const savings = ca?.retirement_contributions as Record<string, unknown> | undefined;
+      const rothLadder = ca?.roth_conversion_ladder as Record<string, unknown> | undefined;
       setForm({
         date_of_birth: config.date_of_birth || "",
         target_retirement_age: config.target_retirement_age?.toString() || "",
@@ -160,6 +172,16 @@ export default function FireConfigPage() {
         spending_phase_floor_age: (proj?.spending_phase_floor_age as number)?.toString() || "80",
         ira_b_draw_threshold_months: (proj?.ira_b_draw_threshold_months as number)?.toString() || "12",
         rental_occupancy_rate: ca?.rental_occupancy_rate != null ? ((ca.rental_occupancy_rate as number) * 100).toString() : "100",
+        worker_count: (savings?.worker_count as number)?.toString() || "0",
+        annual_401k_per_worker: (savings?.annual_401k_per_worker as number)?.toString() || "24500",
+        annual_roth_ira_per_worker: (savings?.annual_roth_ira_per_worker as number)?.toString() || "7500",
+        starting_roth_contribution_basis: (savings?.starting_roth_contribution_basis as number)?.toString() || "",
+        starting_hsa_qualified_balance: (savings?.starting_hsa_qualified_balance as number)?.toString() || "",
+        retirement_contribution_start_date: (savings?.start_date as string) || "",
+        retirement_contribution_end_date: (savings?.end_date as string) || "",
+        roth_conversion_ladder_enabled: (rothLadder?.enabled as boolean) || false,
+        roth_conversion_wait_years: (rothLadder?.wait_years as number)?.toString() || "5",
+        roth_conversion_annual_amount: (rothLadder?.annual_conversion as number)?.toString() || "",
       });
       setLastConfigVersion(version);
     }
@@ -259,6 +281,20 @@ export default function FireConfigPage() {
         ira_b_draw_threshold_months: parseInt(form.ira_b_draw_threshold_months) || 12,
       },
       rental_occupancy_rate: pf(form.rental_occupancy_rate, 100) / 100,
+      retirement_contributions: {
+        worker_count: Math.max(0, parseInt(form.worker_count) || 0),
+        annual_401k_per_worker: pf(form.annual_401k_per_worker, 0),
+        annual_roth_ira_per_worker: pf(form.annual_roth_ira_per_worker, 0),
+        starting_roth_contribution_basis: pf(form.starting_roth_contribution_basis, 0),
+        starting_hsa_qualified_balance: pf(form.starting_hsa_qualified_balance, 0),
+        start_date: form.retirement_contribution_start_date || null,
+        end_date: form.retirement_contribution_end_date || null,
+      },
+      roth_conversion_ladder: {
+        enabled: form.roth_conversion_ladder_enabled,
+        wait_years: Math.max(1, parseInt(form.roth_conversion_wait_years) || 5),
+        annual_conversion: pf(form.roth_conversion_annual_amount, 0),
+      },
     };
 
     updateConfig.mutate(data, {
@@ -643,6 +679,69 @@ export default function FireConfigPage() {
             Every number that drives the wealth projection. All rates are <strong>real (after inflation, in today's dollars)</strong>.
             Spending stays flat = constant purchasing power. SS stays flat = COLA offsets inflation.
           </p>
+
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-2">Working-Year Retirement Savings</h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <label className={labelCls}>Working Adults</label>
+              <input type="number" min={0} max={4} step="1" value={form.worker_count} onChange={(e) => setForm(f => ({ ...f, worker_count: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Limits below are applied once per working adult.</p>
+            </div>
+            <div>
+              <label className={labelCls}>401(k) / Adult ($/year)</label>
+              <input type="number" min={0} step="500" value={form.annual_401k_per_worker} onChange={(e) => setForm(f => ({ ...f, annual_401k_per_worker: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Pre-tax contribution; reduces ordinary income but not payroll tax.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Roth IRA / Adult ($/year)</label>
+              <input type="number" min={0} step="500" value={form.annual_roth_ira_per_worker} onChange={(e) => setForm(f => ({ ...f, annual_roth_ira_per_worker: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">After-tax Roth or backdoor Roth contribution.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Existing Roth Basis ($)</label>
+              <input type="number" min={0} step="1000" value={form.starting_roth_contribution_basis} onChange={(e) => setForm(f => ({ ...f, starting_roth_contribution_basis: e.target.value }))} placeholder="0 if unknown" className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Historical direct contributions only—not earnings, conversions still seasoning, or HSA assets.</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mt-3">
+            <div>
+              <label className={labelCls}>Qualified HSA Reserve ($)</label>
+              <input type="number" min={0} step="1000" value={form.starting_hsa_qualified_balance} onChange={(e) => setForm(f => ({ ...f, starting_hsa_qualified_balance: e.target.value }))} placeholder="0 if unknown" className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Available early only against modeled qualified healthcare costs.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Contribution Plan Starts</label>
+              <input type="date" value={form.retirement_contribution_start_date} onChange={(e) => setForm(f => ({ ...f, retirement_contribution_start_date: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Leave blank if the plan starts now.</p>
+            </div>
+            <div>
+              <label className={labelCls}>Contribution Plan Ends</label>
+              <input type="date" value={form.retirement_contribution_end_date} onChange={(e) => setForm(f => ({ ...f, retirement_contribution_end_date: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Contributions stop after this phase; employment income may continue.</p>
+            </div>
+          </div>
+
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Roth Conversion Ladder</h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="sm:col-span-2">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" checked={form.roth_conversion_ladder_enabled} onChange={(e) => setForm(f => ({ ...f, roth_conversion_ladder_enabled: e.target.checked }))} className="mt-0.5" />
+                <span>
+                  <span className="block text-xs font-medium text-[var(--text-primary)]">Build a five-year early-retirement ladder</span>
+                  <span className="block text-[10px] text-[var(--text-secondary)] mt-1">Converts traditional assets after retirement, taxes the conversion, then unlocks that principal after the waiting period.</span>
+                </span>
+              </label>
+            </div>
+            <div>
+              <label className={labelCls}>Waiting Period (years)</label>
+              <input type="number" min={1} step="1" value={form.roth_conversion_wait_years} onChange={(e) => setForm(f => ({ ...f, roth_conversion_wait_years: e.target.value }))} disabled={!form.roth_conversion_ladder_enabled} className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Annual Conversion ($)</label>
+              <input type="number" min={0} step="5000" value={form.roth_conversion_annual_amount} onChange={(e) => setForm(f => ({ ...f, roth_conversion_annual_amount: e.target.value }))} disabled={!form.roth_conversion_ladder_enabled} placeholder="Auto: spending gap" className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Leave blank or zero to match the modeled annual retirement spending gap.</p>
+            </div>
+          </div>
 
           {/* Investment & Savings */}
           <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-2">Investment &amp; Savings Returns (Real, After Inflation)</h4>
