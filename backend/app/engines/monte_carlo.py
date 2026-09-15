@@ -752,8 +752,9 @@ class MonteCarloEngine:
 
         Each candidate reuses the same random seed, so moving the retirement
         age changes the plan rather than the sampled market paths. Success is
-        expected to be monotonic as work continues longer; a shared cache keeps
-        the three binary searches reasonably fast for an interactive page.
+        expected to be monotonic as work continues longer. The targets share
+        one adaptive search: every sampled age tightens the brackets for all
+        confidence levels, instead of running three mostly separate searches.
         """
         from app.engines.fire_projections import FireProjectionsEngine
 
@@ -795,38 +796,108 @@ class MonteCarloEngine:
                 cache[age] = result.success_rate
             return cache[age]
 
+        ordered_targets = sorted(set(targets))
+        first_success = await success_at(first_age)
+        last_success = await success_at(last_age)
+
+        # A bracket is [known failure, known success]. An already-ready target
+        # resolves to first_age; an unreachable target has no bracket.
+        brackets: dict[float, list[int]] = {}
+        resolved: dict[float, int | None] = {}
+        for target in ordered_targets:
+            if first_success >= target:
+                resolved[target] = first_age
+            elif last_success < target:
+                resolved[target] = None
+            else:
+                brackets[target] = [first_age, last_age]
+
+        while any(hi - lo > 1 for lo, hi in brackets.values()):
+            # Choose the age with the best worst-case reduction across every
+            # possible result bucket (<80, 80-90, 90-95, >=95). This is the
+            # multi-threshold equivalent of a binary-search midpoint.
+            candidate_ages = sorted({
+                age
+                for lo, hi in brackets.values()
+                for age in range(lo + 1, hi)
+            })
+
+            def search_score(candidate_age: int) -> tuple[int, int, int]:
+                outcome_scores: list[int] = []
+                for met_count in range(len(ordered_targets) + 1):
+                    remaining = 0
+                    for target_index, target in enumerate(ordered_targets):
+                        if target not in brackets:
+                            continue
+                        lo, hi = brackets[target]
+                        if lo < candidate_age < hi:
+                            if target_index < met_count:
+                                hi = candidate_age
+                            else:
+                                lo = candidate_age
+                        remaining += max(0, hi - lo - 1)
+                    outcome_scores.append(remaining)
+                return (
+                    max(outcome_scores),
+                    sum(outcome_scores),
+                    candidate_age,
+                )
+
+            if len(cache) < 4:
+                # Two interior midpoint-style probes establish the rough
+                # shape before trusting interpolation on a potentially steep
+                # or flat success curve.
+                candidate = min(candidate_ages, key=search_score)
+            else:
+                estimates: list[int] = []
+                for target, (lo, hi) in brackets.items():
+                    if hi - lo <= 1:
+                        continue
+                    lo_success = cache[lo]
+                    hi_success = cache[hi]
+                    if hi_success > lo_success:
+                        raw = lo + (
+                            (target - lo_success)
+                            / (hi_success - lo_success)
+                            * (hi - lo)
+                        )
+                        estimate = math.ceil(raw)
+                    else:
+                        estimate = (lo + hi) // 2
+                    estimates.append(max(lo + 1, min(hi - 1, estimate)))
+                estimates.sort()
+                candidate = estimates[(len(estimates) - 1) // 2]
+            candidate_success = await success_at(candidate)
+            for target, bounds in brackets.items():
+                lo, hi = bounds
+                if not lo < candidate < hi:
+                    continue
+                if candidate_success >= target:
+                    bounds[1] = candidate
+                else:
+                    bounds[0] = candidate
+
+        for target, (_lo, hi) in brackets.items():
+            resolved[target] = hi
+
         confidence_ages: list[RetirementConfidenceAge] = []
-        lower_bound = first_age
-        for target in sorted(set(targets)):
-            if await success_at(last_age) < target:
+        for target in ordered_targets:
+            found = resolved[target]
+            if found is None:
                 confidence_ages.append(RetirementConfidenceAge(
                     confidence=target,
                     earliest_age=None,
                     success_rate=None,
-                    prior_age_success_rate=cache[last_age],
+                    prior_age_success_rate=last_success,
                 ))
                 continue
-
-            lo, hi = lower_bound, last_age
-            while lo < hi:
-                mid = (lo + hi) // 2
-                if await success_at(mid) >= target:
-                    hi = mid
-                else:
-                    lo = mid + 1
-            found = lo
-            # Guard against a one-year local wobble from tax timing or finite
-            # sampling before reporting the boundary as "earliest."
-            while found > first_age and await success_at(found - 1) >= target:
-                found -= 1
-            prior = await success_at(found - 1) if found > first_age else None
+            prior = cache[found - 1] if found > first_age else None
             confidence_ages.append(RetirementConfidenceAge(
                 confidence=target,
                 earliest_age=found,
-                success_rate=await success_at(found),
+                success_rate=cache[found],
                 prior_age_success_rate=prior,
             ))
-            lower_bound = found
 
         return RetirementAgeAnalysisResponse(
             configured_retirement_age=(

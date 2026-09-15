@@ -144,8 +144,10 @@ class TestDeterminism:
         self, base_fire_config, frozen_today_mc,
     ):
         engine = MonteCarloEngine(db=None)
+        evaluated_ages = []
 
         async def result_for_age(*, retirement_age_override, **_kwargs):
+            evaluated_ages.append(retirement_age_override)
             return MagicMock(success_rate=min(100.0, (retirement_age_override - 50) * 5.0))
 
         with patch.object(
@@ -160,6 +162,10 @@ class TestDeterminism:
         assert [point.earliest_age for point in result.confidence_ages] == [66, 68, 69]
         assert [point.success_rate for point in result.confidence_ages] == [80, 90, 95]
         assert result.runs_per_age == 100
+        # One shared search resolves all three thresholds with fewer age
+        # evaluations than three separate binary searches.
+        assert len(evaluated_ages) == 8
+        assert len(evaluated_ages) == len(set(evaluated_ages))
 
     @staticmethod
     def _hand_loop(annual_spending: float, start_nw: float, dob: date) -> float:
