@@ -991,19 +991,9 @@ export default function FireConfigPage() {
             </div>
           </div>
 
-          {/* Social Security & Spending */}
-          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Social Security &amp; Spending Phases</h4>
+          {/* Spending phases */}
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Spending Phases</h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <div>
-              <label className={labelCls}>SS Claim Age</label>
-              <input type="number" step="1" value={form.ss_claim_age} onChange={(e) => setForm(f => ({ ...f, ss_claim_age: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">62=early (70%), 67=full (100%)</p>
-            </div>
-            <div>
-              <label className={labelCls}>SS Benefit %</label>
-              <input type="number" step="1" value={form.ss_early_reduction} onChange={(e) => setForm(f => ({ ...f, ss_early_reduction: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">% of full benefit at claim age</p>
-            </div>
             <div>
               <label className={labelCls}>Slow-Go Age</label>
               <input type="number" step="1" value={form.spending_phase_slow_age} onChange={(e) => setForm(f => ({ ...f, spending_phase_slow_age: e.target.value }))} className={inputCls} />

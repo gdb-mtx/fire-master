@@ -256,8 +256,11 @@ class TestPrimaryExit5Year:
     @pytest.mark.asyncio
     async def test_final_wealth(self, engine, frozen_today):
         result = await engine.project_wealth_pools(end_age=82)
-        assert abs(result.total_at_end - 2_240_000) < TOLERANCE, (
-            f"Primary 5yr total_at_end={result.total_at_end:.0f}, expected ~2,240,000"
+        # The configured benefit now begins at the main FIRE config's claim
+        # age (67), rather than being reduced again and started at the legacy
+        # projection-only age (62).
+        assert abs(result.total_at_end - 2_080_000) < TOLERANCE, (
+            f"Primary 5yr total_at_end={result.total_at_end:.0f}, expected ~2,080,000"
         )
 
     @pytest.mark.asyncio
