@@ -423,7 +423,13 @@ export default function RetirementPage() {
   const { data: sensitivity } = useSpendingSensitivity();
   const { data: incomeSources } = useIncomeSources();
   const { data: monteCarlo, isLoading: loadingMC } = useMonteCarlo(1000);
-  const { data: retirementAges, isLoading: loadingRetirementAges } =
+  const {
+    data: retirementAges,
+    isLoading: loadingRetirementAges,
+    isFetching: fetchingRetirementAges,
+    isError: retirementAgeError,
+    refetch: retryRetirementAges,
+  } =
     useRetirementAgeAnalysis(1000, 42, 85);
   const todayIso = new Date().toISOString().slice(0, 10);
   const currentEmploymentSources = (incomeSources ?? []).filter(
@@ -592,9 +598,22 @@ export default function RetirementPage() {
               >
                 Age {confidence90.earliest_age}
               </div>
-            ) : loadingRetirementAges ? (
+            ) : loadingRetirementAges || fetchingRetirementAges ? (
               <div className="text-2xl font-bold font-mono tracking-tight mb-2 text-[var(--text-secondary)]">
                 Calculating…
+              </div>
+            ) : retirementAgeError || !retirementAges ? (
+              <div className="mb-2">
+                <div className="text-2xl font-bold font-mono tracking-tight text-[var(--yellow)]">
+                  Calculation unavailable
+                </div>
+                <button
+                  type="button"
+                  onClick={() => retryRetirementAges()}
+                  className="mt-3 px-3 py-1.5 text-xs rounded border border-[var(--border)] text-[var(--blue)] hover:border-[var(--blue)]"
+                >
+                  Retry calculation
+                </button>
               </div>
             ) : (
               <div className="text-3xl font-bold font-mono tracking-tight mb-2 text-[var(--yellow)]">
@@ -615,8 +634,10 @@ export default function RetirementPage() {
                       {confidence}% success
                     </div>
                     <div className="text-lg font-mono font-bold text-[var(--text-primary)] mt-1">
-                      {loadingRetirementAges
+                      {loadingRetirementAges || fetchingRetirementAges
                         ? "…"
+                        : retirementAgeError || !retirementAges
+                          ? "—"
                         : point?.earliest_age != null
                           ? `Age ${point.earliest_age}`
                           : `>${retirementAges?.max_tested_age ?? 85}`}

@@ -545,6 +545,8 @@ export function useRetirementAgeAnalysis(
     queryFn: () =>
       fetchJSON<RetirementAgeAnalysis>(
         `${BASE}/fire/retirement-age-analysis?runs=${runs}&seed=${seed}&max_age=${maxAge}`,
+        undefined,
+        120_000,
       ),
   });
 }
