@@ -235,13 +235,16 @@ class TestLifetimeEvents:
 
 class TestBridgeEvents:
     @staticmethod
-    async def _bridge(events, sources=()):
+    async def _bridge(events, sources=(), **config_overrides):
         db = AsyncMock()
         upcoming = MagicMock()
         upcoming.scalars.return_value.all.return_value = []
         db.execute = AsyncMock(return_value=upcoming)
         engine = FireProjectionsEngine(db)
-        cfg = _make_fire_config(target_annual_spending=12_000_000)  # $10K/mo burn
+        cfg = _make_fire_config(
+            target_annual_spending=12_000_000,
+            **config_overrides,
+        )  # $10K/mo burn
         bd = NetWorthBreakdown(liquid=60_000, retirement=0, real_estate_equity=0,
                                illiquid_private=0, other=0)  # $60K cash (dollars)
         with ExitStack() as stack:
@@ -280,6 +283,13 @@ class TestBridgeEvents:
         assert labels == {"Consulting (temp)": 3_000, "Dividends": 3_000}
         # Runway ignores temp income: (12K − 3K ongoing) = 9K deficit
         assert r.monthly_deficit == 9_000
+
+    async def test_retirement_healthcare_only_added_after_retirement(self, frozen_today):
+        working = await self._bridge([])
+        retired = await self._bridge([], target_retirement_age=50)
+
+        assert working.monthly_burn == 10_000
+        assert retired.monthly_burn == 10_600
 
 
 # ---------------------------------------------------------------------------

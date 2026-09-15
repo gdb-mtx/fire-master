@@ -2456,12 +2456,14 @@ class FireProjectionsEngine:
         today = date.today()
 
         monthly_burn = annual_spending_cents / 12.0 / 100.0
-        if config.date_of_birth:
-            monthly_burn += _cents_to_dollars(
-                _healthcare_monthly_cents_at_date(config, today)
-            )
-        else:
-            monthly_burn += _cents_to_dollars(config.healthcare_monthly_cost or 0)
+        retirement_date = self._get_retirement_date(config)
+        if retirement_date is not None and today >= retirement_date:
+            if config.date_of_birth:
+                monthly_burn += _cents_to_dollars(
+                    _healthcare_monthly_cents_at_date(config, today)
+                )
+            else:
+                monthly_burn += _cents_to_dollars(config.healthcare_monthly_cost or 0)
 
         # Recurring cashflow events active THIS month are part of the "now"
         # snapshot (fire-master#17): income events join the streams (temp when
