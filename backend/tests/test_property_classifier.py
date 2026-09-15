@@ -14,6 +14,7 @@ from app.engines.property_pnl import (
     classify_transaction,
     match_tag_to_property,
     resolve_with_tag,
+    tag_category,
 )
 
 COASTAL = uuid.uuid4()
@@ -168,3 +169,42 @@ def test_fallback_category_when_rule_has_none():
 def test_null_merchant_is_safe():
     c = classify_transaction(None, None, -5000, _rules())
     assert c.matched is False
+
+
+# --- Contra-entries: negative income, positive expense ---------------------------
+#
+# The module treated sign as identity — negative IS expense, positive IS income. That
+# holds for ~99% of rows and breaks on every contra-entry. A security deposit returned
+# to a tenant of an income property is negative Rental Income, but the negative branch
+# fell through to _fallback_category, whose `"rent" in cat` test matches
+# the substring inside "Rental Income" and returned "HOA / Condo Fees". Gross rents and
+# HOA expense were each overstated by the same $3,000 — net profit right, Schedule E
+# wrong. The matching UI gap (no income option on a negative row) is in TransactionsPage.
+
+
+def test_returned_deposit_is_negative_rental_income_not_an_hoa_fee():
+    unmatched = Classification(None, None, False)
+    pid, cat, src = resolve_with_tag(unmatched, RIVER, -300_000, "Rental Income")
+    assert (pid, cat, src) == (RIVER, "Rental Income", "monarch_tag")
+
+
+def test_rent_expense_categories_still_map_to_hoa():
+    """The guard that makes the fix safe: ~83 real condo-fee rows arrive from Monarch
+    as "Rent" / "Mortgage & Rent". Only an EXACT "Rental Income" match may flip to
+    income — a substring test on "rent" is the original bug."""
+    assert tag_category(-259_260, "Rent") == "HOA / Condo Fees"
+    assert tag_category(-7_385, "Rent") == "HOA / Condo Fees"
+    assert tag_category(-134_064, "Mortgage & Rent") == "Mortgage"
+
+
+def test_tag_category_is_case_and_whitespace_insensitive():
+    assert tag_category(-300_000, "  rental income  ") == "Rental Income"
+    assert tag_category(-300_000, "RENTAL INCOME") == "Rental Income"
+
+
+def test_positive_and_unrelated_categories_unchanged():
+    assert tag_category(115_625, "Other Income") == "Rental Income"
+    assert tag_category(300_000, "Rental Income") == "Rental Income"
+    assert tag_category(-64_900, "Home Services") == "Other"
+    assert tag_category(-10_000, "Home Repair") == "Repairs / Maintenance"
+    assert tag_category(-5_000, None) == "Other"

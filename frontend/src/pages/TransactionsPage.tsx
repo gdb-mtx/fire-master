@@ -85,6 +85,11 @@ export default function TransactionsPage() {
   });
   const { data: properties } = useProperties();
   const { data: cats } = usePropertyCategories();
+  // Income category first, then the expense vocabulary. The API has always
+  // returned income_category; the table simply never offered it.
+  const propertyCategories = cats
+    ? [cats.income_category, ...cats.expense_categories]
+    : [];
   const { data: accounts } = useAccounts();
   const reassign = useReassignTransaction();
 
@@ -253,6 +258,10 @@ export default function TransactionsPage() {
                               reassign.mutate({
                                 txId: tx.id,
                                 propertyId: e.target.value || null,
+                                // Sign picks a sensible default only — the
+                                // dropdown below can override it in either
+                                // direction (a deposit refund is negative
+                                // Rental Income).
                                 category: e.target.value
                                   ? isIncome
                                     ? "Rental Income"
@@ -269,10 +278,19 @@ export default function TransactionsPage() {
                               </option>
                             ))}
                           </select>
-                          {/* category refinement (expenses only) */}
-                          {assigned && !isIncome && (
+                          {/* Category refinement — shown for EVERY assigned row,
+                              income and expense alike, with the full vocabulary.
+                              Gating this on !isIncome meant a negative amount could
+                              only ever be an expense: a returned security deposit
+                              (negative Rental Income) had no selectable label, and a
+                              refunded property expense (positive) got no dropdown at
+                              all. Sign is a default, not a constraint. */}
+                          {assigned && (
                             <select
-                              value={tx.property_category ?? "Other"}
+                              value={
+                                tx.property_category ??
+                                (isIncome ? "Rental Income" : "Other")
+                              }
                               onChange={(e) =>
                                 reassign.mutate({
                                   txId: tx.id,
@@ -282,7 +300,7 @@ export default function TransactionsPage() {
                               }
                               className="input py-1"
                             >
-                              {cats?.expense_categories.map((c) => (
+                              {propertyCategories.map((c) => (
                                 <option key={c} value={c}>
                                   {c}
                                 </option>

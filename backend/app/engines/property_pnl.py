@@ -134,6 +134,29 @@ def _fallback_category(tx_category: str | None) -> str:
     return "Other"
 
 
+def tag_category(amount_cents: int, tx_category: str | None) -> str:
+    """Property category for a row classified by a Monarch tag.
+
+    Sign is the usual signal but it is NOT identity. A returned security deposit, a
+    rent chargeback or a refunded overpayment is negative Rental Income, and the
+    module had no way to express that: the negative branch fell through to
+    _fallback_category, whose `"rent" in cat` test matches the substring inside
+    "Rental Income" and returned "HOA / Condo Fees". A returned deposit on an income
+    property booked itself as an HOA fee that way — gross rents and HOA expense each
+    overstated by the same amount, so net profit looked right and Schedule E did not.
+
+    So: when Monarch's own category says Rental Income, honour it in both directions.
+    The match is EXACT, never a substring, because _fallback_category deliberately
+    maps the expense categories "Rent" and "Mortgage & Rent" to HOA / Condo Fees for
+    ~83 real condo-fee rows. A substring test on "rent" is precisely the bug.
+    """
+    if amount_cents > 0:
+        return RENTAL_INCOME
+    if (tx_category or "").strip().lower() == RENTAL_INCOME.lower():
+        return RENTAL_INCOME
+    return _fallback_category(tx_category)
+
+
 def match_tag_to_property(tags, name_to_id: dict[str, uuid.UUID]) -> uuid.UUID | None:
     """Inbound direction: a Monarch tag whose name matches a property -> that property's id.
 
@@ -166,7 +189,7 @@ def resolve_with_tag(
     source on every reclassify.
     """
     if tag_pid is not None and not (c.matched and c.property_id == tag_pid):
-        category = RENTAL_INCOME if amount_cents > 0 else _fallback_category(tx_category)
+        category = tag_category(amount_cents, tx_category)
         return tag_pid, category, "monarch_tag"
     if c.matched:
         return c.property_id, c.category, "rule"
