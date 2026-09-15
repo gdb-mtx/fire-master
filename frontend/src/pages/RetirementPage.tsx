@@ -627,7 +627,9 @@ export default function RetirementPage() {
             </div>
             <p className="text-[10px] text-[var(--text-secondary)] mt-3">
               Calculated by rerunning the income, tax, spending, healthcare, and account-access
-              plan at each candidate age; {retirementAges?.runs_per_age ?? 1000} paths per age.
+              plan from today at each candidate age; {retirementAges?.runs_per_age ?? 1000} paths per age.
+              This includes market uncertainty before retirement, so the threshold is driven by
+              low-tail arrival balances—not by how long the median portfolio lasts after retirement.
             </p>
           </div>
 
