@@ -422,7 +422,12 @@ export default function RetirementPage() {
   const { data: bridge } = useBridgeStatus();
   const { data: sensitivity } = useSpendingSensitivity();
   const { data: incomeSources } = useIncomeSources();
-  const { data: monteCarlo, isLoading: loadingMC } = useMonteCarlo(1000);
+  const coreReady = Boolean(fireNum && readiness);
+  const { data: monteCarlo, isLoading: loadingMC } = useMonteCarlo(
+    1000,
+    42,
+    coreReady,
+  );
   const {
     data: retirementAges,
     isLoading: loadingRetirementAges,
@@ -430,7 +435,7 @@ export default function RetirementPage() {
     isError: retirementAgeError,
     refetch: retryRetirementAges,
   } =
-    useRetirementAgeAnalysis(1000, 42, 85);
+    useRetirementAgeAnalysis(1000, 42, 85, coreReady && Boolean(monteCarlo));
   const todayIso = new Date().toISOString().slice(0, 10);
   const currentEmploymentSources = (incomeSources ?? []).filter(
     (source) =>

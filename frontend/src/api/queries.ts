@@ -527,11 +527,16 @@ export function useRothConversionPlan(targetBracket: number = 0.22) {
   });
 }
 
-export function useMonteCarlo(runs: number = 1000, seed: number = 42) {
+export function useMonteCarlo(
+  runs: number = 1000,
+  seed: number = 42,
+  enabled: boolean = true,
+) {
   return useQuery({
     queryKey: ["retirement", "monte-carlo", runs, seed],
     queryFn: () =>
       fetchJSON<MonteCarloResult>(`${BASE}/tax/monte-carlo?runs=${runs}&seed=${seed}`),
+    enabled,
   });
 }
 
@@ -539,6 +544,7 @@ export function useRetirementAgeAnalysis(
   runs: number = 1000,
   seed: number = 42,
   maxAge: number = 85,
+  enabled: boolean = true,
 ) {
   return useQuery({
     queryKey: ["retirement", "confidence-ages", runs, seed, maxAge],
@@ -548,6 +554,7 @@ export function useRetirementAgeAnalysis(
         undefined,
         120_000,
       ),
+    enabled,
   });
 }
 

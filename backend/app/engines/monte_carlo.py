@@ -44,6 +44,7 @@ Nominal return mean and inflation mean come from the base config
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import random
@@ -416,7 +417,12 @@ class MonteCarloEngine:
 
         # Run simulations (all values in real dollars)
         runs: list[SimulationRun] = []
-        for _ in range(n_runs):
+        for run_index in range(n_runs):
+            # The simulation is CPU-heavy but runs inside an async request.
+            # Yield in small batches so health checks and the page's quick
+            # summary requests are not blocked for the full MC runtime.
+            if run_index and run_index % 25 == 0:
+                await asyncio.sleep(0)
             historical_path = (
                 _sample_historical_path(rng, total_years, historical_block_years)
                 if simulation_method == "historical_blocks" else None
