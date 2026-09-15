@@ -43,7 +43,7 @@ async def _run_monarch_sync_async(full_history: bool = False):
     engine = create_async_engine(settings.DATABASE_URL)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    from app.ingestion.monarch_client import MonarchClient
+    from app.ingestion.monarch_client import MonarchAuthError, MonarchClient
     from app.ingestion.monarch_sync import MonarchSyncService
     from app.ingestion.category_sync import CategorySyncService
     from app.engines.net_worth import NetWorthEngine
@@ -73,9 +73,18 @@ async def _run_monarch_sync_async(full_history: bool = False):
             # Backfill any new categories from freshly synced transactions
             await cat_sync.sync_from_transactions()
 
-            # Import Monarch's aggregate net worth history
+            # Import Monarch's aggregate net worth history. Treated as a step like
+            # any other: before this, it raised outside run_full_sync's per-step
+            # handlers, so its exception replaced the status wholesale and every
+            # real error collected in result.errors was silently discarded.
             nw_engine = NetWorthEngine(db)
-            await nw_engine.import_monarch_net_worth(client)
+            try:
+                await nw_engine.import_monarch_net_worth(client)
+            except MonarchAuthError:
+                raise
+            except Exception as e:
+                logger.error("Net worth import failed: %s", e)
+                result.errors.append(f"Net worth import: {e}")
             await db.commit()
 
         status = {
@@ -89,6 +98,19 @@ async def _run_monarch_sync_async(full_history: bool = False):
         _set_sync_status(status)
         return status
 
+    except MonarchAuthError:
+        logger.error(
+            "Monarch rejected the saved session — reconnect with scripts/monarch_login.py"
+        )
+        _set_sync_status({
+            "status": "error",
+            "error_message": (
+                "Monarch session expired or was revoked. Reconnect by running "
+                "scripts/monarch_login.py, then sync again."
+            ),
+            "last_sync_at": datetime.now(timezone.utc).isoformat(),
+        })
+        raise
     except Exception as e:
         logger.exception("Monarch sync failed")
         _set_sync_status({
@@ -122,8 +144,17 @@ async def _compute_daily_snapshot_async():
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def run_monarch_sync(self, full_history: bool = False):
     """Celery task: sync all data from Monarch Money."""
+    from app.ingestion.monarch_client import MonarchAuthError
+
     try:
         return asyncio.run(_run_monarch_sync_async(full_history=full_history))
+    except MonarchAuthError:
+        # Terminal — do NOT retry. The same token is rejected identically every
+        # time, and it was this retry fan-out (4 full syncs x ~30 calls against a
+        # rejecting endpoint) that turned a plain 401 into Monarch 429-throttling
+        # the account. Fail once, loudly, with a fix the user can act on.
+        logger.error("Monarch sync aborted: session expired — run scripts/monarch_login.py")
+        raise
     except Exception as exc:
         logger.error("Monarch sync task failed (attempt %d): %s", self.request.retries + 1, exc)
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))

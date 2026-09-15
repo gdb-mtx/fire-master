@@ -9,7 +9,11 @@ from sqlalchemy import case, delete, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ingestion.monarch_client import MonarchClient
+from app.ingestion.monarch_client import (
+    MonarchAuthError,
+    MonarchClient,
+    MonarchRateLimitError,
+)
 from app.models.account import Account
 from app.models.balance_snapshot import BalanceSnapshot
 from app.models.enums import AccountType, DataSource
@@ -318,9 +322,15 @@ class MonarchSyncService:
 
         # Collect all snapshot rows across all accounts
         rows = []
+        # A dead session or a throttle applies to the whole connection, not to one
+        # account — so bail out of the loop instead of firing a doomed request for
+        # each remaining account. That fan-out is what escalates a 401 into a 429.
+        rate_limited: Exception | None = None
+        fetched = 0
         for account_id, external_id in accounts:
             try:
                 history = await self.client.get_account_history(external_id)
+                fetched += 1
                 for point in history:
                     snap_date = point.get("date")
                     if isinstance(snap_date, str):
@@ -333,6 +343,19 @@ class MonarchSyncService:
                         "balance": _dollars_to_cents(balance),
                         "source": DataSource.MONARCH,
                     })
+            except MonarchAuthError:
+                raise
+            except MonarchRateLimitError as e:
+                rate_limited = e
+                logger.error(
+                    "Monarch rate-limited us at account %s — stopping after %d of %d "
+                    "accounts, keeping %d snapshot rows already fetched",
+                    external_id,
+                    fetched,
+                    len(accounts),
+                    len(rows),
+                )
+                break
             except Exception as e:
                 logger.error("Failed to fetch snapshots for account %s: %s", external_id, e)
 
@@ -348,6 +371,10 @@ class MonarchSyncService:
 
         await self.db.flush()
         logger.info("Synced %d balance snapshots", count)
+        # Persist the partial fetch above, then surface the throttle so run_full_sync
+        # records it rather than reporting a clean sync over missing accounts.
+        if rate_limited is not None:
+            raise rate_limited
         return count
 
     async def reconcile_transactions(self, start_date: date | None = None) -> int:
@@ -395,6 +422,11 @@ class MonarchSyncService:
 
         try:
             result.accounts_synced = await self.sync_accounts()
+        except MonarchAuthError:
+            # Terminal: every later step hits the same rejected session. Abort the
+            # whole sync so the task can report "reconnect" instead of burning the
+            # remaining call budget and turning the 401 into a 429.
+            raise
         except Exception as e:
             logger.error("Account sync failed: %s", e)
             result.errors.append(f"Account sync: {e}")
@@ -402,18 +434,33 @@ class MonarchSyncService:
         try:
             start = date(2018, 1, 1) if full_history else None
             result.transactions_synced = await self.sync_transactions(start_date=start)
+        except MonarchAuthError:
+            # Terminal: every later step hits the same rejected session. Abort the
+            # whole sync so the task can report "reconnect" instead of burning the
+            # remaining call budget and turning the 401 into a 429.
+            raise
         except Exception as e:
             logger.error("Transaction sync failed: %s", e)
             result.errors.append(f"Transaction sync: {e}")
 
         try:
             result.transactions_deleted = await self.reconcile_transactions(start_date=start)
+        except MonarchAuthError:
+            # Terminal: every later step hits the same rejected session. Abort the
+            # whole sync so the task can report "reconnect" instead of burning the
+            # remaining call budget and turning the 401 into a 429.
+            raise
         except Exception as e:
             logger.error("Transaction reconciliation failed: %s", e)
             result.errors.append(f"Transaction reconciliation: {e}")
 
         try:
             result.snapshots_synced = await self.sync_balance_snapshots()
+        except MonarchAuthError:
+            # Terminal: every later step hits the same rejected session. Abort the
+            # whole sync so the task can report "reconnect" instead of burning the
+            # remaining call budget and turning the 401 into a 429.
+            raise
         except Exception as e:
             logger.error("Balance snapshot sync failed: %s", e)
             result.errors.append(f"Snapshot sync: {e}")

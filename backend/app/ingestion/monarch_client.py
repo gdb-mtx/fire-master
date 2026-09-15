@@ -1,12 +1,53 @@
 """Wrapper around the monarchmoney library for structured data access."""
 
+import functools
 import logging
 from datetime import date, datetime
 from pathlib import Path
 
+from gql.transport.exceptions import TransportServerError
 from monarchmoney import MonarchMoney
 
 logger = logging.getLogger(__name__)
+
+
+class MonarchAuthError(Exception):
+    """Monarch rejected the saved session (HTTP 401).
+
+    Terminal, never transient: the same token will be rejected identically on every
+    retry, and the retry volume is exactly what escalates a 401 into a 429. Callers
+    must abort the sync and tell the user to re-run scripts/monarch_login.py.
+    """
+
+
+class MonarchRateLimitError(Exception):
+    """Monarch is throttling us (HTTP 429). Transient — stop calling and back off."""
+
+
+def _typed_errors(fn):
+    """Map gql transport errors onto typed Monarch errors.
+
+    Without this every failure arrives as an untyped TransportServerError, so the
+    sync cannot tell "your session is dead" (stop now) from "a single account
+    hiccuped" (keep going) and treats both as retryable.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except TransportServerError as exc:
+            if exc.code == 401:
+                raise MonarchAuthError(
+                    "Monarch rejected the saved session (401)."
+                ) from exc
+            if exc.code == 429:
+                raise MonarchRateLimitError(
+                    "Monarch rate-limited the request (429)."
+                ) from exc
+            raise
+
+    return wrapper
 
 
 class MonarchClient:
@@ -25,12 +66,26 @@ class MonarchClient:
             raise RuntimeError("Could not restrict Monarch session permissions") from exc
         self.mm.load_session(self.session_file)
         logger.info("Monarch session loaded from %s", self.session_file)
+        await self.verify()
 
+    @_typed_errors
+    async def verify(self):
+        """Confirm the loaded session is actually accepted by Monarch.
+
+        load_session() only reads a local file, so without this probe a revoked
+        token sails through connect() and fails ~30 requests deep instead of here.
+        get_subscription_details is the cheapest authenticated query available —
+        a single object, no lists, no date range.
+        """
+        await self.mm.get_subscription_details()
+
+    @_typed_errors
     async def get_accounts(self) -> list[dict]:
         """Fetch all linked accounts with balances."""
         data = await self.mm.get_accounts()
         return data.get("accounts", [])
 
+    @_typed_errors
     async def get_transactions(
         self,
         start_date: date | None = None,
@@ -64,6 +119,7 @@ class MonarchClient:
 
         return all_transactions
 
+    @_typed_errors
     async def get_account_history(self, account_id: str) -> list[dict]:
         """Fetch balance history for a specific account."""
         data = await self.mm.get_account_history(account_id)
@@ -71,6 +127,7 @@ class MonarchClient:
             return data
         return data.get("accountSnapshotHistory", [])
 
+    @_typed_errors
     async def get_account_snapshots_by_type(
         self,
         start_date: str | None = None,
@@ -82,21 +139,25 @@ class MonarchClient:
             kwargs["start_date"] = start_date
         return await self.mm.get_account_snapshots_by_type(**kwargs)
 
+    @_typed_errors
     async def get_aggregate_snapshots(self) -> list[dict]:
         """Fetch Monarch's calculated net worth history."""
         data = await self.mm.get_aggregate_snapshots()
         return data.get("aggregateSnapshots", [])
 
+    @_typed_errors
     async def get_transaction_categories(self) -> list[dict]:
         """Fetch the flat list of transaction categories from Monarch."""
         data = await self.mm.get_transaction_categories()
         return data.get("categories", [])
 
+    @_typed_errors
     async def get_transaction_category_groups(self) -> list[dict]:
         """Fetch category groups (parent categories) from Monarch."""
         data = await self.mm.get_transaction_category_groups()
         return data.get("categoryGroups", [])
 
+    @_typed_errors
     async def refresh_accounts(self):
         """Request Monarch to refresh account balances from institutions."""
         await self.mm.request_accounts_refresh_and_wait()
