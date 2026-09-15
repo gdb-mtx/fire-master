@@ -151,13 +151,15 @@ export default function FireConfigPage() {
         post_medicare_healthcare_monthly_cost: config.post_medicare_healthcare_monthly_cost ? (config.post_medicare_healthcare_monthly_cost / 100).toString() : "",
         medicare_start_age: config.medicare_start_age.toString(),
         rmd_start_age: config.rmd_start_age.toString(),
-        state_tax_rate: config.state_tax_rate?.toString() || "",
+        state_tax_rate: ((tax?.state_tax_rate as number | undefined) ?? config.state_tax_rate)?.toString() || "",
         federal_marginal_rate: config.federal_marginal_rate?.toString() || "",
         notes: config.notes || "",
         filing_status: (tax?.filing_status as string) || "single",
         household_size: (tax?.household_size as number)?.toString() || "1",
         cost_basis_pct: (tax?.cost_basis_pct as number) != null ? ((tax!.cost_basis_pct as number) * 100).toString() : "60",
-        state_of_residence: (tax?.state as string) || "",
+        state_of_residence: ["CA", "CO"].includes(String(tax?.state || "").toUpperCase())
+          ? String(tax?.state).toUpperCase()
+          : "FLAT",
         federal_deduction_method: (tax?.federal_deduction_method as string) || "standard",
         federal_itemized_deduction: (tax?.federal_itemized_deduction as number)?.toString() || "",
         state_deduction_method: (tax?.state_deduction_method as string) || "standard",
@@ -244,7 +246,12 @@ export default function FireConfigPage() {
       : null;
     if (form.medicare_start_age) data.medicare_start_age = parseInt(form.medicare_start_age);
     if (form.rmd_start_age) data.rmd_start_age = parseInt(form.rmd_start_age);
-    if (form.state_tax_rate) data.state_tax_rate = parseFloat(form.state_tax_rate);
+    const selectedStateTaxRate = form.state_of_residence === "CO"
+      ? 4.4
+      : form.state_of_residence === "CA"
+        ? null
+        : (form.state_tax_rate ? parseFloat(form.state_tax_rate) : null);
+    data.state_tax_rate = selectedStateTaxRate;
     if (form.federal_marginal_rate) data.federal_marginal_rate = parseFloat(form.federal_marginal_rate);
     data.notes = form.notes || null;
 
@@ -268,8 +275,8 @@ export default function FireConfigPage() {
         filing_status: form.filing_status,
         household_size: parseInt(form.household_size) || 1,
         cost_basis_pct: pf(form.cost_basis_pct, 60) / 100,
-        state: form.state_of_residence || null,
-        state_tax_rate: form.state_tax_rate ? parseFloat(form.state_tax_rate) : null,
+        state: form.state_of_residence,
+        state_tax_rate: selectedStateTaxRate,
         federal_deduction_method: form.federal_deduction_method,
         federal_itemized_deduction: form.federal_itemized_deduction
           ? parseFloat(form.federal_itemized_deduction)
@@ -626,22 +633,42 @@ export default function FireConfigPage() {
               </select>
             </div>
             <div>
-              <label className={labelCls}>State of Residence</label>
-              <input type="text" value={form.state_of_residence} onChange={(e) => setForm(f => ({ ...f, state_of_residence: e.target.value }))} placeholder="CA" maxLength={2} className={inputCls} />
+              <label className={labelCls}>State Tax Model</label>
+              <select
+                value={form.state_of_residence}
+                onChange={(e) => setForm(f => ({
+                  ...f,
+                  state_of_residence: e.target.value,
+                  state_tax_rate: e.target.value === "CO" ? "4.4" : f.state_tax_rate,
+                }))}
+                className={inputCls}
+              >
+                <option value="CO">Colorado (4.4% flat)</option>
+                <option value="CA">California (progressive)</option>
+                <option value="FLAT">Other state (custom flat rate)</option>
+              </select>
             </div>
             <div>
               <label className={labelCls}>
-                {form.state_of_residence.trim().toUpperCase() === "CA" ? "California Tax Model" : "State Tax Rate %"}
+                {form.state_of_residence === "CA"
+                  ? "California Tax Model"
+                  : form.state_of_residence === "CO"
+                    ? "Colorado Tax Rate"
+                    : "State Tax Rate %"}
               </label>
-              {form.state_of_residence.trim().toUpperCase() === "CA" ? (
+              {form.state_of_residence === "CA" ? (
                 <div className={`${inputCls} text-[var(--text-secondary)]`}>Progressive (automatic)</div>
+              ) : form.state_of_residence === "CO" ? (
+                <div className={`${inputCls} text-[var(--text-secondary)]`}>4.4% flat</div>
               ) : (
                 <input type="number" step="0.01" value={form.state_tax_rate} onChange={(e) => setForm(f => ({ ...f, state_tax_rate: e.target.value }))} placeholder="5.0" className={inputCls} />
               )}
               <p className="text-[10px] text-[var(--text-secondary)] mt-1">
-                {form.state_of_residence.trim().toUpperCase() === "CA"
+                {form.state_of_residence === "CA"
                   ? "Uses published CA brackets, the CA deduction, millionaire surtax, and wage SDI. The saved flat rate is ignored."
-                  : "Flat-rate fallback for states without a built-in schedule."}
+                  : form.state_of_residence === "CO"
+                    ? "Uses the app's original Colorado flat-rate assumption."
+                    : "Enter a flat-rate estimate for a state without a built-in schedule."}
               </p>
             </div>
             <div>
@@ -657,7 +684,7 @@ export default function FireConfigPage() {
               <input type="number" min={0} value={form.federal_itemized_deduction} onChange={(e) => setForm(f => ({ ...f, federal_itemized_deduction: e.target.value }))} disabled={form.federal_deduction_method !== "itemized"} placeholder="From Schedule A" className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>{form.state_of_residence.trim().toUpperCase() === "CA" ? "California Deduction Method" : "State Deduction Method"}</label>
+              <label className={labelCls}>{form.state_of_residence === "CA" ? "California Deduction Method" : "State Deduction Method"}</label>
               <select value={form.state_deduction_method} onChange={(e) => setForm(f => ({ ...f, state_deduction_method: e.target.value }))} className={inputCls}>
                 <option value="standard">Standard deduction</option>
                 <option value="itemized">Itemized deduction</option>
@@ -665,7 +692,7 @@ export default function FireConfigPage() {
               </select>
             </div>
             <div>
-              <label className={labelCls}>{form.state_of_residence.trim().toUpperCase() === "CA" ? "California Itemized Deductions ($/year)" : "State Itemized Deductions ($/year)"}</label>
+              <label className={labelCls}>{form.state_of_residence === "CA" ? "California Itemized Deductions ($/year)" : "State Itemized Deductions ($/year)"}</label>
               <input type="number" min={0} value={form.state_itemized_deduction} onChange={(e) => setForm(f => ({ ...f, state_itemized_deduction: e.target.value }))} disabled={form.state_deduction_method !== "itemized"} placeholder="From state return" className={inputCls} />
             </div>
             <div className="sm:col-span-2 md:col-span-3 border-t border-[var(--border)] pt-4 mt-1">
