@@ -1,57 +1,78 @@
 # Contributing
 
-FIREMaster is one person's retirement model that other people run on their own money. That
-shapes what a good pull request looks like here. Read this before opening one.
+The short version: **bug reports are welcome; code contributions are not being sought.**
 
-## One behavior change per PR
+FIREMaster is a personal tool, published so that the people running it can audit what
+touches their financial data. It is built and maintained by one person, for his own
+retirement first. It is not a community project, and this file is here so nobody has to
+discover that through an awkward PR review.
 
-A PR changes one thing a user could notice. A tax rule, a new opt-in setting, a bug. If the
-description needs a bulleted summary, it is several PRs. Build hygiene and unrelated fixes go
-in their own PRs too. Big PRs are not reviewed faster because they are big - they are closed
-with a request to split.
+## Bug reports — yes
 
-## Defaults do not move
+If something is broken, an issue with reproduction steps is genuinely appreciated:
 
-Every engine default is neutral or config-driven (`custom_assumptions`), and an existing
-install must produce the same numbers before and after your change unless the user opts in.
-New behavior ships behind a new key that is off or absent by default. Changing a growth rate,
-a withdrawal order, a definition (what "FIRE number" means), or what counts as spendable is a
-design discussion first, an issue second, a PR third.
+- What you did, what you expected, what happened instead
+- Container or native path, OS, and the relevant log lines
+  (`docker compose logs backend` usually has the story)
+- For projection/engine questions: the config values involved (never post real account
+  data — see below)
 
-## Snapshot tests are tripwires, not fixtures
+There is **no SLA**. Issues get read; fixes happen when they happen.
 
-`backend/tests/test_projection_snapshots.py` pins engine output for a fixed persona. If your
-change moves a pinned number, that is the test doing its job. Do not edit the expected value
-in the same commit. Open an issue with the old and new number and why, and wait for a yes. A
-PR that rewrites a snapshot without a linked discussion is closed.
+## Pull requests — closed by default
 
-## Roles are not tax treatment
+Please open an issue *before* writing any code. Unsolicited PRs will generally be closed
+unread, regardless of quality — not out of disrespect, but because:
 
-Account `fire_role` values describe what an account does in the plan, not how it is taxed.
-`retirement_bridge` is the pre-59½ IRA a SEPP draws from - it is not a taxable brokerage.
-Money enters the projection pools through `custom_assumptions.sepp`, `taxable_pool`,
-`roth_pool`, `rrsp` and `property_sales`, on purpose: the engine cannot tell a SEPP source
-from a brokerage from the role alone. Read the "Projection engine" section of CLAUDE.md and
-ARCHITECTURE.md before touching `fire_projections.py`, `monte_carlo.py` or `tax_engine.py`.
+- Every merged line becomes a maintenance obligation on one person
+- The engine encodes deliberate financial-modeling decisions that look like bugs until
+  they aren't (see `ARCHITECTURE.md`)
+- Keeping the copyright uniform preserves the project's licensing freedom
 
-## Real terms, always
+If an issue discussion ends with "a PR for this would be accepted," that's the invitation.
+Anything merged requires agreement that the contribution is licensed to the project's
+copyright holder.
 
-Everything is in today's dollars. Never inflate a flow with `(1+i)**yr`. If you need a nominal
-view it is a display concern, not an engine one.
+## Feature requests
 
-## Keep yourself out of the code
+You can file them, with expectations set accordingly: the roadmap is whatever the author
+needs next. The good news is that the API-first design means many "features" don't need
+code — point Claude Code (or any agent) at the backend API and ask your question. That's
+the intended extension mechanism.
 
-No personal balances, bills, addresses, or account names in fixtures, comments, or defaults.
-Use the demo persona (`scripts/seed_demo.py`) or the snapshot persona for examples. State- or
-household-specific logic is fine as a selectable model, never as the default.
+## If a PR was invited
 
-## Practicalities
+The engine encodes deliberate decisions, and other people run it on their own money. So an
+invited PR follows these, or it comes back:
 
-- Rebase onto `main` before opening; migrations chain off `alembic heads` on main.
-- `cd backend && uv run pytest -v` green, and `cd frontend && npx tsc -b` clean.
-- Every new Monarch client method is wrapped with `@_typed_errors` (a 401 is terminal).
-- The demo at https://demo.firemaster.io runs on a one-core box. A page that needs seconds of
-  CPU per load needs a cache before it can ship.
-- Security issues: see SECURITY.md, not a PR.
+- **One behavior change per PR.** If the description needs a bulleted summary, it is several
+  PRs. Build hygiene and unrelated fixes go separately.
+- **Defaults do not move.** An existing install produces the same numbers before and after
+  your change unless the user opts in. New behavior ships behind a new `custom_assumptions`
+  key that is absent by default. Changing a rate, a withdrawal order, a definition, or what
+  counts as spendable is an issue first.
+- **Snapshot tests are tripwires, not fixtures.** If `test_projection_snapshots.py` moves,
+  that is the test working. Do not edit the expected value in the same PR — open an issue
+  with old and new number and why.
+- **Roles are not tax treatment.** `fire_role` says what an account does in the plan.
+  `retirement_bridge` is the pre-59½ IRA a SEPP draws from, not a taxable brokerage. Money
+  enters the projection pools through `custom_assumptions.sepp` / `taxable_pool` /
+  `roth_pool` / `rrsp` / `property_sales` on purpose. Read CLAUDE.md's "Projection engine"
+  section and ARCHITECTURE.md before touching `fire_projections.py`, `monte_carlo.py`, or
+  `tax_engine.py`.
+- **Real terms, always.** Never inflate a flow with `(1+i)**yr`.
+- **Keep yourself out of the code.** No personal balances, bills, or account names in
+  fixtures, comments, or defaults; no state- or household-specific logic as the default.
+- Rebase onto `main`; `cd backend && uv run pytest -v` green; `cd frontend && npx tsc -b`
+  clean; every new Monarch client method wrapped with `@_typed_errors`. The demo runs on a
+  one-core box — seconds of CPU per page load needs a cache first.
 
-Small, boring PRs merge in a day. Thank you for reading this far.
+## One hard rule
+
+**Never post real financial data** — account numbers, balances, institution names tied to
+amounts, transaction exports — in issues, PRs, or discussions. Redact first. Reports
+containing PII may be deleted outright to keep it out of search indexes.
+
+## Security issues
+
+Not here — see [SECURITY.md](SECURITY.md) for the private disclosure route.
