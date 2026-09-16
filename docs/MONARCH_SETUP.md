@@ -24,12 +24,12 @@ docker compose exec backend uv run python ../scripts/monarch_login.py
 ```
 
 Enter your Monarch email, password, and MFA code if prompted. (`docker compose exec` gives the
-interactive terminal the MFA prompt needs; run it against the already-running stack.) Password
-and MFA entry are hidden. The session token is saved to `backend/.monarch_session` with
-owner-only permissions (gitignored — treat it like a password). Credentials themselves are
-never stored, and the login helper suppresses the client's additional default session file.
-If you used an older version of the helper, remove the obsolete
-`backend/.mm/mm_session.pickle` after confirming `backend/.monarch_session` exists.
+interactive terminal the MFA prompt needs; run it against the already-running stack.) Nothing you
+type at the password or MFA prompt is echoed. What gets written is `backend/.monarch_session`,
+mode 0600, gitignored — it IS your login, guard it like one. Your password is never stored, and
+the helper stops the library from also dropping its own copy under `.mm/`. If you logged in with
+a version older than Sept 2026, delete the leftover `backend/.mm/mm_session.pickle` once you have
+confirmed `backend/.monarch_session` is there.
 
 FIREMaster uses the community-maintained `monarchmoneycommunity` client (the original
 `monarchmoney` library is unmaintained and broke when Monarch rebranded domains).

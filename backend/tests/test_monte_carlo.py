@@ -19,12 +19,7 @@ import pytest
 
 from app.engines.fire_projections import FireProjectionsEngine, _spending_multiplier
 from app.data.historical_market_returns import HISTORICAL_MARKET_RETURNS
-from app.engines.monte_carlo import (
-    MonteCarloEngine,
-    _draw_year,
-    _historical_real_return,
-    _sample_historical_path,
-)
+from app.engines.monte_carlo import HistoricalBlocks, MonteCarloEngine, _draw_year
 from app.engines.net_worth import NetWorthEngine
 
 from .conftest import FROZEN_TODAY, _make_fire_config
@@ -341,9 +336,10 @@ class TestHistoricalBlocks:
     def test_recentering_hits_configured_cagr_over_full_history(self):
         """Log-recentering: the geometric mean over ALL observations equals the target."""
         mu_nom, mu_i = 0.07, 0.03
+        blocks = HistoricalBlocks(stock_weight=1.0)
         nominal_logs, infl_logs = [], []
         for obs in HISTORICAL_MARKET_RETURNS:
-            r_real, infl = _historical_real_return(obs, 1.0, mu_nom, mu_i)
+            r_real, infl = blocks.real_return(obs, mu_nom, mu_i)
             nominal_logs.append(math.log1p((1 + r_real) * (1 + infl) - 1))
             infl_logs.append(math.log1p(infl))
         n = len(HISTORICAL_MARKET_RETURNS)
@@ -352,7 +348,7 @@ class TestHistoricalBlocks:
 
     def test_blocks_are_contiguous_history(self):
         rng = random.Random(7)
-        path = _sample_historical_path(rng, years=20, block_years=7)
+        path = HistoricalBlocks(block_years=7).path(rng, years=20)
         assert len(path) == 20
         # Within each 7-year block the years are consecutive.
         for i in range(0, 14, 7):

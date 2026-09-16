@@ -89,9 +89,9 @@ docker compose up            # rebuilds the world; data still there
   `Connection refused`.
 
 ### Change 2 — Frontend container (`frontend/Dockerfile`, `docker-compose.yml`)
-- New `frontend/Dockerfile` (node:22.22-slim): `npm ci`, copy app, run the Vite dev server
+- New `frontend/Dockerfile` (node:22.22-slim): `npm ci` from the lockfile, copy the app, start the Vite dev server
   with **`--host`** (binds `0.0.0.0` — without it `:5173` is unreachable from the host).
-- New `frontend` compose service: publishes
+- New `frontend` compose service: loopback-only port
   `127.0.0.1:${FRONTEND_HOST_PORT:-5173}:5173`, sets
   **`VITE_API_URL=http://backend:8000`** (the Vite proxy in `vite.config.ts` runs *inside* the
   container, so it must reach the backend by service name), and an anonymous
@@ -189,7 +189,7 @@ bind-mounts `./scripts` + `./config` over the baked copies, so native edit-reloa
 The file shipped in the install kit (firemaster.io): GHCR images only, **no `build:`**, **no
 source bind-mounts**, no `scripts/`/`config/` on disk (they're in the image). Run it with
 `-f docker-compose.public.yml`. Differences from the dev compose worth knowing:
-- PostgreSQL and Redis have no host ports. The API and UI publish only on `127.0.0.1`.
+- Postgres and Redis are container-network only, no host ports; API and UI answer on `127.0.0.1` and nowhere else.
 - **`.env` is a single-file bind mount** (`./backend/.env:/app/backend/.env`), not `env_file`
   (the interpolation bug — see the troubleshooting table). A bind mount of a **non-existent**
   host file is created as a *directory*, which breaks `app.setup`, so the kit must ship an
@@ -207,7 +207,7 @@ All container testing runs under a **separate Docker Compose project** named `fm
 data volumes. A `fmtest` project gets its own network and its own EMPTY volumes
 (`fmtest_pgdata`), entirely separate from the real `firemaster_*` volumes.
 
-The loopback-only host ports are parameterized in `docker-compose.yml`
+The host ports (all bound to loopback) are variables in `docker-compose.yml`
 (`${POSTGRES_HOST_PORT:-5432}`, `${REDIS_HOST_PORT:-6379}`, `${BACKEND_HOST_PORT:-8000}`,
 `${FRONTEND_HOST_PORT:-5173}`), so an isolated stack just sets them inline:
 
@@ -223,13 +223,13 @@ docker compose -p fmtest down -v
 (Those same env vars are the escape hatch for any **user** whose `:5432`/`:5173` is already
 taken — no file edits, just set the var.)
 
-### Source-only local images
+### Images built from the checkout
 
-Use `docker-compose.local-build.yml` when the checked-out source, rather than a mutable registry
-tag, must be the source of truth. The overlay assigns distinct `:local` image names and sets
-`pull_policy: never`; the Dockerfiles require their lockfiles and use frozen installs. It also
-uses the production multi-stage frontend, so the running image contains nginx and compiled
-static assets instead of the Node development server and toolchain.
+`docker-compose.local-build.yml` is for the reader who wants the running containers to be
+exactly the source they just read, not whatever `latest` points at today. It renames both app
+images `:local`, sets `pull_policy: never` so nothing can be swapped in from a registry, has the
+Dockerfiles insist on their lockfiles, and swaps the Vite dev server for the multi-stage
+production frontend (nginx plus compiled assets, no Node inside).
 
 ```bash
 docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml pull postgres redis

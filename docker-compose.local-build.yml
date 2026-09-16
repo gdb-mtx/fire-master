@@ -1,12 +1,13 @@
-# Opt-in overlay for building and running only the checked-out source.
+# Overlay for people who want the containers to be the source they just read.
+# Opt-in; the default stack keeps pulling the GHCR images.
 #
 # Usage:
 #   docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml pull postgres redis
 #   docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml build --pull
 #   docker compose -f docker-compose.public.yml -f docker-compose.local-build.yml up --pull never
 #
-# Distinct local image names and pull_policy=never prevent an image published to
-# GHCR under the mutable `latest` tag from being substituted at runtime.
+# `:local` image names + pull_policy: never — Compose cannot quietly substitute
+# the registry's `latest` for what was built here.
 
 services:
   migrate:
@@ -36,7 +37,7 @@ services:
       dockerfile: Dockerfile.prod
     ports: !override
       - "127.0.0.1:${FRONTEND_HOST_PORT:-5173}:8080"
-    # The production image contains only static assets + nginx. Remove the
-    # development source/node_modules mounts if this overlay is used with docker-compose.yml.
+    # Static assets + nginx only, so the dev-server mounts and env from
+    # docker-compose.yml are reset if this overlay is ever stacked on that file.
     volumes: !reset []
     environment: !reset {}

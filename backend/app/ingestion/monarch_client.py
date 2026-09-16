@@ -50,6 +50,23 @@ def _typed_errors(fn):
     return wrapper
 
 
+def _guard_session_file(path: str) -> None:
+    """Refuse anything but an owner-only regular file before it is unpickled.
+
+    The session is a pickle the dependency unpickles blindly, so a symlink or a
+    directory in its place is treated as tampering, not as a missing file. The
+    mode is forced to 0600 on every connect so a copy made with a loose umask
+    stops being world-readable the first time the app touches it.
+    """
+    p = Path(path)
+    if p.is_symlink() or not p.is_file():
+        raise RuntimeError(f"Monarch session {path!r} is not a regular file — refusing to load it")
+    try:
+        p.chmod(0o600)
+    except OSError as exc:
+        raise RuntimeError(f"Cannot make Monarch session {path!r} owner-only: {exc}") from exc
+
+
 class MonarchClient:
     def __init__(self, session_file: str):
         self.session_file = session_file
@@ -57,13 +74,7 @@ class MonarchClient:
 
     async def connect(self):
         """Load saved session and verify connectivity."""
-        session_path = Path(self.session_file)
-        if session_path.is_symlink() or not session_path.is_file():
-            raise RuntimeError("Monarch session path must be a regular file")
-        try:
-            session_path.chmod(0o600)
-        except OSError as exc:
-            raise RuntimeError("Could not restrict Monarch session permissions") from exc
+        _guard_session_file(self.session_file)
         self.mm.load_session(self.session_file)
         logger.info("Monarch session loaded from %s", self.session_file)
         await self.verify()

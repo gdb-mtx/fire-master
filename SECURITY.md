@@ -20,9 +20,9 @@ commit if you want it.
 - The threat model assumes a **single-user deployment on localhost or a private network**.
   The app has one admin user and is not designed to be exposed to the public internet;
   reports assuming a hardened multi-tenant deployment are out of scope.
-- The standard Compose files bind published services to `127.0.0.1`. The standalone install
-  keeps PostgreSQL and Redis entirely inside the Compose network. Changing those bindings to
-  `0.0.0.0`, or placing the app behind a public proxy without additional hardening, is unsupported.
+- Every port the Compose files publish is bound to `127.0.0.1`, and the standalone install gives
+  Postgres and Redis no host port at all. Rebinding to `0.0.0.0`, or parking the app behind a
+  public proxy without further hardening, is outside what this project supports.
 - **https://demo.firemaster.io is a shared sandbox with synthetic data** that resets every
   two hours. It is in scope for responsible testing (please don't DoS it), and nothing on
   it is secret — including the demo password.

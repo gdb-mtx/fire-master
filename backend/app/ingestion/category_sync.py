@@ -171,7 +171,7 @@ PARENT_GROUP: dict[str, str] = {
     "Cash & ATM": "Transfers",
     "Check": "Transfers",
     "Loan Payment": "Transfers",
-    # Investment-account activity changes asset allocation; it is not spending.
+    # Buying a security moves money between asset classes — it is not consumption.
     "Investments": "Investments",
     "Buy": "Investments",
     # Misc
@@ -190,17 +190,11 @@ TRANSFER_PARENTS = {TRANSFER_PARENT, INVESTMENT_PARENT}
 
 # Categories flagged as transfers (not real spending)
 TRANSFER_CATEGORIES = {
-    "Transfer",
-    "Credit Card Payment",
-    "Cash & ATM",
-    "Check",
-    "Loan Payment",
-    "Hide from Budgets & Trends",
-    "Deposit",
-    # Fallbacks for transaction-only backfills where Monarch's parent group is
-    # unavailable. The normal API path classifies the entire Investments group.
-    "Investments",
-    "Buy",
+    "Transfer", "Credit Card Payment", "Cash & ATM", "Check",
+    "Loan Payment", "Hide from Budgets & Trends", "Deposit",
+    # Name-only fallback for rows that arrived without a parent group (Mint-era
+    # imports); with a parent, the whole Investments group is caught above.
+    "Investments", "Buy",
 }
 
 # Non-discretionary categories (needs, not wants)
@@ -216,8 +210,9 @@ def classify_flags(normalized: str, parent: str | None) -> tuple[bool, bool]:
     """(is_income, is_transfer) for a category.
 
     Monarch already grouped the category; trust that first (parent == "Income" /
-    "Transfers" / "Investments"), then fall back to the hardcoded name sets for
-    installs whose parent came from the Mint-era lookup table. A category is never both.
+    "Transfers", and "Investments" — a buy is a change of shape, not spending), then fall
+    back to the hardcoded name sets for installs whose parent came from the Mint-era lookup
+    table. A category is never both.
     """
     is_transfer = parent in TRANSFER_PARENTS or normalized in TRANSFER_CATEGORIES
     is_income = not is_transfer and (parent == INCOME_PARENT or normalized in INCOME_CATEGORIES)

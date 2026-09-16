@@ -62,7 +62,6 @@ import random
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import date
-from functools import lru_cache
 
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,51 +86,46 @@ DEFAULT_HISTORICAL_STOCK_WEIGHT = 1.0
 SIMULATION_METHODS = ("parametric", "historical_blocks")
 
 
-@lru_cache(maxsize=16)
-def _historical_log_centers(stock_weight: float) -> tuple[float, float]:
-    """Full-history geometric centers (log space) for a stock/bond mix and for inflation."""
-    weight = max(0.0, min(1.0, stock_weight))
-    port_logs = []
-    infl_logs = []
-    for _year, stock_ret, bond_ret, inflation in HISTORICAL_MARKET_RETURNS:
-        port_logs.append(math.log1p(weight * stock_ret + (1 - weight) * bond_ret))
-        infl_logs.append(math.log1p(inflation))
-    return sum(port_logs) / len(port_logs), sum(infl_logs) / len(infl_logs)
+class HistoricalBlocks:
+    """Block bootstrap over the joint (S&P 500, 10y Treasury, CPI) annual history.
 
-
-def _sample_historical_path(
-    rng: random.Random, years: int, block_years: int = DEFAULT_HISTORICAL_BLOCK_YEARS,
-) -> list[tuple[int, float, float, float]]:
-    """Overlapping contiguous blocks (no year wrap-around) until the path covers `years`."""
-    history = HISTORICAL_MARKET_RETURNS
-    block = max(1, min(int(block_years), len(history), max(1, years)))
-    path: list[tuple[int, float, float, float]] = []
-    while len(path) < years:
-        start = rng.randrange(0, len(history) - block + 1)
-        path.extend(history[start:start + block])
-    return path[:years]
-
-
-def _historical_real_return(
-    observation: tuple[int, float, float, float],
-    stock_weight: float,
-    target_nominal_cagr: float,
-    target_inflation: float,
-) -> tuple[float, float]:
-    """Recenter one joint observation to the configured long-run means; return (real, inflation).
-
-    Log deviations from the full-history geometric mean are kept, so the crash,
-    recovery, bond and inflation relationships stay exactly historical; only the
-    level moves to the user's expected_annual_return / expected_inflation_rate.
+    A run is stitched from overlapping contiguous ``block_years``-long slices of
+    HISTORICAL_MARKET_RETURNS, so within a block the stock/bond/inflation
+    relationships and their ordering are exactly what happened. Each observation
+    is then shifted in log space so the whole-history geometric mean of the
+    portfolio equals the configured nominal return and the whole-history
+    inflation equals the configured rate: the LEVEL is the user's assumption,
+    only the deviations are historical.
     """
-    _year, stock_ret, bond_ret, inflation = observation
-    weight = max(0.0, min(1.0, stock_weight))
-    port_center, infl_center = _historical_log_centers(weight)
-    nominal_log = math.log1p(target_nominal_cagr) + math.log1p(weight * stock_ret + (1 - weight) * bond_ret) - port_center
-    inflation_log = math.log1p(target_inflation) + math.log1p(inflation) - infl_center
-    r_nom = math.exp(nominal_log) - 1
-    infl = math.exp(inflation_log) - 1
-    return (1 + r_nom) / (1 + infl) - 1, infl
+
+    def __init__(self, stock_weight: float = DEFAULT_HISTORICAL_STOCK_WEIGHT,
+                 block_years: int = DEFAULT_HISTORICAL_BLOCK_YEARS):
+        self.w = min(1.0, max(0.0, float(stock_weight)))
+        self.block_years = max(1, int(block_years))
+        n = len(HISTORICAL_MARKET_RETURNS)
+        self._port_center = sum(math.log1p(self._portfolio(o)) for o in HISTORICAL_MARKET_RETURNS) / n
+        self._infl_center = sum(math.log1p(o[3]) for o in HISTORICAL_MARKET_RETURNS) / n
+
+    def _portfolio(self, obs: tuple[int, float, float, float]) -> float:
+        _year, stocks, bonds, _cpi = obs
+        return self.w * stocks + (1.0 - self.w) * bonds
+
+    def path(self, rng: random.Random, years: int) -> list[tuple[int, float, float, float]]:
+        """Concatenate random contiguous blocks (never wrapping past 2025) to cover `years`."""
+        hist = HISTORICAL_MARKET_RETURNS
+        block = min(self.block_years, len(hist), max(1, years))
+        out: list[tuple[int, float, float, float]] = []
+        while len(out) < years:
+            i = rng.randrange(0, len(hist) - block + 1)
+            out.extend(hist[i:i + block])
+        return out[:years]
+
+    def real_return(self, obs: tuple[int, float, float, float],
+                    target_nominal: float, target_inflation: float) -> tuple[float, float]:
+        """(real return, inflation) for one observation, recentered to the targets."""
+        nominal = math.expm1(math.log1p(target_nominal) + math.log1p(self._portfolio(obs)) - self._port_center)
+        inflation = math.expm1(math.log1p(target_inflation) + math.log1p(obs[3]) - self._infl_center)
+        return (1.0 + nominal) / (1.0 + inflation) - 1.0, inflation
 
 
 def _draw_year(
@@ -234,6 +228,7 @@ class MonteCarloEngine:
             simulation_method = "parametric"
         historical_block_years = max(1, int(mc_cfg.get("historical_block_years", DEFAULT_HISTORICAL_BLOCK_YEARS)))
         stock_weight = max(0.0, min(1.0, float(mc_cfg.get("stock_weight", DEFAULT_HISTORICAL_STOCK_WEIGHT))))
+        blocks = HistoricalBlocks(stock_weight, historical_block_years) if simulation_method == "historical_blocks" else None
 
         # Social Security and pension (annual dollars, FLAT REAL — COLA
         # offsets inflation, mirroring project_wealth_pools).
@@ -290,14 +285,11 @@ class MonteCarloEngine:
             nw_val = current_nw
             yearly_nw: list[float] = [current_nw]
             money_lasted = True
-            historical_path = (
-                _sample_historical_path(rng, total_years, historical_block_years)
-                if simulation_method == "historical_blocks" else None
-            )
+            historical_path = blocks.path(rng, total_years) if blocks is not None else None
 
             for yr in range(total_years):
                 if historical_path is not None:
-                    r_real, _infl = _historical_real_return(historical_path[yr], stock_weight, mu_nom, mu_i)
+                    r_real, _infl = blocks.real_return(historical_path[yr], mu_nom, mu_i)
                 else:
                     r_real, _infl = _draw_year(rng, mu_nom, sigma, mu_i, sigma_i, rho)
 

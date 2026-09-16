@@ -12,14 +12,32 @@ from monarchmoney import MonarchMoney, RequireMFAException
 load_dotenv()
 
 
+def _save_owner_only(mm: MonarchMoney, path: str) -> None:
+    """Write the session so it is never world-readable, even for an instant.
+
+    umask 077 makes the file 0600 at creation; the explicit chmod afterwards
+    covers the case where the path already existed with looser bits.
+    """
+    old_umask = os.umask(0o077)
+    try:
+        mm.save_session(path)
+    finally:
+        os.umask(old_umask)
+    try:
+        Path(path).chmod(0o600)
+    except OSError as exc:
+        print(f"WARNING: {path} saved but could not be made owner-only: {exc}", file=sys.stderr)
+
+
 async def main():
     if os.environ.get("DEMO_MODE", "").strip().lower() == "true":
         sys.exit("Refusing to log in: DEMO_MODE is enabled (this instance is demo-only).")
 
     session_file = os.environ.get("MONARCH_SESSION_FILE", ".monarch_session")
 
-    # Give the client the configured path up front. Otherwise its login() helper
-    # also writes a second, untracked .mm/mm_session.pickle with the same secret.
+    # The library defaults its session path to .mm/mm_session.pickle and login()
+    # saves there unless told otherwise — that stray copy of the token was the
+    # GHSA-w2mg-x44j-2cm4 finding. Point it at OUR path and save ourselves, once.
     mm = MonarchMoney(session_file=session_file)
 
     print("=== Monarch Money Login ===")
@@ -27,8 +45,6 @@ async def main():
     password = getpass("Password: ")
 
     try:
-        # Save exactly once below, after authentication succeeds, so permissions
-        # can be tightened immediately.
         await mm.login(email, password, use_saved_session=False, save_session=False)
     except RequireMFAException:
         # The Monarch API only accepts authenticator-app (TOTP) codes here — it
@@ -46,18 +62,7 @@ async def main():
         print(f"Login failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Make the file private at creation time as well as after the write, avoiding
-    # a window where a permissive process umask could expose the session token.
-    previous_umask = os.umask(0o077)
-    try:
-        mm.save_session(session_file)
-    finally:
-        os.umask(previous_umask)
-
-    try:
-        Path(session_file).chmod(0o600)
-    except OSError as exc:
-        print(f"WARNING: could not secure {session_file}: {exc}", file=sys.stderr)
+    _save_owner_only(mm, session_file)
     print(f"\nSession saved to {session_file}")
 
     # Verify by fetching accounts

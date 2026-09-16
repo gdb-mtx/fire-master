@@ -4,7 +4,7 @@ FROM node:22.22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7
 
 WORKDIR /app/frontend
 
-# Require the committed lockfile and reproduce it exactly.
+# package-lock.json is mandatory; npm ci reproduces it byte for byte.
 COPY package.json package-lock.json ./
 RUN npm ci
 

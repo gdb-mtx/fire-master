@@ -7,7 +7,7 @@ FROM node:22.22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7
 
 WORKDIR /app
 
-# Require the committed lockfile and reproduce it exactly.
+# package-lock.json is mandatory; npm ci reproduces it byte for byte.
 COPY package.json package-lock.json ./
 RUN npm ci
 
@@ -17,7 +17,7 @@ RUN npm run build
 
 FROM nginx:1.30.4-alpine3.24@sha256:dc5069ad14f19660b141b21236140b91656bf89bbc3e2417c70ae650cd66104c
 
-# Pull distribution security fixes released after the base-image snapshot.
+# Alpine fixes published after the pinned digest was cut.
 RUN apk upgrade --no-cache
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf

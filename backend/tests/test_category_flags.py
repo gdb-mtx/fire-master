@@ -15,11 +15,10 @@ from app.ingestion.category_sync import classify_flags
     ("Groceries", "Food & Dining", (False, False)),
     ("Transfer", "Transfers", (False, True)),
     ("Brokerage Sweep", "Transfers", (False, True)),     # custom transfer under Monarch's group
-    ("Buy", "Investments", (False, True)),               # brokerage purchase, not spending
-    # Any custom category under Monarch's Investments group is also neutral.
-    ("Brokerage Activity", "Investments", (False, True)),
-    ("Investments", "Other", (False, True)),             # transaction-only fallback
-    ("Buy", None, (False, True)),                         # transaction-only fallback
+    ("Buy", "Investments", (False, True)),               # a purchase changes shape, not wealth
+    ("Brokerage Activity", "Investments", (False, True)),  # anything under the Investments parent
+    ("Investments", "Other", (False, True)),             # no usable parent: name-set fallback
+    ("Buy", None, (False, True)),                         # no parent at all: name-set fallback
     ("Credit Card Payment", "Other", (False, True)),     # name fallback
     ("Paychecks", None, (True, False)),
 ])

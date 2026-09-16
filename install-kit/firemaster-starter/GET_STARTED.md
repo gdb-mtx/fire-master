@@ -57,9 +57,9 @@ docker compose run --rm --no-deps backend uv run python -m app.setup
 docker compose up
 ```
 
-The dashboard and API bind to `127.0.0.1`, and PostgreSQL and Redis remain inside Docker's
-private network. They are not reachable from other devices unless you deliberately change the
-Compose file. FIREMaster is not designed to be exposed directly to the internet.
+Only this computer can reach the dashboard and API (they listen on `127.0.0.1`), and Postgres and
+Redis never leave Docker's private network. Another device on your wifi sees nothing unless you
+edit the Compose file on purpose. FIREMaster is not built to face the internet.
 
 The first time, this downloads the app (~30–60 seconds). When you see the logs settle and
 `migrate` say it finished, you're ready.

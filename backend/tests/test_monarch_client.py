@@ -14,33 +14,46 @@ from app.ingestion.monarch_client import (
 )
 
 
-@pytest.mark.asyncio
-async def test_connect_restricts_existing_session_permissions(tmp_path):
-    session_path = tmp_path / "session.pickle"
-    session_path.write_text("synthetic session")
-    session_path.chmod(0o644)
-
-    client = MonarchClient(str(session_path))
+def _client_for(path, **mm_methods):
+    client = MonarchClient(str(path))
     client.mm = MagicMock()
     client.mm.get_subscription_details = AsyncMock(return_value={})
+    for name, value in mm_methods.items():
+        setattr(client.mm, name, value)
+    return client
 
-    await client.connect()
 
-    assert stat.S_IMODE(session_path.stat().st_mode) == 0o600
-    client.mm.load_session.assert_called_once_with(str(session_path))
+# --- Session file guard (GHSA-w2mg-x44j-2cm4) ---------------------------------------
+#
+# The session is a pickle the dependency unpickles blindly. connect() therefore
+# refuses anything that is not a regular file and forces 0600 before loading.
 
 
 @pytest.mark.asyncio
-async def test_connect_rejects_symlinked_session(tmp_path):
-    target = tmp_path / "target.pickle"
-    target.write_text("synthetic session")
-    session_path = tmp_path / "session.pickle"
-    session_path.symlink_to(target)
+@pytest.mark.parametrize("loose_mode", [0o644, 0o666, 0o600])
+async def test_connect_forces_owner_only_mode(tmp_path, loose_mode):
+    session = tmp_path / ".monarch_session"
+    session.write_bytes(b"not-a-real-pickle")
+    session.chmod(loose_mode)
 
-    client = MonarchClient(str(session_path))
-    client.mm = MagicMock()
+    client = _client_for(session)
+    await client.connect()
 
-    with pytest.raises(RuntimeError, match="must be a regular file"):
+    assert stat.S_IMODE(session.stat().st_mode) == 0o600
+    client.mm.load_session.assert_called_once_with(str(session))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_path", [
+    pytest.param(lambda d: (d / "real").write_bytes(b"x") or (d / "link").symlink_to(d / "real") or d / "link", id="symlink"),
+    pytest.param(lambda d: (d / "dir").mkdir() or d / "dir", id="directory"),
+    pytest.param(lambda d: d / "missing", id="missing"),
+])
+async def test_connect_refuses_anything_but_a_regular_file(tmp_path, make_path):
+    path = make_path(tmp_path)
+    client = _client_for(path)
+
+    with pytest.raises(RuntimeError, match="not a regular file"):
         await client.connect()
 
     client.mm.load_session.assert_not_called()

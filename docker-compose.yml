@@ -1,8 +1,8 @@
 services:
   postgres:
     image: postgres:16-alpine
-    # Keep financial data off the LAN. Containers reach Postgres over the
-    # internal Compose network; this host port exists only for native dev.
+    # Loopback only: the host port is for start.sh's native backend, never for
+    # the LAN. Containers talk to Postgres over the Compose network regardless.
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     # NO env_file: backend/.env — Postgres only reads POSTGRES_* (set below), and pulling in
@@ -22,7 +22,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    # Redis has no application-level password and must never be LAN-exposed.
+    # Redis runs without a password, so the host port is loopback only, same as Postgres.
     ports:
       - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:

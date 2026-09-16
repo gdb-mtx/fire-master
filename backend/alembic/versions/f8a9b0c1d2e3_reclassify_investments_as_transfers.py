@@ -1,8 +1,9 @@
-"""reclassify investment activity as neutral transfers
+"""Investments group -> transfer flags
 
-Monarch groups brokerage purchases such as "Buy" under "Investments". These
-move cash into an asset rather than consuming it, so they must not contribute to
-spending. Heal existing mappings on upgrade; future syncs use the same rule.
+A "Buy" in a brokerage account is money changing shape, not money spent, yet
+rows under Monarch's Investments parent were flagged as spending. Flip the
+existing category_mappings once here; classify_flags() applies the same rule
+to everything synced from now on.
 
 Revision ID: f8a9b0c1d2e3
 Revises: e7f8a9b0c1d2
@@ -26,5 +27,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Data-only correction; restoring known-bad spending flags would be harmful.
+    # Nothing to undo: putting the wrong spending flags back is not a rollback anyone wants.
     pass

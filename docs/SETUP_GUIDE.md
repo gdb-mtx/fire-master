@@ -32,7 +32,7 @@ and unzip it — updating later is just re-downloading.
   Docker Desktop sets up WSL2 for you (**one reboot**). You do **not** install or manage an
   Ubuntu distro, and you never touch bash.
 - **Prefer to develop natively** (run the backend/frontend on the host for fast hot-reload)?
-  That path needs `uv` + Node 22.22+ and a bash shell — see the **Contributor / native dev**
+  That path needs `uv`, Node 22.22 or newer, and a bash shell — see the **Contributor / native dev**
   section in the [README](../README.md#contributor--native-dev-optional). This guide uses the
   Docker path throughout.
 
@@ -72,16 +72,16 @@ minutes.) Then, every start:
 3. the **backend** (FastAPI :8000), **Celery worker** + **beat** (background sync jobs), and the
    **frontend** (Vite :5173) start.
 
-The published ports bind to `127.0.0.1`, so they are reachable only from this computer. The
-standalone install does not publish PostgreSQL or Redis at all. Do not expose these services
-directly to a LAN or the internet.
+Every port the stack opens is on `127.0.0.1`: this computer can reach it, nothing else can. The
+standalone install opens no port for Postgres or Redis at all. Do not put any of it on a LAN or
+the internet.
 
 Leave this terminal running; `Ctrl+C` stops everything. Once the stack is up, you can also
 press **d** in the terminal menu to detach (keeps containers running, frees your terminal).
 Or start detached from the beginning with `docker compose up -d`.
 
 Sanity checks: `http://localhost:8000/api/health` returns ok, `http://localhost:5173` shows the
-login screen. (If a published port is already taken, set e.g.
+login screen. (If one of the ports is already taken, set e.g.
 `BACKEND_HOST_PORT=8001 FRONTEND_HOST_PORT=5174 docker compose up`.)
 
 ## 4. Demo data (loaded automatically)

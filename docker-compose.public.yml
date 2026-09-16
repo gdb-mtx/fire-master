@@ -33,7 +33,7 @@
 services:
   postgres:
     image: postgres:16-alpine
-    # Internal only: the containerized app does not need a host database port.
+    # No host port: only containers talk to this Postgres.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-firemaster}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-firemaster}
@@ -48,7 +48,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    # Internal only: Redis has no password and must not be published to the host.
+    # No host port: unauthenticated Redis stays inside the Compose network.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

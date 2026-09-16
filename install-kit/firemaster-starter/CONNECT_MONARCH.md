@@ -31,8 +31,8 @@ Run this and answer the prompts (email, password, and MFA code if asked):
 docker compose run --rm --no-deps -it backend uv run python ../scripts/monarch_login.py
 ```
 
-Password and MFA entry are hidden. The resulting session token is stored with owner-only
-permissions in the private `monarch_session` Docker volume; treat that volume like a password.
+Your password and MFA code are not echoed as you type. The session token lands, mode 0600, in
+the private `monarch_session` Docker volume — that volume is your login, treat it like one.
 
 - `-it` keeps it interactive so you can type your credentials.
 - `--no-deps` runs just this step (it doesn't need the database).
