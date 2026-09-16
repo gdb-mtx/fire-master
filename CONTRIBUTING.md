@@ -31,7 +31,8 @@ unread, regardless of quality — not out of disrespect, but because:
 
 If an issue discussion ends with "a PR for this would be accepted," that's the invitation.
 Anything merged requires agreement that the contribution is licensed to the project's
-copyright holder.
+copyright holder: the PR template carries the sentence, and a CI check stays red until the
+PR description contains it. No sentence, no merge — including cherry-picks.
 
 ## Feature requests
 

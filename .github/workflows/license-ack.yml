@@ -1,0 +1,28 @@
+# Every merged line must be licensed to the copyright holder (CONTRIBUTING.md).
+# This check is red until the PR description carries the sentence from the PR
+# template. It exists because in Sept 2026 three contributions were merged
+# without that sentence; a rule nobody enforces is a wish.
+name: License acknowledgement
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  license-line:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the license sentence in the PR description
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ "$AUTHOR" = "$OWNER" ]; then
+            echo "Owner PR - nothing to license."; exit 0
+          fi
+          if printf '%s' "$BODY" | grep -qF "I license this contribution to the FIREMaster copyright holder"; then
+            echo "License sentence present."; exit 0
+          fi
+          echo "::error::PR description is missing the license sentence from .github/pull_request_template.md (see CONTRIBUTING.md)."
+          exit 1
