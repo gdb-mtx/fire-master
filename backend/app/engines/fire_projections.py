@@ -1117,9 +1117,13 @@ class FireProjectionsEngine:
         # Event-label matchers (configurable; consumed when cashflow events fire)
         sell_event_label_match = proj_cfg.get("sell_event_label_match", None)  # substring marking the secondary-property sale event; None = disabled
         illiquid_vest_event_match = proj_cfg.get("illiquid_vest_event_match", ["vest"])  # substrings that reduce the illiquid pool
-        # Social Security
-        ss_early_reduction = proj_cfg.get("ss_early_reduction", 0.70)  # 70% of full at age 62
-        ss_claim_age = proj_cfg.get("ss_claim_age", 62)  # age when SS starts
+        # Social Security — ONE source of truth: config.social_security_monthly is the
+        # benefit payable at config.social_security_start_age (same reading as
+        # project_lifetime, Monte Carlo, readiness and compute_fire_number). The legacy
+        # projection.ss_claim_age / ss_early_reduction keys are ignored (fire-master#20):
+        # they re-reduced an amount already entered for its claiming age and let this
+        # engine disagree with every other one.
+        ss_claim_age = int(config.social_security_start_age or 67)
         # Spending phases (Blanchett 2013)
         spending_phase_slow = proj_cfg.get("spending_phase_slow", 0.85)  # age 70-80 multiplier
         spending_phase_floor = proj_cfg.get("spending_phase_floor", 0.75)  # age 80+ multiplier
@@ -1266,9 +1270,8 @@ class FireProjectionsEngine:
         # Key month offsets (from today)
         months_to_59_5 = max(0, int((dob + relativedelta(years=59, months=6) - today).days / 30.44))
 
-        # SS from config — claim age is configurable (default 62 = early)
-        ss_monthly_dollars = _cents_to_dollars(config.social_security_monthly or 0)
-        ss_amount = ss_monthly_dollars * ss_early_reduction
+        # SS from config — the entered amount IS the benefit at the entered start age
+        ss_amount = _cents_to_dollars(config.social_security_monthly or 0)
         months_to_ss = max(0, int((dob + relativedelta(years=ss_claim_age) - today).days / 30.44))
         ss_start_month = months_to_ss
 

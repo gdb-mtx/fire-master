@@ -56,8 +56,6 @@ export default function FireConfigPage() {
     primary_property_purchase_price: "",
     primary_property_agent_fee_pct: "6",
     primary_property_mortgage_pi: "",
-    ss_early_reduction: "70",
-    ss_claim_age: "62",
     spending_phase_slow: "85",
     spending_phase_floor: "75",
     spending_phase_slow_age: "70",
@@ -117,8 +115,6 @@ export default function FireConfigPage() {
         primary_property_purchase_price: (proj?.primary_property_purchase_price as number)?.toString() || "",
         primary_property_agent_fee_pct: proj?.primary_property_agent_fee_pct != null ? ((proj.primary_property_agent_fee_pct as number) * 100).toString() : "6",
         primary_property_mortgage_pi: (proj?.primary_property_mortgage_pi as number)?.toString() || "",
-        ss_early_reduction: proj?.ss_early_reduction != null ? ((proj.ss_early_reduction as number) * 100).toString() : "70",
-        ss_claim_age: (proj?.ss_claim_age as number)?.toString() || "62",
         spending_phase_slow: proj?.spending_phase_slow != null ? ((proj.spending_phase_slow as number) * 100).toString() : "85",
         spending_phase_floor: proj?.spending_phase_floor != null ? ((proj.spending_phase_floor as number) * 100).toString() : "75",
         spending_phase_slow_age: (proj?.spending_phase_slow_age as number)?.toString() || "70",
@@ -182,8 +178,10 @@ export default function FireConfigPage() {
         primary_property_mortgage_pi: form.primary_property_mortgage_pi
           ? parseInt(form.primary_property_mortgage_pi)
           : null,
-        ss_early_reduction: pf(form.ss_early_reduction, 70) / 100,
-        ss_claim_age: parseInt(form.ss_claim_age) || 62,
+        // Legacy duplicate Social Security knobs (fire-master#20): explicit null deletes
+        // them via the merge-patch contract. The main SS amount + start age drive every engine.
+        ss_early_reduction: null,
+        ss_claim_age: null,
         spending_phase_slow: pf(form.spending_phase_slow, 85) / 100,
         spending_phase_floor: pf(form.spending_phase_floor, 75) / 100,
         spending_phase_slow_age: parseInt(form.spending_phase_slow_age) || 70,
@@ -477,19 +475,9 @@ export default function FireConfigPage() {
             </div>
           </div>
 
-          {/* Social Security & Spending */}
-          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Social Security &amp; Spending Phases</h4>
+          {/* Spending phases */}
+          <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2 mt-5">Spending Phases</h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <div>
-              <label className={labelCls}>SS Claim Age</label>
-              <input type="number" step="1" value={form.ss_claim_age} onChange={(e) => setForm(f => ({ ...f, ss_claim_age: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">62=early (70%), 67=full (100%)</p>
-            </div>
-            <div>
-              <label className={labelCls}>SS Benefit %</label>
-              <input type="number" step="1" value={form.ss_early_reduction} onChange={(e) => setForm(f => ({ ...f, ss_early_reduction: e.target.value }))} className={inputCls} />
-              <p className="text-[10px] text-[var(--text-secondary)] mt-1">% of full benefit at claim age</p>
-            </div>
             <div>
               <label className={labelCls}>Slow-Go Age</label>
               <input type="number" step="1" value={form.spending_phase_slow_age} onChange={(e) => setForm(f => ({ ...f, spending_phase_slow_age: e.target.value }))} className={inputCls} />

@@ -124,8 +124,12 @@ class TestPrimaryExit5Year:
     @pytest.mark.asyncio
     async def test_final_wealth(self, engine, frozen_today):
         result = await engine.project_wealth_pools(end_age=82)
-        assert abs(result.total_at_end - 2_240_000) < TOLERANCE, (
-            f"Primary 5yr total_at_end={result.total_at_end:.0f}, expected ~2,240,000"
+        # 2,240,000 -> 2,100,000 on 2026-09-16 (fire-master#20): the pool engine now reads
+        # the ONE Social Security setting (persona: $4,650 at 67) instead of the legacy
+        # projection.ss_claim_age=62 / ss_early_reduction=0.70 pair, so SS starts 5 years
+        # later at the full amount. Deliberate, discussed in #20 — not drift.
+        assert abs(result.total_at_end - 2_100_000) < TOLERANCE, (
+            f"Primary 5yr total_at_end={result.total_at_end:.0f}, expected ~2,100,000"
         )
 
     @pytest.mark.asyncio
