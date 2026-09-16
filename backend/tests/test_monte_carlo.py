@@ -18,7 +18,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.engines.fire_projections import FireProjectionsEngine, _spending_multiplier
-from app.engines.monte_carlo import MonteCarloEngine, _draw_year
+from app.data.historical_market_returns import HISTORICAL_MARKET_RETURNS
+from app.engines.monte_carlo import (
+    MonteCarloEngine,
+    _draw_year,
+    _historical_real_return,
+    _sample_historical_path,
+)
 from app.engines.net_worth import NetWorthEngine
 
 from .conftest import FROZEN_TODAY, _make_fire_config
@@ -318,3 +324,56 @@ class TestIncomeTiming:
             spouse_works_5_more = await engine.run_simulation(n_runs=20, seed=4)
 
         assert spouse_works_5_more.percentile_50 > cut_at_retirement.percentile_50
+
+
+class TestHistoricalBlocks:
+    """Opt-in block bootstrap (fire-master#21 idea, landed 2026-09-16 as opt-in only)."""
+
+    def test_dataset_is_contiguous_and_plausible(self):
+        years = [row[0] for row in HISTORICAL_MARKET_RETURNS]
+        assert years == list(range(1928, 2026))
+        by_year = {row[0]: row for row in HISTORICAL_MARKET_RETURNS}
+        assert by_year[1931][1] < -0.40   # Depression crash
+        assert by_year[2008][1] < -0.30   # GFC
+        assert by_year[1979][3] > 0.12    # inflation spike
+        assert all(-0.6 < r < 0.6 for _, r, _, _ in HISTORICAL_MARKET_RETURNS)
+
+    def test_recentering_hits_configured_cagr_over_full_history(self):
+        """Log-recentering: the geometric mean over ALL observations equals the target."""
+        mu_nom, mu_i = 0.07, 0.03
+        nominal_logs, infl_logs = [], []
+        for obs in HISTORICAL_MARKET_RETURNS:
+            r_real, infl = _historical_real_return(obs, 1.0, mu_nom, mu_i)
+            nominal_logs.append(math.log1p((1 + r_real) * (1 + infl) - 1))
+            infl_logs.append(math.log1p(infl))
+        n = len(HISTORICAL_MARKET_RETURNS)
+        assert abs(math.exp(sum(nominal_logs) / n) - 1 - mu_nom) < 1e-9
+        assert abs(math.exp(sum(infl_logs) / n) - 1 - mu_i) < 1e-9
+
+    def test_blocks_are_contiguous_history(self):
+        rng = random.Random(7)
+        path = _sample_historical_path(rng, years=20, block_years=7)
+        assert len(path) == 20
+        # Within each 7-year block the years are consecutive.
+        for i in range(0, 14, 7):
+            block_years = [row[0] for row in path[i:i + 7]]
+            assert block_years == list(range(block_years[0], block_years[0] + 7))
+
+    @pytest.mark.asyncio
+    async def test_default_method_is_parametric_and_unchanged(self, base_fire_config, frozen_today_mc):
+        base_fire_config.custom_assumptions = {}
+        with _mc_env(base_fire_config):
+            r = await MonteCarloEngine(MagicMock()).run_simulation(n_runs=50, seed=1)
+        assert r.assumptions["simulation_method"] == "parametric"
+        assert r.assumptions["return_model"].startswith("lognormal")
+
+    @pytest.mark.asyncio
+    async def test_opt_in_is_deterministic_and_labelled(self, base_fire_config, frozen_today_mc):
+        base_fire_config.custom_assumptions = {"monte_carlo": {"simulation_method": "historical_blocks"}}
+        with _mc_env(base_fire_config):
+            a = await MonteCarloEngine(MagicMock()).run_simulation(n_runs=50, seed=3)
+            b = await MonteCarloEngine(MagicMock()).run_simulation(n_runs=50, seed=3)
+        assert a.assumptions["simulation_method"] == "historical_blocks"
+        assert "1928-2025" in a.assumptions["return_model"]
+        assert a.success_rate == b.success_rate
+        assert a.percentile_50 == b.percentile_50

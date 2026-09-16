@@ -40,6 +40,18 @@ Overrides via fire_config.custom_assumptions["monte_carlo"]:
   return_std (0.16), inflation_std (0.015), correlation (-0.25).
 Nominal return mean and inflation mean come from the base config
 (expected_annual_return / expected_inflation_rate).
+
+Opt-in historical mode (2026-09-16, from fire-master#21 by Daniel Levine):
+  simulation_method: "historical_blocks" replaces the independent lognormal
+  draw with overlapping contiguous blocks of JOINT (S&P 500, 10y Treasury,
+  CPI) annual observations 1928-2025 (app/data/historical_market_returns.py,
+  Damodaran). Each observation is recentered in log space so the full-history
+  portfolio CAGR equals expected_annual_return and inflation equals
+  expected_inflation_rate; only the deviations are historical. This keeps
+  inflation streaks and crash/recovery sequences the iid draw cannot produce.
+  Keys: historical_block_years (7), stock_weight (1.0 = all S&P, the same
+  asset the parametric sigma is calibrated to). The default method stays
+  "parametric": an existing config produces the same fan chart as before.
 """
 
 from __future__ import annotations
@@ -50,10 +62,12 @@ import random
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import date
+from functools import lru_cache
 
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.data.historical_market_returns import HISTORICAL_MARKET_RETURNS
 from app.engines.fire_projections import (
     _spending_multiplier,
     build_cashflow_schedule,
@@ -68,6 +82,56 @@ logger = logging.getLogger(__name__)
 DEFAULT_RETURN_STD = 0.16
 DEFAULT_INFLATION_STD = 0.015
 DEFAULT_CORRELATION = -0.25
+DEFAULT_HISTORICAL_BLOCK_YEARS = 7
+DEFAULT_HISTORICAL_STOCK_WEIGHT = 1.0
+SIMULATION_METHODS = ("parametric", "historical_blocks")
+
+
+@lru_cache(maxsize=16)
+def _historical_log_centers(stock_weight: float) -> tuple[float, float]:
+    """Full-history geometric centers (log space) for a stock/bond mix and for inflation."""
+    weight = max(0.0, min(1.0, stock_weight))
+    port_logs = []
+    infl_logs = []
+    for _year, stock_ret, bond_ret, inflation in HISTORICAL_MARKET_RETURNS:
+        port_logs.append(math.log1p(weight * stock_ret + (1 - weight) * bond_ret))
+        infl_logs.append(math.log1p(inflation))
+    return sum(port_logs) / len(port_logs), sum(infl_logs) / len(infl_logs)
+
+
+def _sample_historical_path(
+    rng: random.Random, years: int, block_years: int = DEFAULT_HISTORICAL_BLOCK_YEARS,
+) -> list[tuple[int, float, float, float]]:
+    """Overlapping contiguous blocks (no year wrap-around) until the path covers `years`."""
+    history = HISTORICAL_MARKET_RETURNS
+    block = max(1, min(int(block_years), len(history), max(1, years)))
+    path: list[tuple[int, float, float, float]] = []
+    while len(path) < years:
+        start = rng.randrange(0, len(history) - block + 1)
+        path.extend(history[start:start + block])
+    return path[:years]
+
+
+def _historical_real_return(
+    observation: tuple[int, float, float, float],
+    stock_weight: float,
+    target_nominal_cagr: float,
+    target_inflation: float,
+) -> tuple[float, float]:
+    """Recenter one joint observation to the configured long-run means; return (real, inflation).
+
+    Log deviations from the full-history geometric mean are kept, so the crash,
+    recovery, bond and inflation relationships stay exactly historical; only the
+    level moves to the user's expected_annual_return / expected_inflation_rate.
+    """
+    _year, stock_ret, bond_ret, inflation = observation
+    weight = max(0.0, min(1.0, stock_weight))
+    port_center, infl_center = _historical_log_centers(weight)
+    nominal_log = math.log1p(target_nominal_cagr) + math.log1p(weight * stock_ret + (1 - weight) * bond_ret) - port_center
+    inflation_log = math.log1p(target_inflation) + math.log1p(inflation) - infl_center
+    r_nom = math.exp(nominal_log) - 1
+    infl = math.exp(inflation_log) - 1
+    return (1 + r_nom) / (1 + infl) - 1, infl
 
 
 def _draw_year(
@@ -163,6 +227,13 @@ class MonteCarloEngine:
         sigma = mc_cfg.get("return_std", DEFAULT_RETURN_STD)
         sigma_i = mc_cfg.get("inflation_std", DEFAULT_INFLATION_STD)
         rho = mc_cfg.get("correlation", DEFAULT_CORRELATION)
+        # Opt-in historical block bootstrap (see module docstring). Default parametric.
+        simulation_method = str(mc_cfg.get("simulation_method", "parametric")).lower()
+        if simulation_method not in SIMULATION_METHODS:
+            logger.warning("monte_carlo.simulation_method=%r unknown; using parametric", simulation_method)
+            simulation_method = "parametric"
+        historical_block_years = max(1, int(mc_cfg.get("historical_block_years", DEFAULT_HISTORICAL_BLOCK_YEARS)))
+        stock_weight = max(0.0, min(1.0, float(mc_cfg.get("stock_weight", DEFAULT_HISTORICAL_STOCK_WEIGHT))))
 
         # Social Security and pension (annual dollars, FLAT REAL — COLA
         # offsets inflation, mirroring project_wealth_pools).
@@ -219,9 +290,16 @@ class MonteCarloEngine:
             nw_val = current_nw
             yearly_nw: list[float] = [current_nw]
             money_lasted = True
+            historical_path = (
+                _sample_historical_path(rng, total_years, historical_block_years)
+                if simulation_method == "historical_blocks" else None
+            )
 
             for yr in range(total_years):
-                r_real, _infl = _draw_year(rng, mu_nom, sigma, mu_i, sigma_i, rho)
+                if historical_path is not None:
+                    r_real, _infl = _historical_real_return(historical_path[yr], stock_weight, mu_nom, mu_i)
+                else:
+                    r_real, _infl = _draw_year(rng, mu_nom, sigma, mu_i, sigma_i, rho)
 
                 age = start_age + yr
                 is_retired = yr >= years_to_retirement
@@ -289,8 +367,19 @@ class MonteCarloEngine:
             best_final_nw=round(finals[-1], 2),
             assumptions={
                 "frame": "real (today's dollars); spending/income/SS flat real",
-                "return_model": f"lognormal gross growth, median {mu_nom:.2%} nominal, sigma {sigma:.2%}",
-                "inflation_model": f"normal, mean {mu_i:.2%}, sigma {sigma_i:.2%}, corr {rho:+.2f} with returns",
+                "simulation_method": simulation_method,
+                "return_model": (
+                    f"historical {historical_block_years}-year blocks 1928-2025 (Damodaran), "
+                    f"{stock_weight:.0%} S&P 500 / {1 - stock_weight:.0%} 10y Treasury, "
+                    f"recentered to {mu_nom:.2%} nominal CAGR"
+                    if simulation_method == "historical_blocks"
+                    else f"lognormal gross growth, median {mu_nom:.2%} nominal, sigma {sigma:.2%}"
+                ),
+                "inflation_model": (
+                    f"joint historical blocks recentered to {mu_i:.2%} long-run inflation"
+                    if simulation_method == "historical_blocks"
+                    else f"normal, mean {mu_i:.2%}, sigma {sigma_i:.2%}, corr {rho:+.2f} with returns"
+                ),
                 "real_return": "(1+r_nom)/(1+inflation) - 1 per year",
                 "cashflow_events": (
                     f"{len(cashflow_events)} planned/confirmed events applied "
