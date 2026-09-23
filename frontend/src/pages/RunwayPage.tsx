@@ -25,6 +25,10 @@ import { TOOLTIP_STYLE } from "../utils/theme";
 import { useEventMarkers } from "../components/charts/EventMarkers";
 import type { EventMarkerGroup } from "../components/charts/EventMarkers";
 import type { CashflowEvent, CashflowEventCreate } from "../types/cashflow";
+import { fmtDate, fmtMonthYear, parseLocalDate, todayISO } from "../utils/dates";
+
+/** Category-axis key of the chart's leading "today" point. */
+const NOW = "now";
 
 /* ------------------------------------------------------------------ */
 /*  Stat Card                                                          */
@@ -90,7 +94,7 @@ function EventModal({
           name: "",
           event_type: "expense",
           amount: 0,
-          date: new Date().toISOString().slice(0, 10),
+          date: todayISO(),
           is_recurring: false,
           recurrence: null,
           end_date: null,
@@ -415,7 +419,7 @@ function EventsList({
   const [showPast, setShowPast] = useState(false);
 
   const { upcoming, past } = useMemo(() => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const up: CashflowEvent[] = [];
     const ps: CashflowEvent[] = [];
     for (const evt of events) {
@@ -548,31 +552,20 @@ export default function RunwayPage() {
   const updateEvent = useUpdateCashflowEvent();
   const deleteEvent = useDeleteCashflowEvent();
 
-  // Chart data — anchor each point at the START of the month so the
-  // first tick reflects today's cash before any of this month's events apply.
-  //
-  // Event labels are shifted forward by one tick: an event that occurs in
-  // month X manifests as a slope between X-tick (pre-event start) and
-  // (X+1)-tick (post-event start, equal to X's ending cash). Plotting the
-  // marker on (X+1) makes it land on the visible spike/dip — same way the
-  // Retirement bridge chart aligns markers with peaks. Events in the final
-  // month have no next tick to land on, so they're dropped from markers
-  // (still visible in the table below).
+  // Chart data — a "now" point (today's cash), then each month's ENDING
+  // cash. A month's events are already inside its ending balance, so the
+  // marker sits on the tick of the month the event happens in (the old
+  // start-of-month points pushed every marker onto the following month's tick).
   const chartData = useMemo(() => {
-    if (!runway?.projection) return [];
-    const points = runway.projection.map((p) => ({
-      month: p.month,
-      cash: p.starting_cash,
-      income: p.income,
-      expenses: -p.expenses,
-      events: [] as string[],
-    }));
-    runway.projection.forEach((p, i) => {
-      if (p.events.length > 0 && i + 1 < points.length) {
-        points[i + 1].events = p.events;
-      }
-    });
-    return points;
+    if (!runway?.projection?.length) return [];
+    return [
+      { month: NOW, cash: runway.projection[0].starting_cash, events: [] as string[] },
+      ...runway.projection.map((p) => ({
+        month: p.month,
+        cash: p.ending_cash,
+        events: p.events,
+      })),
+    ];
   }, [runway]);
 
   const eventPoints = useMemo(
@@ -602,12 +595,7 @@ export default function RunwayPage() {
   const { markers: eventMarkers, overlay: eventOverlay, wrapperProps: chartWrapperProps } =
     useEventMarkers(markerGroups, {
       defaultColor: "var(--yellow)",
-      xLabel: (m) => {
-        const d = new Date(`${m}-01`);
-        return isNaN(d.getTime())
-          ? String(m)
-          : d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-      },
+      xLabel: (m) => (m === NOW ? "Now" : fmtMonthYear(String(m), "long")),
     });
 
   // Y-axis position of the zero line as a fraction from the top (0..1).
@@ -674,13 +662,7 @@ export default function RunwayPage() {
     );
   }
 
-  const zeroDate = runway.cash_zero_date
-    ? new Date(runway.cash_zero_date).toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      })
-    : null;
+  const zeroDate = runway.cash_zero_date ? fmtDate(runway.cash_zero_date) : null;
 
   return (
     <Layout>
@@ -716,7 +698,7 @@ export default function RunwayPage() {
             color={zeroDate ? "var(--red)" : "var(--green)"}
             sub={
               runway.cash_zero_date
-                ? `${Math.round((new Date(runway.cash_zero_date).getTime() - Date.now()) / (30.44 * 24 * 60 * 60 * 1000))} months`
+                ? `${Math.round((parseLocalDate(runway.cash_zero_date).getTime() - Date.now()) / (30.44 * 24 * 60 * 60 * 1000))} months`
                 : runway.net_monthly >= 0
                   ? "Positive cash flow"
                   : "Holds through 24 mo — planned events cover the gap"
@@ -855,14 +837,15 @@ export default function RunwayPage() {
                 stroke="#5c5c6a"
                 tick={{ fontSize: 11, fill: "#5c5c6a" }}
                 tickFormatter={(v: string, index: number) => {
+                  if (v === NOW) return "Now";
                   const [y, m] = v.split("-");
                   const monthNames = [
                     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
                   ];
                   const name = monthNames[parseInt(m, 10) - 1];
-                  // Show year on the first tick and at every January.
-                  return index === 0 || m === "01"
+                  // Show year on the first month tick and at every January.
+                  return index === 1 || m === "01"
                     ? `${name} '${y.slice(2)}`
                     : name;
                 }}
@@ -875,16 +858,12 @@ export default function RunwayPage() {
               />
               <Tooltip
                 {...TOOLTIP_STYLE}
-                labelFormatter={(month) => {
-                  const d = new Date(String(month) + "-01");
-                  return `Start of ${d.toLocaleDateString("en-US", {
-                    month: "long",
-                    year: "numeric",
-                  })}`;
-                }}
+                labelFormatter={(month) =>
+                  month === NOW ? "Today" : `End of ${fmtMonthYear(String(month), "long")}`
+                }
                 formatter={(value, name) => [
                   formatCurrency(Number(value)),
-                  name === "cash" ? "Starting Cash" : String(name),
+                  name === "cash" ? "Cash" : String(name),
                 ]}
               />
               <ReferenceLine

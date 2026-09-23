@@ -24,6 +24,7 @@ import {
 import type { BracketDetail } from "../types/tax";
 import { formatCurrency as fmt, fmtCompact, fmtAxis, fmtPct } from "../utils/formatting";
 import { TOOLTIP_STYLE } from "../utils/theme";
+import { parseLocalDate } from "../utils/dates";
 
 // ---------------------------------------------------------------------------
 // Shared components
@@ -95,7 +96,7 @@ function SeppCalculatorCard({ deferredBalance }: { deferredBalance?: number }) {
       balanceSeeded.current = true;
     }
     if (!ageSeeded.current && fireConfig?.date_of_birth) {
-      const birthYear = new Date(fireConfig.date_of_birth).getFullYear();
+      const birthYear = parseLocalDate(fireConfig.date_of_birth).getFullYear();
       setAgeStr(String(new Date().getFullYear() - birthYear));
       ageSeeded.current = true;
     }

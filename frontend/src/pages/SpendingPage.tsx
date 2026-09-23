@@ -18,6 +18,7 @@ import {
 } from "recharts";
 import { formatCurrency as fmt, fmtCompact } from "../utils/formatting";
 import { CHART_COLORS as CATEGORY_COLORS, TOOLTIP_STYLE } from "../utils/theme";
+import { fmtMonthYear } from "../utils/dates";
 
 const RANGE_OPTIONS = [
   { label: "Month", value: "month" },
@@ -130,15 +131,9 @@ export default function SpendingPage() {
             Spending Analysis
           </h2>
           <p className="text-sm text-[var(--text-secondary)] mt-1">
-            {new Date(analysis.start_date).toLocaleDateString("en-US", {
-              month: "short",
-              year: "numeric",
-            })}{" "}
+            {fmtMonthYear(analysis.start_date)}{" "}
             &ndash;{" "}
-            {new Date(analysis.end_date).toLocaleDateString("en-US", {
-              month: "short",
-              year: "numeric",
-            })}
+            {fmtMonthYear(analysis.end_date)}
           </p>
         </div>
 
@@ -300,9 +295,7 @@ export default function SpendingPage() {
                     {...TOOLTIP_STYLE}
                     formatter={(value) => fmt(Number(value))}
                     labelFormatter={(label) => {
-                      const m = String(label);
-                      const d = new Date(m + "-01");
-                      return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+                      return fmtMonthYear(String(label), "long");
                     }}
                   />
                   {/* Category lines */}

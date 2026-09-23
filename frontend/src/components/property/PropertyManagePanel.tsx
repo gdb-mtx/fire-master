@@ -11,6 +11,7 @@ import {
   usePropertyCategories,
 } from "../../api/queries";
 import { formatCurrency as fmt } from "../../utils/formatting";
+import { todayISO } from "../../utils/dates";
 
 type Tab = "rules" | "properties" | "manual";
 
@@ -308,7 +309,7 @@ function ManualTab({ properties }: { properties: Property[] }) {
   const create = useCreateManualEntry();
   const del = useDeleteManualEntry();
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [draft, setDraft] = useState({
     property_id: properties[0]?.id ?? "",
     date: today,

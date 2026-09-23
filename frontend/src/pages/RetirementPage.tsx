@@ -31,6 +31,7 @@ import {
   ComposedChart,
   ReferenceArea,
 } from "recharts";
+import { fmtMonthYear } from "../utils/dates";
 
 function StatCard({
   label,
@@ -141,7 +142,7 @@ function MilestoneTimeline({ milestones, currentAge }: { milestones: Milestone[]
                   <div className="text-[10px] text-[var(--text-secondary)] mb-1.5">{m.description}</div>
                   <div className="text-xs font-mono font-medium" style={{ color }}>{m.financial_impact}</div>
                   <div className="text-[10px] text-[var(--text-secondary)] mt-1">
-                    {new Date(m.date).toLocaleDateString("en-US", { month: "short", year: "numeric" })}
+                    {fmtMonthYear(m.date)}
                   </div>
                 </div>
               </div>
@@ -231,10 +232,19 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
     [bridgeData],
   );
 
+  // x = months elapsed; each point keeps its engine date, whose calendar month
+  // is the month its events fall in — label with both so the bridge reads on
+  // the same calendar as the Runway page.
+  const dateByX = new Map(bridgeData.map((p) => [p.month, p.date]));
+  const monthLabel = (x: string | number) => {
+    const d = dateByX.get(Number(x));
+    return d ? `${fmtMonthYear(d)} · month ${x}` : `Month ${x}`;
+  };
+
   const { markers: eventMarkers, overlay: eventOverlay, wrapperProps: chartWrapperProps } =
     useEventMarkers(markerGroups, {
       defaultColor: "var(--yellow)",
-      xLabel: (m) => `Month ${m}`,
+      xLabel: monthLabel,
     });
 
   return (
@@ -296,7 +306,7 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
           />
           <Tooltip
             {...TOOLTIP_STYLE}
-            labelFormatter={(m) => `Month ${m}`}
+            labelFormatter={(m) => monthLabel(m as number)}
             formatter={(value, name) => {
               const labels: Record<string, string> = {
                 cash: "Cash Balance",
@@ -720,10 +730,7 @@ export default function RetirementPage() {
             )}
             {timeline.projected_retirement_date && (
               <p className="text-sm text-[var(--text-secondary)]">
-                {new Date(timeline.projected_retirement_date).toLocaleDateString(
-                  "en-US",
-                  { month: "long", year: "numeric" }
-                )}
+                {fmtMonthYear(timeline.projected_retirement_date, "long")}
                 {timeline.moderate.retirement_age && ` (age ${Math.round(timeline.moderate.retirement_age)})`}
               </p>
             )}
@@ -1086,7 +1093,7 @@ export default function RetirementPage() {
                     <div className="flex flex-col">
                       <span className="text-[11px] text-[var(--text-primary)]">{ev.name}</span>
                       <span className="text-[10px] text-[var(--text-secondary)]">
-                        {new Date(ev.date).toLocaleDateString("en-US", { month: "short", year: "numeric" })}
+                        {fmtMonthYear(ev.date)}
                       </span>
                     </div>
                     <span className="text-[11px] font-mono font-medium" style={{ color: ev.amount >= 0 ? "var(--green)" : "var(--red)" }}>

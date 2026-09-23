@@ -28,6 +28,7 @@ import type { ReactElement } from "react";
 import { ReferenceDot, ReferenceLine } from "recharts";
 import { fmtCompact } from "../../utils/formatting";
 import { TOOLTIP_STYLE } from "../../utils/theme";
+import { parseLocalDate } from "../../utils/dates";
 
 export interface ChartEventDetail {
   /** Full event name — never truncated. */
@@ -122,7 +123,7 @@ function EventBadge(props: {
 }
 
 function fmtEventDate(iso: string): string {
-  const d = new Date(iso.length === 7 ? `${iso}-01` : iso);
+  const d = parseLocalDate(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
