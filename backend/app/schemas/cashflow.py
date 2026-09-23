@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field, computed_field
 class CashflowEventCreate(BaseModel):
     name: str
     event_type: str  # "income" or "expense"
-    amount: float  # dollars (converted to cents on save)
+    # Dollars, a SIZE (converted to cents on save): event_type sets the direction.
+    # A negative expense would silently project as income.
+    amount: float = Field(ge=0.0)
     date: _dt.date
     is_recurring: bool = False
     recurrence: str | None = None  # "monthly", "quarterly", "annual"
@@ -24,7 +26,7 @@ class CashflowEventCreate(BaseModel):
 class CashflowEventUpdate(BaseModel):
     name: str | None = None
     event_type: str | None = None
-    amount: float | None = None
+    amount: float | None = Field(None, ge=0.0)
     date: _dt.date | None = None
     is_recurring: bool | None = None
     recurrence: str | None = None

@@ -169,9 +169,12 @@ function EventModal({
             <input
               type="number"
               className={inputCls}
+              min="0"
               value={form.amount || ""}
               onChange={(e) =>
-                setForm({ ...form, amount: parseFloat(e.target.value) || 0 })
+                // Type (income/expense) sets the direction; the amount is a size.
+                // A minus sign here used to flip an expense into income.
+                setForm({ ...form, amount: Math.abs(parseFloat(e.target.value) || 0) })
               }
             />
           </div>

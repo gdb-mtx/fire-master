@@ -29,3 +29,12 @@ def test_probability_outside_unit_interval_rejected(bad):
         _create(probability=bad)
     with pytest.raises(ValidationError):
         CashflowEventUpdate(probability=bad)
+
+
+@pytest.mark.parametrize("bad", [-2721.0, -0.01])
+def test_negative_amount_rejected(bad):
+    # event_type sets the direction; a negative expense would project as income.
+    with pytest.raises(ValidationError):
+        _create(amount=bad)
+    with pytest.raises(ValidationError):
+        CashflowEventUpdate(amount=bad)
