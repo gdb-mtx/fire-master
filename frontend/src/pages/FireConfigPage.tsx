@@ -12,6 +12,7 @@ import {
   useActivateScenario,
 } from "../api/queries";
 import { formatCurrency } from "../utils/formatting";
+import { planMonth } from "../utils/dates";
 import type { FireScenario } from "../types/fire";
 
 export default function FireConfigPage() {
@@ -686,7 +687,8 @@ function ActiveScenarioDetails({ scenario }: { scenario: FireScenario }) {
               <Row label="IRA-B growth rate" value={`${((sepp?.ira_growth_rate ?? 0.06) as number) * 100}%`} />
               <Row label="RRIF monthly (net)" value={`$${fmt(rrsp?.monthly_net ?? 0)}/mo`} />
               <Row label="RRIF total available" value={fmtK(rrsp?.total_available ?? 0)} />
-              <Row label="SEPP + RRIF starts" value={`Month ${sepp?.sepp_start_month ?? 0}`} />
+              <Row label="SEPP starts" value={planMonth(sepp?.start_date, sepp?.sepp_start_month).label} />
+              <Row label="RRIF starts" value={planMonth(rrsp?.start_date, rrsp?.start_month).label} />
               {occ != null && <Row label="Rental occupancy" value={`${occ * 100}%`} />}
             </div>
             <p className="text-[10px] text-[var(--text-secondary)] mt-2 italic">Source: scenario override custom_assumptions.sepp + rrsp</p>
@@ -732,7 +734,7 @@ function PropertySaleCard({ sale }: { sale: Record<string, unknown> }) {
     <div className="bg-[var(--bg-card)] rounded p-3 border border-[var(--border)]">
       <h4 className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2">{title} Sale</h4>
       <div className="space-y-1 text-xs">
-        <Row label="Sale timing" value={`Month ${num(sale.sale_month) ?? 0}`} />
+        <Row label="Sale timing" value={planMonth(sale.sale_date, sale.sale_month).label} />
         <Row label="Est. value" value={money(sale.value)} color="green" />
         <Row label="Cost basis" value={money(sale.cost_basis)} />
         {monthlyCost != null && monthlyCost > 0 && (
@@ -782,9 +784,8 @@ function ExpenseBreakdown({
 
   // Generic path: derive burn phases from property_sales, in sale order
   if (propertySales && propertySales.length > 0) {
-    const sorted = [...propertySales].sort(
-      (a, b) => Number(a.sale_month ?? 0) - Number(b.sale_month ?? 0),
-    );
+    const when = (s: Record<string, unknown>) => planMonth(s.sale_date, s.sale_month);
+    const sorted = [...propertySales].sort((a, b) => when(a).offset - when(b).offset);
     let inBurn = baseBurn;
     // Carrying costs of held properties that are NOT inside the base budget
     let heldExtra = sorted
@@ -804,7 +805,7 @@ function ExpenseBreakdown({
       inBurn += Number(s.post_sale_rent ?? 0);
       const name = String(s.key ?? "").replace(/_/g, " ");
       phases.push({
-        label: `After ${name} (mo ${Number(s.sale_month ?? 0)})`,
+        label: `After ${name} (${when(s).label})`,
         detail: `-$${cost.toLocaleString()}${Number(s.post_sale_rent ?? 0) > 0 ? ` +$${Number(s.post_sale_rent).toLocaleString()} rent` : ""}`,
         total: inBurn + heldExtra + healthcareMo,
       });
@@ -992,7 +993,7 @@ function ScenariosSection() {
               rows={8}
               value={newOverrides}
               onChange={(e) => { setNewOverrides(e.target.value); setJsonError(""); }}
-              placeholder='{"custom_assumptions": {"property_sales": [{"key": "rental_condo", "sale_month": 24, ...}]}}'
+              placeholder='{"custom_assumptions": {"property_sales": [{"key": "rental_condo", "sale_date": "2028-06", ...}]}}'
             />
             {jsonError && (
               <p className="text-xs text-[var(--red)] mt-1">{jsonError}</p>

@@ -117,6 +117,32 @@ def savings_rate_component(rate: float | None) -> float:
     return max(0.0, min(100.0, rate / 30 * 100))
 
 
+def resolve_month_offset(
+    cfg: dict, date_key: str, month_key: str, today: date, default: int = 0,
+) -> int:
+    """A plan month (property sale, SEPP/RRSP start) as an offset from today's month.
+
+    `date_key` holds an absolute calendar month — "2027-07" (a day, if given, is
+    ignored) — and wins. `month_key` is the legacy offset counted FROM TODAY, so it
+    slides a month later every month the plan isn't edited ("sale_month: 13" is
+    always 13 months away). Calendar offsets match build_cashflow_schedule, so a
+    pinned sale and a cashflow event dated the same month land on the same month.
+    A pinned month already past resolves to 0 (now); a malformed one falls back
+    to the legacy offset.
+    """
+    raw = cfg.get(date_key)
+    if raw:
+        try:
+            year, month = int(str(raw)[0:4]), int(str(raw)[5:7])
+            if not 1 <= month <= 12:
+                raise ValueError(raw)
+            return max(0, (year - today.year) * 12 + (month - today.month))
+        except (TypeError, ValueError):
+            logger.warning("Ignoring malformed %s=%r; using %s", date_key, raw, month_key)
+    val = cfg.get(month_key, default)
+    return int(val) if val is not None else default
+
+
 def build_cashflow_schedule(
     events,
     today: date,
@@ -1032,7 +1058,7 @@ class FireProjectionsEngine:
         ira_a_start = sepp_cfg.get("ira_a_balance", 0)
         ira_b_start = sepp_cfg.get("ira_b_balance", 0)
         sepp_monthly = sepp_cfg.get("sepp_monthly", 0)
-        sepp_start_month = sepp_cfg.get("sepp_start_month", 0)
+        sepp_start_month = resolve_month_offset(sepp_cfg, "start_date", "sepp_start_month", today)
         ira_growth_rate = sepp_cfg.get("ira_growth_rate", 0.06)  # 6% real — investment return assumption (distinct from SEPP's 5% IRS amortization rate)
 
         # LEGACY ("miami_sale") — superseded by custom_assumptions["property_sales"];
@@ -1054,7 +1080,7 @@ class FireProjectionsEngine:
         # RRSP/RRIF drawdown assumptions from custom_assumptions (inactive unless configured)
         rrsp_cfg = (config.custom_assumptions or {}).get("rrsp", {})
         rrsp_monthly_net = rrsp_cfg.get("monthly_net", 0)  # net monthly draw after withholding
-        rrsp_start_month = rrsp_cfg.get("start_month", 0)  # month offset when draws begin
+        rrsp_start_month = resolve_month_offset(rrsp_cfg, "start_date", "start_month", today)  # when draws begin
         rrsp_total_available = rrsp_cfg.get("total_available", 0)  # total net amount available
 
         # LEGACY ("sauvie_sale") — superseded by property_sales; retained for author
@@ -1193,7 +1219,9 @@ class FireProjectionsEngine:
         sales_by_month: dict[int, list[dict]] = {}
         generic_sold: dict[str, bool] = {}
         for _s in property_sales:
-            sales_by_month.setdefault(int(_s.get("sale_month", 0)), []).append(_s)
+            sales_by_month.setdefault(
+                resolve_month_offset(_s, "sale_date", "sale_month", today), []
+            ).append(_s)
             generic_sold[_s.get("key", "")] = False
         # re_bucket tokens: primary | secondary | income. The property-name tokens
         # below are a LEGACY alias for author back-compat; do not use in new configs.
@@ -1696,7 +1724,7 @@ class FireProjectionsEngine:
         chart_events = []
         if use_generic_sales:
             for s in property_sales:
-                sm = int(s.get("sale_month", 0))
+                sm = resolve_month_offset(s, "sale_date", "sale_month", today)
                 chart_events.append(
                     {"month": sm, "age": round(current_age + sm / 12, 1),
                      "label": f"Sell {s.get('key', '').replace('_', ' ').title()}", "color": "#ff4d6a"},
@@ -1780,9 +1808,9 @@ class FireProjectionsEngine:
         # LEGACY ("miami_sale") — superseded by property_sales; read for author back-compat.
         miami_cfg = (config.custom_assumptions or {}).get("miami_sale", {})
         sepp_monthly = sepp_cfg.get("sepp_monthly", 0)
-        sepp_start_month = sepp_cfg.get("sepp_start_month", 0)
+        sepp_start_month = resolve_month_offset(sepp_cfg, "start_date", "sepp_start_month", today)
         rrsp_monthly = rrsp_cfg.get("monthly_net", 0)
-        rrsp_start_month = rrsp_cfg.get("start_month", 0)
+        rrsp_start_month = resolve_month_offset(rrsp_cfg, "start_date", "start_month", today)
 
         miami_monthly_cost = miami_cfg.get("monthly_cost", 0)
         miami_post_rent = miami_cfg.get("post_sale_rent", 0)

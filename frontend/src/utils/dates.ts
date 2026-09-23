@@ -38,9 +38,23 @@ export function fmtDate(value: string): string {
   });
 }
 
-/** A "YYYY-MM" month shifted by n calendar months. */
-export function shiftMonth(month: string, n: number): string {
-  const d = parseLocalDate(month);
-  d.setMonth(d.getMonth() + n);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+/** Whole calendar months from this month to a "YYYY-MM[-DD]" value (0 if past). */
+export function monthsFromNow(value: string): number {
+  const d = parseLocalDate(value);
+  const now = new Date();
+  return Math.max(0, (d.getFullYear() - now.getFullYear()) * 12 + (d.getMonth() - now.getMonth()));
+}
+
+/**
+ * A plan month (property sale, SEPP/RRSP start). A pinned calendar month
+ * ("2027-07") wins; otherwise the legacy offset counts from TODAY and slides
+ * a month later every month — labelled so it can't be mistaken for a date.
+ */
+export function planMonth(pinned: unknown, offset: unknown): { offset: number; label: string } {
+  if (typeof pinned === "string" && pinned) {
+    const n = monthsFromNow(pinned);
+    return { offset: n, label: `${fmtMonthYear(pinned)} (in ${n} mo)` };
+  }
+  const n = Number(offset ?? 0);
+  return { offset: n, label: `Month ${n} from now` };
 }
