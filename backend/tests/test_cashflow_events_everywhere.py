@@ -92,6 +92,19 @@ class TestSchedule:
         by_month, _ = build_cashflow_schedule([past, soon], FROZEN_TODAY, 120)
         assert list(by_month) == [1]
 
+    def test_occurrences_earlier_this_month_are_already_in_the_balance(self):
+        # FROZEN_TODAY is Apr 14: an Apr 1 bill has already hit the account (it is
+        # in today's balance), an Apr 20 one has not. Same for a recurring bill's
+        # Apr 5 occurrence — its first REMAINING occurrence is May 5.
+        paid = _event("Boat payment", "expense", 500_000, date(2026, 4, 1))
+        due = _event("Insurance", "expense", 100_000, date(2026, 4, 20))
+        monthly = _event("Support", "expense", 50_000, date(2026, 2, 5),
+                         recurring=True, recurrence="monthly")
+        by_month, labels = build_cashflow_schedule([paid, due, monthly], FROZEN_TODAY, 3)
+        assert by_month[0] == [("Insurance", -1_000.0)]
+        assert by_month[1] == [("Support", -500.0)]
+        assert labels == {0: ["Insurance"], 1: ["Support"]}
+
     def test_skip_predicate_removes_money_and_label(self):
         sale = _event("Mountain House Sale Proceeds", "income", 10_000_000, date(2026, 10, 15))
         keep = _event("Bonus", "income", 100_000, date(2026, 10, 15))
@@ -127,7 +140,9 @@ class TestMonteCarloEvents:
         (rental survives retirement in _income_at_month). Zero vol → the
         deterministic paths must be identical, not 'no income at all'."""
         engine = MonteCarloEngine(db=None)
-        ev = _event("Spouse pension", "income", 500_000, date(2026, 4, 1),
+        # Starts TODAY so year 1 holds 12 occurrences, like the source's 12 months
+        # (an occurrence earlier this month is already in the balance and dropped).
+        ev = _event("Spouse pension", "income", 500_000, FROZEN_TODAY,
                     recurring=True, recurrence="monthly")
         src = _source("Rental", IncomeType.RENTAL, 6_000_000)
         kw = dict(net_worth=500_000.0, spending_cents=6_000_000)  # $60K/yr, covered by the income
@@ -204,7 +219,7 @@ class TestLifetimeEvents:
 
     async def test_expense_event_raises_spending(self, frozen_today):
         cfg = _make_fire_config(social_security_monthly=0, healthcare_monthly_cost=None)
-        ev = _event("Tuition", "expense", 2_400_000, date(2026, 4, 1), recurring=True,
+        ev = _event("Tuition", "expense", 2_400_000, FROZEN_TODAY, recurring=True,
                     recurrence="monthly", end=date(2027, 3, 31))
         r = await self._lifetime(cfg, events=[ev])
         assert r.points[0].spending == pytest.approx(120_000 + 24_000 * 12, abs=1)

@@ -68,6 +68,7 @@ class MonthlyProjectionPoint(BaseModel):
     net: float
     ending_cash: float
     events: list[str]  # names of events hitting this month
+    from_day: int | None = None  # month 0 only: the row covers this day → month end
 
 
 class RunwayResponse(BaseModel):

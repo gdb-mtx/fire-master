@@ -982,6 +982,14 @@ export default function RunwayPage() {
                     >
                       <td className="py-2 px-3 font-mono text-[var(--text-primary)]">
                         {row.month}
+                        {row.from_day != null && (
+                          <span
+                            className="ml-1.5 text-[10px] text-[var(--text-secondary)]"
+                            title="Rest of this month only — spending and income that already cleared are in the starting cash"
+                          >
+                            from {row.from_day}
+                          </span>
+                        )}
                       </td>
                       <td className="py-2 px-3 font-mono text-[var(--text-primary)]">
                         {formatCurrency(row.starting_cash)}

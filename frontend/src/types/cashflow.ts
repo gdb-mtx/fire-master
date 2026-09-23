@@ -38,6 +38,8 @@ export interface MonthlyProjectionPoint {
   net: number;
   ending_cash: number;
   events: string[];
+  /** Month 0 only: the row covers this day → month end (earlier days are in the balance). */
+  from_day?: number | null;
 }
 
 export interface RunwayResponse {

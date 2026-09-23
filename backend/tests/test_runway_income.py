@@ -97,6 +97,62 @@ def _mock_db_for_runway(*, cash_cents, trailing_income_cents, sources, events):
     return db
 
 
+FIRST_OF_MONTH = date(2026, 6, 1)  # month 0 is a whole month
+MID_MONTH = date(2026, 6, 21)      # 10 of June's 30 days remain (the 21st included)
+
+
+def _event(name, cents, d, etype="income"):
+    ev = MagicMock()
+    ev.amount_cents = cents
+    ev.probability = 1.0
+    ev.event_type = etype
+    ev.is_recurring = False
+    ev.recurrence = None
+    ev.end_date = None
+    ev.name = name
+    ev.date = d
+    return ev
+
+
+class TestCurrentMonthIsPartial:
+    """Month 0 is only the rest of this month: today's balance already holds
+    everything that cleared since the 1st."""
+
+    @pytest.mark.asyncio
+    async def test_month_zero_carries_the_remaining_fraction(self):
+        db = _mock_db_for_runway(
+            cash_cents=50_000_00, trailing_income_cents=0,
+            sources=[_src("Consulting", 12_000_00)], events=[],   # $1,000/mo
+        )  # trailing burn mock: $5,000/mo
+        r = await CashflowEngine(db).project_runway(months=3, today=MID_MONTH)
+        first, second = r.projection[0], r.projection[1]
+        assert first.expenses == pytest.approx(5_000 / 3, abs=0.01)
+        assert first.income == pytest.approx(1_000 / 3, abs=0.01)
+        assert first.from_day == 21
+        assert (second.expenses, second.income, second.from_day) == (5_000.0, 1_000.0, None)
+        assert r.monthly_burn == 5_000.0  # headline rates stay monthly
+
+    @pytest.mark.asyncio
+    async def test_event_earlier_this_month_is_already_in_the_balance(self):
+        paid = _event("Boat payment", 4_000_00, date(2026, 6, 5), etype="expense")
+        due = _event("Refund", 2_000_00, date(2026, 6, 25))
+        db = _mock_db_for_runway(
+            cash_cents=50_000_00, trailing_income_cents=0, sources=[], events=[paid, due],
+        )
+        r = await CashflowEngine(db).project_runway(months=3, today=MID_MONTH)
+        assert r.projection[0].events == ["Refund"]
+        assert r.projection[0].expenses == pytest.approx(5_000 / 3, abs=0.01)  # burn only
+        assert r.projection[0].income == 2_000.0
+
+    @pytest.mark.asyncio
+    async def test_cash_zero_inside_month_zero_counts_from_today(self):
+        db = _mock_db_for_runway(
+            cash_cents=1_000_00, trailing_income_cents=0, sources=[], events=[],
+        )  # $5,000/mo burn → $1,666.67 over the 10 remaining days ($166.67/day); $1,000 lasts 6
+        r = await CashflowEngine(db).project_runway(months=3, today=MID_MONTH)
+        assert r.cash_zero_date == date(2026, 6, 27)
+
+
 class TestLumpImmunityAndEvents:
     @pytest.mark.asyncio
     async def test_lump_never_becomes_recurring_income(self):
@@ -107,7 +163,7 @@ class TestLumpImmunityAndEvents:
             sources=[_src("Consulting", 12_000_00)],  # $1,000/mo declared
             events=[],
         )
-        r = await CashflowEngine(db).project_runway(months=6)
+        r = await CashflowEngine(db).project_runway(months=6, today=FIRST_OF_MONTH)
         assert all(p.income == 1000.0 for p in r.projection)
         assert r.monthly_income == 1000.0 and r.income_provenance == "modeled"
         assert r.trailing_income == 22077.0  # still visible — as reference only
@@ -120,12 +176,12 @@ class TestLumpImmunityAndEvents:
         ev.event_type = "income"
         ev.is_recurring = False
         ev.name = "Remaining Severance"
-        ev.date = date.today().replace(day=1)
+        ev.date = FIRST_OF_MONTH
         db = _mock_db_for_runway(
             cash_cents=50_000_00, trailing_income_cents=0,
             sources=[_src("Consulting", 12_000_00)], events=[ev],
         )
-        r = await CashflowEngine(db).project_runway(months=6)
+        r = await CashflowEngine(db).project_runway(months=6, today=FIRST_OF_MONTH)
         assert r.projection[0].income == 29000.0  # source + event, once
         assert all(p.income == 1000.0 for p in r.projection[1:])
 
@@ -157,6 +213,6 @@ class TestLumpImmunityAndEvents:
             cash_cents=50_000_00, trailing_income_cents=3 * 22_077_00,
             sources=[], events=[],
         )
-        r = await CashflowEngine(db).project_runway(months=24)
+        r = await CashflowEngine(db).project_runway(months=24, today=FIRST_OF_MONTH)
         assert r.monthly_income == 0.0  # income is 0 + events, not the trailing mirage
         assert r.months_remaining is not None  # burn > 0 -> cash zero is found in-window

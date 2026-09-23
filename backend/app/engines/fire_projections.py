@@ -137,49 +137,35 @@ def build_cashflow_schedule(
       remaining occurrence of a recurring) so chart markers aren't stamped on
       every month a recurring event is active.
 
-    Rules (shared with the Runway page's expansion in engines/cashflow.py):
+    Rules (the Runway page consumes this same schedule):
     - Amount = amount_cents/100 × probability, signed (+income / −expense).
     - CALENDAR-month offsets (an Aug-12 event 16 days out is "next month",
       never "this month").
     - Recurring: monthly / quarterly / annual, in phase with the start date;
-      occurrences before today are dropped (only remaining ones count);
       end_date month is INCLUSIVE (an event ending Jul 31 still fires in July).
-    - One-off dated before today already happened — dropped, not clamped to
-      month 0 (that double-counted a finished severance).
+    - Anything dated before TODAY already happened and is already in the
+      balances — dropped, one-offs and recurring occurrences alike. (Dropping
+      only earlier MONTHS double-counted an event from earlier this month; not
+      clamping to month 0 is the finished-severance lesson.)
     - `skip(event)` filters events another mechanism owns (e.g. a generic
       property sale that replaces its legacy "… Sale Proceeds" event, or a
       conversion event a single-pool model must not add on top of net worth).
     """
     by_month: dict[int, list[tuple[str, float]]] = {}
     labels_by_month: dict[int, list[str]] = {}
+    horizon_end = today.replace(day=1) + relativedelta(months=total_months) - timedelta(days=1)
     for cf in events:
         if skip is not None and skip(cf):
             continue
         sign = 1.0 if cf.event_type == "income" else -1.0
         amount = cf.amount_cents / 100.0 * sign * (cf.probability if cf.probability is not None else 1.0)
-        raw_offset = (cf.date.year - today.year) * 12 + (cf.date.month - today.month)
-
-        if cf.is_recurring:
-            step = _RECURRENCE_STEP_MONTHS.get(cf.recurrence or "monthly", 1)
-            last_offset = total_months - 1
-            if cf.end_date:
-                cal_end = (cf.end_date.year - today.year) * 12 + (cf.end_date.month - today.month)
-                last_offset = min(last_offset, cal_end)
-            if last_offset < 0:
-                continue  # recurring window is entirely in the past
-            first = True
-            for mo in range(raw_offset, last_offset + 1, step):
-                if mo < 0:
-                    continue
-                by_month.setdefault(mo, []).append((cf.name, amount))
-                if first:
-                    labels_by_month.setdefault(mo, []).append(cf.name)
-                    first = False
-        else:
-            if raw_offset < 0 or raw_offset >= total_months:
-                continue
-            by_month.setdefault(raw_offset, []).append((cf.name, amount))
-            labels_by_month.setdefault(raw_offset, []).append(cf.name)
+        first = True
+        for occ in event_occurrence_dates(cf, today, horizon_end):
+            mo = (occ.year - today.year) * 12 + (occ.month - today.month)
+            by_month.setdefault(mo, []).append((cf.name, amount))
+            if first:  # label only the first remaining occurrence
+                labels_by_month.setdefault(mo, []).append(cf.name)
+                first = False
     return by_month, labels_by_month
 
 
