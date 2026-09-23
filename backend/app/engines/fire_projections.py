@@ -1663,7 +1663,15 @@ class FireProjectionsEngine:
             # back to zero. Pre-rescue dips (no pool yet) still show, and
             # cash == 0 still trips cash_zero_month, so the stress signal survives.
             # (The repair reaches cash through the net line below, via *_draw.)
-            deficit = -cash if cash < 0 else 0.0
+            # The shortfall is measured AFTER this month's flows (interest aside:
+            # it accrues on the opening balance). Measuring the OPENING balance
+            # sold a month's deficit out of the pool even when the month's own
+            # inflow — a payout, a sale — already covered it, stranding the money
+            # in cash; and it let a month that starts positive but ends negative
+            # wait a month for its repair.
+            cash_after_flows = cash + (income + ira_draw - rmd_redeposit + rrsp_draw
+                                       + taxable_draw + roth_draw - expenses)
+            deficit = -cash_after_flows if cash_after_flows < 0 else 0.0
             if deficit > 0 and taxable > 0:
                 repair = min(deficit, taxable)
                 taxable -= repair
