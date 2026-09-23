@@ -8,7 +8,7 @@ is extracted post-launch.
 """
 
 from datetime import date
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -114,6 +114,14 @@ def _event(name, cents, d, etype="income"):
     return ev
 
 
+def _engine(db, sales=(), appreciation=0.0, scenario=None):
+    """CashflowEngine with the active plan's pinned sales stubbed (the ordered db
+    mock covers only the runway's own queries)."""
+    engine = CashflowEngine(db)
+    engine._get_plan_sales = AsyncMock(return_value=(list(sales), appreciation, scenario))
+    return engine
+
+
 class TestCurrentMonthIsPartial:
     """Month 0 is only the rest of this month: today's balance already holds
     everything that cleared since the 1st."""
@@ -124,7 +132,7 @@ class TestCurrentMonthIsPartial:
             cash_cents=50_000_00, trailing_income_cents=0,
             sources=[_src("Consulting", 12_000_00)], events=[],   # $1,000/mo
         )  # trailing burn mock: $5,000/mo
-        r = await CashflowEngine(db).project_runway(months=3, today=MID_MONTH)
+        r = await _engine(db).project_runway(months=3, today=MID_MONTH)
         first, second = r.projection[0], r.projection[1]
         assert first.expenses == pytest.approx(5_000 / 3, abs=0.01)
         assert first.income == pytest.approx(1_000 / 3, abs=0.01)
@@ -139,7 +147,7 @@ class TestCurrentMonthIsPartial:
         db = _mock_db_for_runway(
             cash_cents=50_000_00, trailing_income_cents=0, sources=[], events=[paid, due],
         )
-        r = await CashflowEngine(db).project_runway(months=3, today=MID_MONTH)
+        r = await _engine(db).project_runway(months=3, today=MID_MONTH)
         assert r.projection[0].events == ["Refund"]
         assert r.projection[0].expenses == pytest.approx(5_000 / 3, abs=0.01)  # burn only
         assert r.projection[0].income == 2_000.0
@@ -149,7 +157,7 @@ class TestCurrentMonthIsPartial:
         db = _mock_db_for_runway(
             cash_cents=1_000_00, trailing_income_cents=0, sources=[], events=[],
         )  # $5,000/mo burn → $1,666.67 over the 10 remaining days ($166.67/day); $1,000 lasts 6
-        r = await CashflowEngine(db).project_runway(months=3, today=MID_MONTH)
+        r = await _engine(db).project_runway(months=3, today=MID_MONTH)
         assert r.cash_zero_date == date(2026, 6, 27)
 
 
@@ -163,7 +171,7 @@ class TestLumpImmunityAndEvents:
             sources=[_src("Consulting", 12_000_00)],  # $1,000/mo declared
             events=[],
         )
-        r = await CashflowEngine(db).project_runway(months=6, today=FIRST_OF_MONTH)
+        r = await _engine(db).project_runway(months=6, today=FIRST_OF_MONTH)
         assert all(p.income == 1000.0 for p in r.projection)
         assert r.monthly_income == 1000.0 and r.income_provenance == "modeled"
         assert r.trailing_income == 22077.0  # still visible — as reference only
@@ -181,7 +189,7 @@ class TestLumpImmunityAndEvents:
             cash_cents=50_000_00, trailing_income_cents=0,
             sources=[_src("Consulting", 12_000_00)], events=[ev],
         )
-        r = await CashflowEngine(db).project_runway(months=6, today=FIRST_OF_MONTH)
+        r = await _engine(db).project_runway(months=6, today=FIRST_OF_MONTH)
         assert r.projection[0].income == 29000.0  # source + event, once
         assert all(p.income == 1000.0 for p in r.projection[1:])
 
@@ -213,6 +221,71 @@ class TestLumpImmunityAndEvents:
             cash_cents=50_000_00, trailing_income_cents=3 * 22_077_00,
             sources=[], events=[],
         )
-        r = await CashflowEngine(db).project_runway(months=24, today=FIRST_OF_MONTH)
+        r = await _engine(db).project_runway(months=24, today=FIRST_OF_MONTH)
         assert r.monthly_income == 0.0  # income is 0 + events, not the trailing mirage
         assert r.months_remaining is not None  # burn > 0 -> cash zero is found in-window
+
+
+CONDO_SALE = {
+    "key": "condo", "sale_date": "2026-09", "value": 300_000, "cost_basis": 300_000,
+    "agent_fee_pct": 0.0, "ltcg_rate": 0.15, "current_mortgage_balance": 0,
+    "monthly_cost": 2_000, "post_sale_rent": 500, "monthly_income": 1_000,
+    "proceeds_to": "taxable", "suppress_cashflow_match": "condo sale",
+}
+
+
+class TestPlanSalesDriveTheRunway:
+    """The active plan's pinned property sales reach the Runway (one source, one date)."""
+
+    @pytest.mark.asyncio
+    async def test_proceeds_land_and_costs_stop_from_the_sale_month(self):
+        db = _mock_db_for_runway(
+            cash_cents=50_000_00, trailing_income_cents=0,
+            sources=[_src("Condo rent", 12_000_00)], events=[],   # $1,000/mo
+        )  # burn $5,000/mo
+        r = await _engine(db, sales=[CONDO_SALE], scenario="Sell the condo").project_runway(
+            months=6, today=FIRST_OF_MONTH)
+        before, sale_month, after = r.projection[2], r.projection[3], r.projection[4]
+        assert (before.income, before.expenses) == (1_000.0, 5_000.0)
+        assert sale_month.month == "2026-09"
+        assert sale_month.income == pytest.approx(300_000.0)   # proceeds; rent stopped
+        assert sale_month.expenses == 5_000 - 2_000 + 500
+        assert (after.income, after.expenses) == (0.0, 3_500.0)
+        assert "Sell Condo (+$300,000\u2192taxable)" in sale_month.events
+        assert r.scenario_name == "Sell the condo"
+        assert [(x.key, x.month, x.month_index) for x in r.scenario_sales] == [("condo", "2026-09", 3)]
+
+    @pytest.mark.asyncio
+    async def test_the_sale_replaces_its_hand_made_income_event_only(self):
+        manual = _event("Condo Sale Proceeds", 250_000_00, date(2026, 9, 15))
+        assessment = _event("Condo sale-prep assessment", 3_000_00, date(2026, 8, 1), etype="expense")
+        db = _mock_db_for_runway(
+            cash_cents=50_000_00, trailing_income_cents=0, sources=[], events=[manual, assessment],
+        )
+        r = await _engine(db, sales=[CONDO_SALE]).project_runway(months=6, today=FIRST_OF_MONTH)
+        names = [n for p in r.projection for n in p.events]
+        assert "Condo Sale Proceeds" not in names          # the plan owns the sale
+        assert "Condo sale-prep assessment" in names       # real money out stays
+        assert r.projection[3].income == pytest.approx(300_000.0)  # counted once
+
+
+@pytest.mark.asyncio
+async def test_only_pinned_sales_reach_the_runway():
+    from app.engines import fire_projections
+
+    config = MagicMock()
+    config.custom_assumptions = {
+        "property_sales": [
+            {**CONDO_SALE},
+            {"key": "cabin", "sale_month": 3, "value": 100_000},   # legacy rolling offset
+        ],
+        "projection": {"re_appreciation_rate": 0.02},
+    }
+    db = AsyncMock()
+    name = MagicMock(); name.scalar_one_or_none.return_value = "Plan B"
+    db.execute.return_value = name
+    with patch.object(fire_projections.FireProjectionsEngine, "get_effective_config",
+                      AsyncMock(return_value=config)):
+        sales, appreciation, scenario = await CashflowEngine(db)._get_plan_sales()
+    assert [s["key"] for s in sales] == ["condo"]
+    assert (appreciation, scenario) == (0.02, "Plan B")

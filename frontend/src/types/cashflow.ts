@@ -42,6 +42,17 @@ export interface MonthlyProjectionPoint {
   from_day?: number | null;
 }
 
+/** A pinned property sale from the active plan, as the Runway applies it. */
+export interface ScenarioSale {
+  key: string;
+  month: string;
+  month_index: number;
+  net_proceeds: number;
+  proceeds_to: string;
+  burn_change: number;
+  income_change: number;
+}
+
 export interface RunwayResponse {
   current_cash: number;
   monthly_burn: number;
@@ -53,4 +64,6 @@ export interface RunwayResponse {
   trailing_burn: number;
   trailing_income: number;
   projection: MonthlyProjectionPoint[];
+  scenario_name?: string | null;
+  scenario_sales?: ScenarioSale[];
 }

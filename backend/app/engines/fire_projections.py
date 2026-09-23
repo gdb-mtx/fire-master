@@ -117,6 +117,59 @@ def savings_rate_component(rate: float | None) -> float:
     return max(0.0, min(100.0, rate / 30 * 100))
 
 
+def amortized_payoff(s: dict, sale_m: int) -> float:
+    """Remaining mortgage at a property_sales entry's sale month. A static
+    mortgage_balance_at_sale wins; else amortize the live balance forward from
+    current_mortgage_balance + mortgage_rate + mortgage_pi; if rate/P&I are
+    missing, fall back to the current balance as-is (conservative)."""
+    if s.get("mortgage_balance_at_sale") is not None:
+        return float(s["mortgage_balance_at_sale"])
+    bal = s.get("current_mortgage_balance")
+    if bal is None:
+        return 0.0
+    bal = float(bal)
+    rate = s.get("mortgage_rate")
+    pi = s.get("mortgage_pi")
+    if not rate or not pi:
+        return bal
+    r = rate / 12.0
+    for _ in range(max(0, int(sale_m))):
+        interest = bal * r
+        bal = max(0.0, bal - (pi - interest))
+    return bal
+
+
+def property_sale_net_proceeds(s: dict, sale_m: int, re_appreciation_rate: float) -> float:
+    """Net cash from a property_sales entry sold `sale_m` months from now: value
+    appreciated (real) to the sale month, less agent fees, capital-gains tax
+    (federal + state, over basis and any §121 exclusion) and the mortgage payoff.
+    ONE formula for every consumer — the pool engine and the Runway page."""
+    appr = s.get("appreciation_rate")
+    appr = re_appreciation_rate if appr is None else appr
+    value_at_sale = float(s.get("value", 0)) * (1 + appr) ** (sale_m / 12)
+    gross_after_fees = value_at_sale * (1 - s.get("agent_fee_pct", 0))
+    gain = max(0.0, gross_after_fees - float(s.get("cost_basis", 0))
+               - float(s.get("section_121_exclusion", 0)))
+    cap_gains_tax = gain * (s.get("ltcg_rate", 0) + s.get("state_tax_rate", 0))
+    return max(0.0, gross_after_fees - cap_gains_tax - amortized_payoff(s, sale_m))
+
+
+def sale_event_suppressed(cf, property_sales: list[dict]) -> bool:
+    """True when a property_sales entry owns this cashflow event: an INCOME event
+    whose name contains the entry's suppress_cashflow_match (the hand-made
+    "… Sale Proceeds" event the modeled sale replaces). Expense events are never
+    suppressed — a special assessment on the property being sold is real money
+    out (the same rule the single-pool engines follow)."""
+    if cf.event_type != "income":
+        return False
+    name = (cf.name or "").lower()
+    return any(
+        (s.get("suppress_cashflow_match") or "").lower() in name
+        for s in property_sales
+        if isinstance(s, dict) and s.get("suppress_cashflow_match")
+    )
+
+
 def resolve_month_offset(
     cfg: dict, date_key: str, month_key: str, today: date, default: int = 0,
 ) -> int:
@@ -1227,27 +1280,6 @@ class FireProjectionsEngine:
         # below are a LEGACY alias for author back-compat; do not use in new configs.
         legacy_re_buckets = {"miami": "primary", "park_city": "secondary", "sauvie": "income"}
 
-        def _amortized_payoff(s: dict, sale_m: int) -> float:
-            """Remaining mortgage at the sale month. A static mortgage_balance_at_sale
-            wins; else amortize the live balance forward from current_mortgage_balance
-            + mortgage_rate + mortgage_pi; if rate/P&I are missing, fall back to the
-            current balance as-is (conservative)."""
-            if s.get("mortgage_balance_at_sale") is not None:
-                return float(s["mortgage_balance_at_sale"])
-            bal = s.get("current_mortgage_balance")
-            if bal is None:
-                return 0.0
-            bal = float(bal)
-            rate = s.get("mortgage_rate")
-            pi = s.get("mortgage_pi")
-            if not rate or not pi:
-                return bal
-            r = rate / 12.0
-            for _ in range(max(0, int(sale_m))):
-                interest = bal * r
-                bal = max(0.0, bal - (pi - interest))
-            return bal
-
         # Monthly burn from config
         monthly_burn = annual_spending_cents / 12.0 / 100.0  # dollars
         primary_sold = False
@@ -1300,11 +1332,7 @@ class FireProjectionsEngine:
         cashflow_events = await self._get_cashflow_events()
 
         def _sale_suppresses(cf: CashflowEvent) -> bool:
-            return use_generic_sales and any(
-                (s.get("suppress_cashflow_match") or "")
-                and (s.get("suppress_cashflow_match") or "").lower() in cf.name.lower()
-                for s in property_sales
-            )
+            return use_generic_sales and sale_event_suppressed(cf, property_sales)
 
         # cf_by_month drives income/expense math for every month an event fires;
         # cf_labels_by_month tags label-worthy occurrences only (see helper).
@@ -1458,14 +1486,7 @@ class FireProjectionsEngine:
                     if generic_sold.get(key):
                         continue
                     generic_sold[key] = True
-                    appr = s.get("appreciation_rate")
-                    appr = re_appreciation_rate if appr is None else appr
-                    value_at_sale = float(s.get("value", 0)) * (1 + appr) ** (m / 12)
-                    gross_after_fees = value_at_sale * (1 - s.get("agent_fee_pct", 0))
-                    gain = max(0.0, gross_after_fees - float(s.get("cost_basis", 0)) - float(s.get("section_121_exclusion", 0)))
-                    cap_gains_tax = gain * (s.get("ltcg_rate", 0) + s.get("state_tax_rate", 0))
-                    payoff = _amortized_payoff(s, m)
-                    net_proceeds = max(0.0, gross_after_fees - cap_gains_tax - payoff)
+                    net_proceeds = property_sale_net_proceeds(s, m, re_appreciation_rate)
                     if s.get("proceeds_to", "taxable") == "cash":
                         income += net_proceeds
                     else:

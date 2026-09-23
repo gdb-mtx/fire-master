@@ -71,6 +71,17 @@ class MonthlyProjectionPoint(BaseModel):
     from_day: int | None = None  # month 0 only: the row covers this day → month end
 
 
+class ScenarioSale(BaseModel):
+    """A pinned property sale from the active plan, as the Runway applies it."""
+    key: str
+    month: str  # "YYYY-MM"
+    month_index: int  # row index in the projection
+    net_proceeds: float  # lands in this month (same formula as the Retirement engine)
+    proceeds_to: str  # where the Retirement engine routes it ("taxable" / "cash")
+    burn_change: float  # per month from the sale on: post-sale rent − carrying cost
+    income_change: float  # per month from the sale on: the property's rental income stops
+
+
 class RunwayResponse(BaseModel):
     current_cash: float
     monthly_burn: float  # active baseline (override or trailing)
@@ -82,3 +93,5 @@ class RunwayResponse(BaseModel):
     trailing_burn: float  # historical trailing average (for reference)
     trailing_income: float  # observed trailing average — REFERENCE ONLY, never a projection input
     projection: list[MonthlyProjectionPoint]
+    scenario_name: str | None = None  # active scenario whose pinned property sales are applied
+    scenario_sales: list[ScenarioSale] = []

@@ -20,7 +20,7 @@ import {
   useUpdateCashflowEvent,
   useFireConfig,
 } from "../api/queries";
-import { formatCurrency, fmtAxis } from "../utils/formatting";
+import { formatCurrency, fmtAxis, fmtCompact } from "../utils/formatting";
 import { TOOLTIP_STYLE } from "../utils/theme";
 import { useEventMarkers } from "../components/charts/EventMarkers";
 import type { EventMarkerGroup } from "../components/charts/EventMarkers";
@@ -577,20 +577,24 @@ export default function RunwayPage() {
   // with amount/date/probability by joining against the full event objects.
   const markerGroups = useMemo<EventMarkerGroup[]>(() => {
     const byName = new Map((events ?? []).map((e) => [e.name, e]));
+    const saleByMonth = new Map((runway?.scenario_sales ?? []).map((s) => [s.month, s]));
     return eventPoints.map((p) => ({
       x: p.month,
       y: p.cash,
       events: p.events.map((name) => {
         const ev = byName.get(name);
+        const sale = !ev && name.startsWith("Sell ") ? saleByMonth.get(p.month) : undefined;
         return {
           label: name,
-          amount: ev ? (ev.event_type === "expense" ? -ev.amount : ev.amount) : undefined,
-          date: ev?.date,
+          amount: ev
+            ? (ev.event_type === "expense" ? -ev.amount : ev.amount)
+            : sale?.net_proceeds,
+          date: ev?.date ?? sale?.month,
           probability: ev?.probability,
         };
       }),
     }));
-  }, [eventPoints, events]);
+  }, [eventPoints, events, runway]);
 
   const { markers: eventMarkers, overlay: eventOverlay, wrapperProps: chartWrapperProps } =
     useEventMarkers(markerGroups, {
@@ -786,9 +790,19 @@ export default function RunwayPage() {
         {/* Cash Flow Projection Chart */}
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-[var(--text-secondary)]">
-              Cash Balance Projection
-            </h3>
+            <div>
+              <h3 className="text-sm font-medium text-[var(--text-secondary)]">
+                Cash Balance Projection
+              </h3>
+              {!!runway.scenario_sales?.length && (
+                <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+                  Property sales from {runway.scenario_name ? `scenario "${runway.scenario_name}"` : "your plan"}:{" "}
+                  {runway.scenario_sales
+                    .map((s) => `${s.key.replace(/_/g, " ")} ${fmtMonthYear(s.month)} (+${fmtCompact(s.net_proceeds)} → ${s.proceeds_to})`)
+                    .join(" · ")}
+                </p>
+              )}
+            </div>
             {negativeWindow && (
               <div
                 className="text-[11px] px-2.5 py-1 rounded border font-mono"

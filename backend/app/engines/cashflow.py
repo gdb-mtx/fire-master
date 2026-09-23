@@ -14,7 +14,7 @@ from app.models.category_mapping import CategoryMapping
 from app.models.fire_config import FireConfig
 from app.models.income_source import IncomeSource
 from app.models.transaction import Transaction
-from app.schemas.cashflow import MonthlyProjectionPoint, RunwayResponse
+from app.schemas.cashflow import MonthlyProjectionPoint, RunwayResponse, ScenarioSale
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,31 @@ class CashflowEngine:
         )
         return list(result.scalars().all())
 
+    async def _get_plan_sales(self) -> tuple[list[dict], float, str | None]:
+        """Pinned property sales from the ACTIVE plan (scenario or base config).
+
+        Only entries with a calendar `sale_date` count — a pinned sale is a known
+        future cash event; a legacy `sale_month` is a rolling "N months from now"
+        what-if with no date to put on a cash calendar. Returns
+        (sales, real RE appreciation rate, active scenario name or None).
+        """
+        from app.engines.fire_projections import FireProjectionsEngine
+        from app.models.fire_scenario import FireScenario
+
+        config = await FireProjectionsEngine(self.db).get_effective_config()
+        ca = config.custom_assumptions or {}
+        sales = [
+            s for s in (ca.get("property_sales") or [])
+            if isinstance(s, dict) and s.get("sale_date")
+        ]
+        appreciation = (ca.get("projection") or {}).get("re_appreciation_rate", 0.01)
+        name = None
+        if sales:
+            name = (await self.db.execute(
+                select(FireScenario.name).where(FireScenario.is_active == True).limit(1)
+            )).scalar_one_or_none()
+        return sales, appreciation, name
+
     async def project_runway(
         self,
         months: int = 24,
@@ -183,8 +208,20 @@ class CashflowEngine:
         income, and only events dated today or later (build_cashflow_schedule —
         the same schedule the Retirement engines use). A full month here
         double-counted the part of the month already spent.
+
+        PROPERTY SALES come from the active plan (scenario or base config): each
+        pinned property_sales entry lands its net proceeds in its month (the
+        same formula as the Retirement engine) and, from then on, removes its
+        carrying cost from the burn, adds any post-sale rent, and stops its
+        rental income. A hand-made "… Sale Proceeds" income event the entry
+        names in suppress_cashflow_match is dropped — the plan owns that sale.
         """
-        from app.engines.fire_projections import build_cashflow_schedule
+        from app.engines.fire_projections import (
+            build_cashflow_schedule,
+            property_sale_net_proceeds,
+            resolve_month_offset,
+            sale_event_suppressed,
+        )
 
         today = today or date.today()
         current_cash = await self.get_current_cash()
@@ -201,7 +238,26 @@ class CashflowEngine:
         remaining_days = days_in_month - today.day + 1  # today counts: it may not have cleared
         month0_fraction = remaining_days / days_in_month
 
-        by_month, labels_by_month = build_cashflow_schedule(events, today, months)
+        plan_sales, re_appreciation, scenario_name = await self._get_plan_sales()
+        by_month, labels_by_month = build_cashflow_schedule(
+            events, today, months,
+            skip=(lambda cf: sale_event_suppressed(cf, plan_sales)) if plan_sales else None,
+        )
+        sales: list[ScenarioSale] = []
+        for sale in plan_sales:
+            m = resolve_month_offset(sale, "sale_date", "sale_month", today)
+            if m >= months:
+                continue
+            sales.append(ScenarioSale(
+                key=str(sale.get("key", "property")),
+                month=(start_month + relativedelta(months=m)).strftime("%Y-%m"),
+                month_index=m,
+                net_proceeds=round(property_sale_net_proceeds(sale, m, re_appreciation), 2),
+                proceeds_to=str(sale.get("proceeds_to", "taxable")),
+                burn_change=round(float(sale.get("post_sale_rent", 0) or 0)
+                                  - float(sale.get("monthly_cost", 0) or 0), 2),
+                income_change=-round(float(sale.get("monthly_income", 0) or 0), 2),
+            ))
 
         projection: list[MonthlyProjectionPoint] = []
         cash = current_cash
@@ -226,6 +282,14 @@ class CashflowEngine:
                     sources, effective_date, retirement_date,
                     years_from_start=i / 12.0, inflation_pct=inflation,
                 ))
+            # Sold properties: carrying cost off the burn (post-sale rent on),
+            # their rental income stops — from the sale month on.
+            for sale in sales:
+                if i >= sale.month_index:
+                    month_expenses += sale.burn_change
+                    month_income += sale.income_change
+            month_expenses = max(0.0, month_expenses)
+            month_income = max(0.0, month_income)
             if i == 0:
                 month_expenses *= month0_fraction
                 month_income *= month0_fraction
@@ -237,6 +301,13 @@ class CashflowEngine:
                 else:
                     month_expenses += abs(amount)
             event_names = list(labels_by_month.get(i, []))
+            for sale in sales:
+                if i == sale.month_index:
+                    month_income += sale.net_proceeds
+                    event_names.append(
+                        f"Sell {sale.key.replace('_', ' ').title()} "
+                        f"(+${sale.net_proceeds:,.0f}\u2192{sale.proceeds_to})"
+                    )
 
             net = month_income - month_expenses
             cash = starting_cash + net
@@ -286,4 +357,6 @@ class CashflowEngine:
             trailing_burn=round(trailing_burn, 2),
             trailing_income=round(trailing_income, 2),
             projection=projection,
+            scenario_name=scenario_name,
+            scenario_sales=sales,
         )
