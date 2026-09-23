@@ -1831,6 +1831,18 @@ class FireProjectionsEngine:
             if amt < 0:
                 monthly_burn += -amt
 
+        # Same month-0 outflow as project_wealth_pools: pre-Medicare healthcare,
+        # and the carrying cost of held properties that sit OUTSIDE the budget
+        # (property_sales in_base_burn: false). Without them this card disagreed
+        # with the engine's own chart by exactly those lines.
+        ca = config.custom_assumptions or {}
+        if config.healthcare_monthly_cost and self._compute_age(config, today) < (config.medicare_start_age or 65):
+            monthly_burn += _cents_to_dollars(config.healthcare_monthly_cost)
+        property_sales = [s for s in (ca.get("property_sales") or []) if isinstance(s, dict)]
+        for sale in property_sales:
+            if not sale.get("in_base_burn", True) and resolve_month_offset(sale, "sale_date", "sale_month", today) > 0:
+                monthly_burn += float(sale.get("monthly_cost", 0) or 0)
+
         # SEPP/RRSP from config (inactive unless configured)
         sepp_cfg = (config.custom_assumptions or {}).get("sepp", {})
         rrsp_cfg = (config.custom_assumptions or {}).get("rrsp", {})
@@ -1844,6 +1856,17 @@ class FireProjectionsEngine:
         miami_monthly_cost = miami_cfg.get("monthly_cost", 0)
         miami_post_rent = miami_cfg.get("post_sale_rent", 0)
         miami_rental_lost = miami_cfg.get("rental_income_lost", 0)
+        # Generic path: the primary property's own property_sales entry.
+        primary_sale = next(
+            (s for s in property_sales
+             if s.get("re_bucket") in ("primary", "miami")),  # "miami" = legacy alias
+            None,
+        )
+        if primary_sale is not None:
+            miami_monthly_cost = float(primary_sale.get("monthly_cost", 0) or 0)
+            miami_post_rent = float(primary_sale.get("post_sale_rent", 0) or 0)
+            occ = (ca.get("rental_occupancy_rate", 1.0) if primary_sale.get("occupancy_adjusted") else 1.0)
+            miami_rental_lost = float(primary_sale.get("monthly_income", 0) or 0) * occ
 
         # Income streams — split ongoing vs temporary
         streams: list[IncomeStream] = []

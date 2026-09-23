@@ -839,11 +839,29 @@ export default function RetirementPage() {
 
         {/* Stat Cards — 5 columns with Cash Runway */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+          {/* Cash Runway = the projection's own cash-zero month (the Bridge chart
+              below, and the Runway page's method): dated events, sales and pool
+              draws included. The old flat "cash ÷ today's deficit" ignored every
+              one of them and disagreed with both. */}
           <StatCard
             label="Cash Runway"
-            value={bridge?.cash_runway_months != null ? `${bridge.cash_runway_months}mo` : "—"}
-            color={(bridge?.cash_runway_months ?? 0) > 12 ? "var(--green)" : (bridge?.cash_runway_months ?? 0) > 6 ? "var(--yellow)" : "var(--red)"}
-            sub={bridge ? `${fmtCompact(bridge.monthly_deficit)}/mo deficit` : undefined}
+            value={
+              !bridgeProjection
+                ? "—"
+                : bridgeProjection.cash_zero_month == null
+                  ? "Never"
+                  : `${bridgeProjection.cash_zero_month}mo`
+            }
+            color={
+              bridgeProjection?.cash_zero_month == null
+                ? "var(--green)"
+                : bridgeProjection.cash_zero_month > 12
+                  ? "var(--green)"
+                  : bridgeProjection.cash_zero_month > 6
+                    ? "var(--yellow)"
+                    : "var(--red)"
+            }
+            sub={bridge ? `projected · gap now ${fmtCompact(bridge.monthly_deficit)}/mo` : undefined}
           />
           <StatCard
             label="FIRE Number"
@@ -1151,7 +1169,12 @@ export default function RetirementPage() {
                   </span>
                 </div>
                 <div className="flex items-center justify-between pt-1.5 border-t border-[var(--border)]">
-                  <span className="text-[11px] font-bold text-[var(--text-primary)]">Monthly gap</span>
+                  <span className="text-[11px] font-bold text-[var(--text-primary)]">
+                    Monthly gap
+                    {bridge.income_streams.some((st) => st.label.endsWith("(temp)")) && (
+                      <span className="font-normal text-[var(--text-secondary)]"> (excl. temp income)</span>
+                    )}
+                  </span>
                   <span className="text-[11px] font-mono font-bold" style={{ color: bridge.monthly_deficit > 0 ? "var(--red)" : "var(--green)" }}>
                     {bridge.monthly_deficit > 0 ? "-" : "+"}${Math.abs(bridge.monthly_deficit).toLocaleString()}
                   </span>

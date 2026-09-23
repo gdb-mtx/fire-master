@@ -243,13 +243,16 @@ class TestLifetimeEvents:
 
 class TestBridgeEvents:
     @staticmethod
-    async def _bridge(events, sources=()):
+    async def _bridge(events, sources=(), **cfg_overrides):
         db = AsyncMock()
         upcoming = MagicMock()
         upcoming.scalars.return_value.all.return_value = []
         db.execute = AsyncMock(return_value=upcoming)
         engine = FireProjectionsEngine(db)
-        cfg = _make_fire_config(target_annual_spending=12_000_000)  # $10K/mo burn
+        # $10K/mo burn; healthcare off here so these tests isolate EVENT handling
+        # (TestBridgeBurnMatchesEngine covers healthcare + property carrying costs).
+        cfg = _make_fire_config(**{"target_annual_spending": 12_000_000,
+                                   "healthcare_monthly_cost": None, **cfg_overrides})
         bd = NetWorthBreakdown(liquid=60_000, retirement=0, real_estate_equity=0,
                                illiquid_private=0, other=0)  # $60K cash (dollars)
         with ExitStack() as stack:
@@ -288,6 +291,36 @@ class TestBridgeEvents:
         assert labels == {"Consulting (temp)": 3_000, "Dividends": 3_000}
         # Runway ignores temp income: (12K − 3K ongoing) = 9K deficit
         assert r.monthly_deficit == 9_000
+
+
+class TestBridgeBurnMatchesEngine:
+    """The Monthly Cash Flow card uses the pool engine's month-0 outflow."""
+
+    async def test_healthcare_and_off_budget_carry_are_in_the_burn(self, frozen_today):
+        r = await TestBridgeEvents._bridge(
+            [], healthcare_monthly_cost=60_000,  # $600/mo, pre-Medicare
+            custom_assumptions={"property_sales": [
+                {"key": "cabin", "re_bucket": "secondary", "sale_date": "2027-06",
+                 "monthly_cost": 2_000, "in_base_burn": False},
+                {"key": "condo", "re_bucket": "primary", "sale_date": "2027-01",
+                 "monthly_cost": 5_000, "in_base_burn": True, "post_sale_rent": 2_000,
+                 "monthly_income": 500},
+            ]},
+        )
+        assert r.monthly_burn == 10_000 + 600 + 2_000   # condo's cost is inside the $10K
+        assert r.monthly_deficit == 12_600
+        assert r.cash_runway_months == 4               # $60K / $12.6K
+        # After the primary property sells: its cost out, rent in, its rental stops.
+        assert r.post_sale_burn == 12_600 - 5_000 + 2_000
+
+    async def test_sold_off_budget_property_no_longer_adds(self, frozen_today):
+        r = await TestBridgeEvents._bridge(
+            [], custom_assumptions={"property_sales": [
+                {"key": "cabin", "re_bucket": "secondary", "sale_date": "2026-01",
+                 "monthly_cost": 2_000, "in_base_burn": False},
+            ]},
+        )
+        assert r.monthly_burn == 10_000  # pinned sale month already past → sold
 
 
 # ---------------------------------------------------------------------------
