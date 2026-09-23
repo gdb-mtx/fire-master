@@ -11,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.cashflow_event import CashflowEvent
 from app.models.category_mapping import CategoryMapping
 from app.models.transaction import Transaction
+from app.engines.event_matching import (
+    DATE_WINDOW_DAYS,
+    Candidate,
+    expense_occurrences,
+    match_occurrences,
+)
 from app.schemas.spending import (
     PlannedExclusion,
     CategoryBreakdownItem,
@@ -473,100 +479,63 @@ class SpendingEngine:
             Transaction.property_id.is_(None),
         )
 
-    # Match tolerances for the planned-event → transaction matcher.
-    # Tighter than the original ±30% / unbounded date because the loose
-    # version was matching unrelated transactions (e.g. car payment matched
-    # against Child Support on amount alone).
-    PLANNED_AMOUNT_TOLERANCE = 0.10   # ±10%
-    PLANNED_DATE_WINDOW_DAYS = 7      # ±7 days from the event date
+    async def _get_planned_exclusions(self) -> tuple[set, list[PlannedExclusion]]:
+        """Transactions that paid a planned expense event, over the WHOLE tracker window.
 
-    async def _get_planned_exclusions(
-        self,
-        start: date,
-        end: date,
-    ) -> tuple[set, list[PlannedExclusion]]:
-        """Match cashflow expense events to transactions by amount/date proximity.
+        Returns (transaction ids to exclude, exclusion metadata). Matching (shared
+        with the Runway burn, engines/event_matching.py): every expense-event
+        occurrence up to today — recurring events expand to each occurrence —
+        takes the closest-amount transaction within ±10% and ±7 days.
 
-        Returns (set of transaction IDs to exclude, list of exclusion metadata).
-
-        Matching rules:
-          - Event must have already occurred (date <= today). Future events
-            cannot have a real transaction yet, so we skip them rather than
-            risk matching a coincidentally similar past transaction.
-          - Candidate transaction date within ±PLANNED_DATE_WINDOW_DAYS of
-            the event date (clamped to the tracker window).
-          - Candidate amount within ±PLANNED_AMOUNT_TOLERANCE of event amount.
-          - Closest amount wins.
+        Always matched once over the full window and then applied to whatever
+        range a view shows. Matching inside a single month (the old per-view
+        behavior) let an event just past the month's edge grab the nearest
+        wrong transaction inside it: an Aug 3 event claimed a Jul 27 payment in
+        the July view while correctly claiming its Aug 3 payment in August.
+        Events in Housing/Taxes/Transfers are skipped — the tracker never
+        shows those categories, so they could only match a wrong row.
         """
         today = date.today()
+        window_start = self.TRACKER_START.replace(day=1)
 
-        events_q = (
-            select(CashflowEvent)
-            .where(
+        events = (await self.db.execute(
+            select(CashflowEvent).where(
                 CashflowEvent.event_type == "expense",
-                # Only events whose date is on/before today AND within
-                # tracker window ± date proximity.
-                CashflowEvent.date >= start - timedelta(days=self.PLANNED_DATE_WINDOW_DAYS),
-                CashflowEvent.date <= today,
                 CashflowEvent.status.notin_(["cancelled"]),
             )
+        )).scalars().all()
+        events = [e for e in events if e.category not in self.TRACKER_EXCLUDED_EVENT_CATEGORIES]
+        occurrences = expense_occurrences(
+            events, window_start - timedelta(days=DATE_WINDOW_DAYS), today,
         )
-        events_result = await self.db.execute(events_q)
-        events = events_result.scalars().all()
-
-        # Filter out events whose category matches excluded parents
-        events = [
-            e for e in events
-            if e.category not in self.TRACKER_EXCLUDED_EVENT_CATEGORIES
-        ]
-
-        if not events:
+        if not occurrences:
             return set(), []
 
-        exclude_ids: set = set()
-        exclusions: list[PlannedExclusion] = []
-
-        tol = self.PLANNED_AMOUNT_TOLERANCE
-        window = timedelta(days=self.PLANNED_DATE_WINDOW_DAYS)
-
-        for event in events:
-            event_amount_cents = abs(event.amount_cents)
-            low = event_amount_cents * (1 - tol)
-            high = event_amount_cents * (1 + tol)
-
-            # Date proximity bound to the event itself, then clamped to
-            # the tracker window so we never reach outside [start, end].
-            date_low = max(event.date - window, start)
-            date_high = min(event.date + window, end)
-
-            candidate_q = (
-                select(Transaction.id, Transaction.date, Transaction.amount, Transaction.merchant)
-                .join(CategoryMapping, Transaction.category == CategoryMapping.raw_category)
-                .where(
-                    self._tracker_base_query(),
-                    Transaction.date >= date_low,
-                    Transaction.date <= date_high,
-                    (-Transaction.amount).between(int(low), int(high)),
-                    Transaction.id.notin_(exclude_ids) if exclude_ids else True,
-                )
-                .order_by(func.abs(-Transaction.amount - event_amount_cents))
-                .limit(1)
+        rows = (await self.db.execute(
+            select(Transaction.id, Transaction.date, Transaction.amount, Transaction.merchant)
+            .join(CategoryMapping, Transaction.category == CategoryMapping.raw_category)
+            .where(
+                self._tracker_base_query(),
+                Transaction.date >= window_start,
+                Transaction.date <= today,
+                Transaction.amount < 0,
             )
-            result = await self.db.execute(candidate_q)
-            match = result.first()
+        )).all()
+        candidates = [Candidate(r.id, r.date, -int(r.amount), r.merchant) for r in rows]
 
-            if match:
-                exclude_ids.add(match.id)
-                exclusions.append(PlannedExclusion(
-                    event_name=event.name,
-                    event_amount=float(event.amount_cents) / 100,
-                    matched_transaction_id=str(match.id),
-                    matched_amount=float(-match.amount) / 100,
-                    matched_merchant=match.merchant,
-                    matched_date=match.date.isoformat(),
-                ))
-
-        return exclude_ids, exclusions
+        matches = match_occurrences(occurrences, candidates)
+        exclusions = [
+            PlannedExclusion(
+                event_name=m.event_name,
+                event_amount=m.event_amount_cents / 100,
+                matched_transaction_id=str(m.txn.id),
+                matched_amount=m.txn.amount_cents / 100,
+                matched_merchant=m.txn.merchant,
+                matched_date=m.txn.date.isoformat(),
+            )
+            for m in matches
+        ]
+        return {m.txn.id for m in matches}, exclusions
 
     async def get_tracker_summary(
         self,
@@ -586,10 +555,7 @@ class SpendingEngine:
         exclude_ids: set = set()
         exclusions: list[PlannedExclusion] = []
         if exclude_planned:
-            excl_start = self.TRACKER_START.replace(day=1)
-            exclude_ids, exclusions = await self._get_planned_exclusions(
-                excl_start, today,
-            )
+            exclude_ids, exclusions = await self._get_planned_exclusions()
 
         def _excl_filter():
             """Transaction ID exclusion filter."""
@@ -782,9 +748,7 @@ class SpendingEngine:
         # Planned exclusions
         exclude_ids: set = set()
         if exclude_planned:
-            exclude_ids, _ = await self._get_planned_exclusions(
-                month_start, effective_end,
-            )
+            exclude_ids, _ = await self._get_planned_exclusions()
 
         excl_filter = Transaction.id.notin_(exclude_ids) if exclude_ids else True
 
@@ -854,7 +818,7 @@ class SpendingEngine:
 
         exclude_ids: set = set()
         if exclude_planned:
-            exclude_ids, _ = await self._get_planned_exclusions(start, end)
+            exclude_ids, _ = await self._get_planned_exclusions()
 
         filters = [
             self._tracker_base_query(),
@@ -922,7 +886,7 @@ class SpendingEngine:
         # Planned exclusions
         exclude_ids: set = set()
         if exclude_planned:
-            exclude_ids, _ = await self._get_planned_exclusions(start, end)
+            exclude_ids, _ = await self._get_planned_exclusions()
 
         base = self._tracker_base_query()
         filters = [base, Transaction.date >= start, Transaction.date <= end]

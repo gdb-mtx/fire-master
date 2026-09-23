@@ -31,6 +31,8 @@ from app.models.fire_scenario import FireScenario
 from app.models.goal import Goal
 from app.models.income_source import IncomeSource
 from app.models.net_worth_snapshot import NetWorthSnapshot
+from app.engines.event_calendar import RECURRENCE_STEP_MONTHS as _RECURRENCE_STEP_MONTHS
+from app.engines.event_calendar import event_occurrence_dates
 from app.engines.net_worth import NetWorthEngine
 from app.engines.tax_engine import _get_rmd_divisor
 from app.engines.spending import SpendingEngine
@@ -113,9 +115,6 @@ def savings_rate_component(rate: float | None) -> float:
     if rate is None:
         return 0.0
     return max(0.0, min(100.0, rate / 30 * 100))
-
-
-_RECURRENCE_STEP_MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 
 
 def build_cashflow_schedule(

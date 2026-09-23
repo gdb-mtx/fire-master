@@ -23,6 +23,8 @@ import {
 } from "recharts";
 import { formatCurrency as fmt, fmtCompact } from "../utils/formatting";
 import { CHART_COLORS, TOOLTIP_STYLE } from "../utils/theme";
+import { parseLocalDate } from "../utils/dates";
+import type { PlannedExclusion } from "../types/spending";
 
 const MONTHLY_TARGET = 5000;
 
@@ -36,6 +38,43 @@ function statusLabel(status: string): string {
   if (status === "under_pace") return "Under budget";
   if (status === "on_pace") return "On track";
   return "Over pace";
+}
+
+/** Exclusions whose matched payment falls in the given "YYYY-MM" month. */
+function exclusionsIn(all: PlannedExclusion[], month: string): PlannedExclusion[] {
+  return all.filter((ex) => ex.matched_date.startsWith(month));
+}
+
+/**
+ * What "Adjusted" removed: payments matched to planned expense events
+ * (amount ±10%, date ±7 days), so one-offs budgeted as events don't count as
+ * lifestyle spending. Matching runs once over the whole tracker window.
+ */
+function ExclusionList({ items, when }: { items: PlannedExclusion[]; when: string }) {
+  if (items.length === 0) {
+    return (
+      <div className="mt-3 text-[11px] text-[var(--text-secondary)]">
+        Adjusted: no planned-event payments excluded {when}.
+      </div>
+    );
+  }
+  return (
+    <div className="mt-3 px-3 py-2 rounded-md bg-[rgba(0,212,170,0.06)] border border-[rgba(0,212,170,0.15)]">
+      <div className="text-[11px] text-[var(--green)] font-medium mb-1">
+        Excluding {items.length} planned-event payment{items.length > 1 ? "s" : ""} {when}:
+      </div>
+      {items.map((ex) => (
+        <div key={ex.matched_transaction_id} className="text-[11px] text-[var(--text-secondary)] flex items-center gap-2">
+          <span className="text-[var(--text-primary)]">{ex.event_name}</span>
+          <span className="font-mono">{fmt(ex.matched_amount)}</span>
+          <span className="opacity-60">
+            {ex.matched_merchant && `(${ex.matched_merchant})`}{" "}
+            {parseLocalDate(ex.matched_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export default function SpendingTrackerPage() {
@@ -201,22 +240,12 @@ export default function SpendingTrackerPage() {
             <span>{fmt(tracker.monthly_target / 2)}</span>
             <span>{fmt(tracker.monthly_target)}</span>
           </div>
-          {/* Exclusion info */}
-          {tracker.exclude_planned && tracker.planned_exclusions.length > 0 && (
-            <div className="mt-3 px-3 py-2 rounded-md bg-[rgba(0,212,170,0.06)] border border-[rgba(0,212,170,0.15)]">
-              <div className="text-[11px] text-[var(--green)] font-medium mb-1">
-                Excluding {tracker.planned_exclusions.length} planned event{tracker.planned_exclusions.length > 1 ? "s" : ""}:
-              </div>
-              {tracker.planned_exclusions.map((ex, i) => (
-                <div key={i} className="text-[11px] text-[var(--text-secondary)] flex items-center gap-2">
-                  <span className="text-[var(--text-primary)]">{ex.event_name}</span>
-                  <span className="font-mono">{fmt(ex.matched_amount)}</span>
-                  <span className="opacity-60">
-                    {ex.matched_merchant && `(${ex.matched_merchant})`} {ex.matched_date && new Date(ex.matched_date + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                  </span>
-                </div>
-              ))}
-            </div>
+          {/* Exclusion info — the hero is the current month */}
+          {tracker.exclude_planned && (
+            <ExclusionList
+              items={exclusionsIn(tracker.planned_exclusions, tracker.current_month)}
+              when="this month"
+            />
           )}
         </div>
 
@@ -301,6 +330,16 @@ export default function SpendingTrackerPage() {
               </div>
             )}
           </div>
+
+          {/* A past month is selected: show what Adjusted removed from IT */}
+          {tracker.exclude_planned && selectedMonth && (
+            <div className="mb-3">
+              <ExclusionList
+                items={exclusionsIn(tracker.planned_exclusions, selectedMonth)}
+                when={`in ${parseLocalDate(selectedMonth).toLocaleDateString("en-US", { month: "long" })}`}
+              />
+            </div>
+          )}
 
           {dailyChartData.length > 0 ? (
             <ResponsiveContainer width="100%" height={280}>
