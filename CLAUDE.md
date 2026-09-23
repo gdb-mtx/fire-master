@@ -6,6 +6,8 @@ Read docs/PROPERTY_MODULE.md before touching property classification.
 
 If a `CLAUDE.local.md` exists here, read it too — it carries the owner's machine-/data-specific notes and is never committed.
 
+**Just updated this checkout?** Read the newest section of docs/UPGRADING.md and run `scripts/upgrade_check.py` with the user before relying on projections — it lists what the update changed in their data (pinned plan dates, sale events, Runway defaults) and which items need their decision.
+
 ## Module map
 
 | Module | Entry point |

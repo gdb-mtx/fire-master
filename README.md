@@ -76,7 +76,7 @@ persona is already loaded**, so every page (Dashboard, Retirement, Runway, Confi
 first launch.
 
 > **First run pulls prebuilt multi-arch images from GHCR (~30–60s)**; subsequent `docker compose up` is faster still.
-> (No prebuilt image yet, or offline? `docker compose up --build` builds locally instead.) To update later: `docker compose pull && docker compose up -d`.
+> (No prebuilt image yet, or offline? `docker compose up --build` builds locally instead.) To update later: `docker compose pull && docker compose up -d`, then read [docs/UPGRADING.md](docs/UPGRADING.md) and run the upgrade check it describes.
 > Every published port is bound to `127.0.0.1`. Nothing — not Postgres, not Redis, not the API
 > or the UI — answers to other machines on your network. Leave that as it is, and never put
 > this stack straight on the internet.
