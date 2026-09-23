@@ -563,7 +563,7 @@ function SpendingSensitivityCard({
           {onTop.length > 0 && (
             <>
               <div className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mt-3 mb-2">
-                On top of the budget until sold
+                On top of the budget{onTop.every((l) => l.held) ? "" : " until sold"}
               </div>
               <div className="space-y-1.5 text-xs">
                 {onTop.map((l) => (
@@ -578,8 +578,14 @@ function SpendingSensitivityCard({
           <div className="mt-3 text-[10px] text-[var(--text-secondary)] opacity-60 leading-relaxed">
             {lines.map((l) => (
               <span key={l.label}>
-                After {l.label} sells: −${l.monthly_cost.toLocaleString()}
-                {l.post_sale_rent > 0 && ` +$${l.post_sale_rent.toLocaleString()} rent`}.{" "}
+                {l.held ? (
+                  <>{l.label}: held (no sale planned).{" "}</>
+                ) : (
+                  <>
+                    After {l.label} sells: −${l.monthly_cost.toLocaleString()}
+                    {l.post_sale_rent > 0 && ` +$${l.post_sale_rent.toLocaleString()} rent`}.{" "}
+                  </>
+                )}
               </span>
             ))}
             Healthcare ${healthcare.toLocaleString()}/mo added pre-65, drops at Medicare.

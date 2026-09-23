@@ -67,6 +67,25 @@ def resolve_month_offset(
     return int(val) if val is not None else default
 
 
+def is_held(sale: dict) -> bool:
+    """A property_sales entry with no sale date is a property KEPT for good."""
+    return not sale.get("sale_date") and sale.get("sale_month") is None
+
+
+def sale_offset(sale: dict, today: date) -> int | None:
+    """Months until a property_sales entry sells, or None when it is HELD.
+
+    Held = neither sale_date nor sale_month. The property never converts to cash;
+    its carrying cost keeps applying (added on top of the budget while
+    in_base_burn is false) and its rental income keeps flowing. This is how a
+    plan says "keep it and keep paying for it" — before, an entry without a date
+    resolved to month 0 and sold immediately.
+    """
+    if is_held(sale):
+        return None
+    return resolve_month_offset(sale, "sale_date", "sale_month", today, default=None)
+
+
 def _pin(container: dict, rel: str, pinned: str, today: date, as_patch: bool) -> None:
     if rel not in container:
         return

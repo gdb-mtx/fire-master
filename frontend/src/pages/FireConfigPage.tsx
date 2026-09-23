@@ -692,8 +692,9 @@ function ActiveScenarioDetails({ scenario }: { scenario: FireScenario }) {
               <Row label="IRA-B growth rate" value={`${((sepp?.ira_growth_rate ?? 0.06) as number) * 100}%`} />
               <Row label="RRIF monthly (net)" value={`$${fmt(rrsp?.monthly_net ?? 0)}/mo`} />
               <Row label="RRIF total available" value={fmtK(rrsp?.total_available ?? 0)} />
-              <Row label="SEPP starts" value={planMonth(sepp?.start_date, sepp?.sepp_start_month).label} />
-              <Row label="RRIF starts" value={planMonth(rrsp?.start_date, rrsp?.start_month).label} />
+              {/* engine default for an unset draw start is month 0 (now) */}
+              <Row label="SEPP starts" value={planMonth(sepp?.start_date, sepp?.sepp_start_month ?? 0).label} />
+              <Row label="RRIF starts" value={planMonth(rrsp?.start_date, rrsp?.start_month ?? 0).label} />
               {occ != null && <Row label="Rental occupancy" value={`${occ * 100}%`} />}
             </div>
             <p className="text-[10px] text-[var(--text-secondary)] mt-2 italic">Source: scenario override custom_assumptions.sepp + rrsp</p>
@@ -801,6 +802,7 @@ function ExpenseBreakdown({
       { label: "Before sales", detail: "base budget + held carrying costs", total: inBurn + heldExtra + healthcareMo },
     ];
     for (const s of sorted) {
+      if (!Number.isFinite(when(s).offset)) continue; // held: no sale, its cost stays
       const cost = Number(s.monthly_cost ?? 0);
       if (s.in_base_burn === false) {
         heldExtra -= cost;

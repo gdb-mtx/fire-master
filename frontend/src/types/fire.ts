@@ -128,6 +128,8 @@ export interface PropertyCostLine {
   /** true: inside target spending (removed at sale); false: added on top while held */
   in_budget: boolean;
   post_sale_rent: number;
+  /** no sale date: kept for good, its carrying cost never ends */
+  held?: boolean;
 }
 
 export interface SpendingBreakdown {

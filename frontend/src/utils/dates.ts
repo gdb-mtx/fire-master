@@ -55,7 +55,11 @@ export function planMonth(pinned: unknown, offset: unknown): { offset: number; l
     const n = monthsFromNow(pinned);
     return { offset: n, label: `${fmtMonthYear(pinned)} (in ${n} mo)` };
   }
-  const n = Number(offset ?? 0);
+  if (offset == null) {
+    // No date at all: for a property sale this means HELD (kept, never sold).
+    return { offset: Number.POSITIVE_INFINITY, label: "Held (no sale)" };
+  }
+  const n = Number(offset);
   return { offset: n, label: `Month ${n} from now` };
 }
 

@@ -277,6 +277,7 @@ class PropertyCostLine(BaseModel):
     mortgage_pi: float = 0
     in_budget: bool  # True: inside target spending, removed at sale. False: added ON TOP while held.
     post_sale_rent: float = 0
+    held: bool = False  # no sale date: kept for good, carrying cost never ends
 
 
 class SpendingBreakdown(BaseModel):

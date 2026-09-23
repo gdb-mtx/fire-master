@@ -10,7 +10,7 @@ from app.core.database import get_db
 from app.core.merge import json_merge_patch
 from app.engines.fire_projections import FireProjectionsEngine
 from app.engines.net_worth import NetWorthEngine
-from app.engines.plan_months import pin_plan_months
+from app.engines.plan_months import is_held, pin_plan_months
 from app.engines.spending import SpendingEngine
 from app.models.fire_config import FireConfig
 from app.models.fire_config_history import FireConfigHistory
@@ -376,6 +376,7 @@ def spending_breakdown(ca: dict, base_monthly: float) -> SpendingBreakdown:
                 mortgage_pi=float(sale.get("mortgage_pi", 0) or 0),
                 in_budget=in_budget,
                 post_sale_rent=float(sale.get("post_sale_rent", 0) or 0),
+                held=is_held(sale),
             ))
             if in_budget and bucket in in_budget_by_bucket:
                 in_budget_by_bucket[bucket] += cost

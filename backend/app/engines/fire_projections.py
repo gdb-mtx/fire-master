@@ -33,7 +33,7 @@ from app.models.income_source import IncomeSource
 from app.models.net_worth_snapshot import NetWorthSnapshot
 from app.engines.event_calendar import RECURRENCE_STEP_MONTHS as _RECURRENCE_STEP_MONTHS
 from app.engines.event_calendar import event_occurrence_dates
-from app.engines.plan_months import resolve_month_offset
+from app.engines.plan_months import is_held, resolve_month_offset, sale_offset
 from app.engines.net_worth import NetWorthEngine
 from app.engines.tax_engine import _get_rmd_divisor
 from app.engines.spending import SpendingEngine
@@ -167,7 +167,8 @@ def sale_event_suppressed(cf, property_sales: list[dict]) -> bool:
     return any(
         (s.get("suppress_cashflow_match") or "").lower() in name
         for s in property_sales
-        if isinstance(s, dict) and s.get("suppress_cashflow_match")
+        # a HELD property sells nothing, so it replaces no sale event
+        if isinstance(s, dict) and s.get("suppress_cashflow_match") and not is_held(s)
     )
 
 
@@ -517,7 +518,8 @@ class FireProjectionsEngine:
             tokens.append(sell_match)
         tokens.extend(t for t in (proj_cfg.get("illiquid_vest_event_match", ["vest"]) or []) if t)
         for sale in ca.get("property_sales", []) or []:
-            t = sale.get("suppress_cashflow_match") if isinstance(sale, dict) else None
+            t = (sale.get("suppress_cashflow_match")
+                 if isinstance(sale, dict) and not is_held(sale) else None)
             if t:
                 tokens.append(t)
         lowered = [t.lower() for t in tokens]
@@ -1249,10 +1251,10 @@ class FireProjectionsEngine:
         sales_by_month: dict[int, list[dict]] = {}
         generic_sold: dict[str, bool] = {}
         for _s in property_sales:
-            sales_by_month.setdefault(
-                resolve_month_offset(_s, "sale_date", "sale_month", today), []
-            ).append(_s)
             generic_sold[_s.get("key", "")] = False
+            _m = sale_offset(_s, today)
+            if _m is not None:  # None = HELD: never sold, carry/rent continue
+                sales_by_month.setdefault(_m, []).append(_s)
         # re_bucket tokens: primary | secondary | income. The property-name tokens
         # below are a LEGACY alias for author back-compat; do not use in new configs.
         legacy_re_buckets = {"miami": "primary", "park_city": "secondary", "sauvie": "income"}
@@ -1730,7 +1732,9 @@ class FireProjectionsEngine:
         chart_events = []
         if use_generic_sales:
             for s in property_sales:
-                sm = resolve_month_offset(s, "sale_date", "sale_month", today)
+                sm = sale_offset(s, today)
+                if sm is None:
+                    continue  # held — no sale to mark
                 chart_events.append(
                     {"month": sm, "age": round(current_age + sm / 12, 1),
                      "label": f"Sell {s.get('key', '').replace('_', ' ').title()}", "color": "#ff4d6a"},
@@ -1817,7 +1821,8 @@ class FireProjectionsEngine:
             monthly_burn += _cents_to_dollars(config.healthcare_monthly_cost)
         property_sales = [s for s in (ca.get("property_sales") or []) if isinstance(s, dict)]
         for sale in property_sales:
-            if not sale.get("in_base_burn", True) and resolve_month_offset(sale, "sale_date", "sale_month", today) > 0:
+            _m = sale_offset(sale, today)
+            if not sale.get("in_base_burn", True) and (_m is None or _m > 0):  # held, or not yet sold
                 monthly_burn += float(sale.get("monthly_cost", 0) or 0)
 
         # SEPP/RRSP from config (inactive unless configured)
