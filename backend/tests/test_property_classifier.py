@@ -208,3 +208,46 @@ def test_positive_and_unrelated_categories_unchanged():
     assert tag_category(-64_900, "Home Services") == "Other"
     assert tag_category(-10_000, "Home Repair") == "Repairs / Maintenance"
     assert tag_category(-5_000, None) == "Other"
+
+
+# --- Tags on liability accounts --------------------------------------------------------
+
+
+def test_tagged_loan_principal_is_not_rental_income():
+    # The lender-side mirror of a mortgage payment: a positive principal line on the
+    # loan account, tagged with the property. The payment itself already books as the
+    # property's Mortgage expense from checking — the tag must not add it as income.
+    unmatched = Classification(None, None, False)
+    assert resolve_with_tag(unmatched, COASTAL, 39_900, "Loan Repayment", is_loan=True) == (
+        None, None, None,
+    )
+
+
+def test_loan_guard_keeps_a_matching_rule():
+    # Ignoring the tag must not also drop a rule classification on the same row.
+    coastal_rule = Classification(COASTAL, "Mortgage", True)
+    assert resolve_with_tag(coastal_rule, RIVER, -150_000, "Mortgage", is_loan=True) == (
+        COASTAL, "Mortgage", "rule",
+    )
+
+
+def test_tagged_card_refund_is_a_contra_expense():
+    unmatched = Classification(None, None, False)
+    # A refunded repair charge on a card: reverses the repair expense, never income.
+    assert resolve_with_tag(unmatched, RIVER, 12_000, "Home Repair", is_credit_card=True) == (
+        RIVER, "Repairs / Maintenance", "monarch_tag",
+    )
+    # Unknown category falls back to Other (still an expense line, not income).
+    assert tag_category(20_000, "Travel", is_credit_card=True) == "Other"
+
+
+def test_card_row_explicitly_categorized_rental_income_is_honoured():
+    assert tag_category(20_000, "Rental Income", is_credit_card=True) == "Rental Income"
+
+
+def test_depository_inflows_still_book_as_rental_income():
+    # The guards are account-scoped: a tagged P2P rent receipt in checking is unchanged.
+    unmatched = Classification(None, None, False)
+    assert resolve_with_tag(unmatched, RIVER, 150_000, "Transfer") == (
+        RIVER, "Rental Income", "monarch_tag",
+    )

@@ -134,7 +134,9 @@ def _fallback_category(tx_category: str | None) -> str:
     return "Other"
 
 
-def tag_category(amount_cents: int, tx_category: str | None) -> str:
+def tag_category(
+    amount_cents: int, tx_category: str | None, is_credit_card: bool = False,
+) -> str:
     """Property category for a row classified by a Monarch tag.
 
     Sign is the usual signal but it is NOT identity. A returned security deposit, a
@@ -149,7 +151,16 @@ def tag_category(amount_cents: int, tx_category: str | None) -> str:
     The match is EXACT, never a substring, because _fallback_category deliberately
     maps the expense categories "Rent" and "Mortgage & Rent" to HOA / Condo Fees for
     ~83 real condo-fee rows. A substring test on "rent" is precisely the bug.
+
+    A positive amount on a CREDIT CARD is a refund, never rental income (host payouts
+    land in a depository account — the same guard classify_transaction applies to rules).
+    A tagged card refund is a contra-expense: it books against the expense category it
+    reverses, unless Monarch's own category explicitly says Rental Income.
     """
+    if amount_cents > 0 and is_credit_card:
+        if (tx_category or "").strip().lower() == RENTAL_INCOME.lower():
+            return RENTAL_INCOME
+        return _fallback_category(tx_category)
     if amount_cents > 0:
         return RENTAL_INCOME
     if (tx_category or "").strip().lower() == RENTAL_INCOME.lower():
@@ -179,6 +190,8 @@ def resolve_with_tag(
     tag_pid: uuid.UUID | None,
     amount_cents: int,
     tx_category: str | None,
+    is_credit_card: bool = False,
+    is_loan: bool = False,
 ) -> tuple[uuid.UUID | None, str | None, str | None]:
     """Combine a rule Classification with an optional Monarch-tag property. Precedence:
     explicit Monarch tag > merchant rule. (Manual overrides are handled upstream in reclassify
@@ -187,9 +200,16 @@ def resolve_with_tag(
     When the tag merely agrees with a matched rule we keep the rule's (richer) category and a
     'rule' source, so the ~hundreds of rows we already mirror to Monarch don't churn to a new
     source on every reclassify.
+
+    Tags on a LOAN account are ignored. Those rows are the lender-side mirror of a payment
+    (the principal reduction) — the full payment already books as the property's Mortgage
+    expense from the paying account, and a positive principal line tagged with the property
+    would otherwise land as Rental Income.
     """
+    if is_loan:
+        tag_pid = None
     if tag_pid is not None and not (c.matched and c.property_id == tag_pid):
-        category = tag_category(amount_cents, tx_category)
+        category = tag_category(amount_cents, tx_category, is_credit_card=is_credit_card)
         return tag_pid, category, "monarch_tag"
     if c.matched:
         return c.property_id, c.category, "rule"
@@ -243,6 +263,7 @@ class PropertyPnLEngine:
                 Transaction.property_id,
                 Transaction.property_category,
                 Account.account_type,
+                Account.is_asset,
             )
             .join(Account, Account.id == Transaction.account_id)
             .where(Transaction.property_source.is_distinct_from("manual"))
@@ -258,7 +279,10 @@ class PropertyPnLEngine:
             )
             tag_pid = match_tag_to_property(row.tags, name_to_id)
             new_pid, new_cat, new_src = resolve_with_tag(
-                c, tag_pid, int(row.amount), row.category
+                c, tag_pid, int(row.amount), row.category,
+                is_credit_card=is_cc,
+                # A liability that isn't a card: mortgage / auto / personal loan.
+                is_loan=not row.is_asset and not is_cc,
             )
             if new_pid is not None:
                 matched += 1
