@@ -180,7 +180,7 @@ function MilestoneTimeline({ milestones, currentAge }: { milestones: Milestone[]
   );
 }
 
-function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["points"]; events: WealthPoolProjection["events"]; currentCash?: number }) {
+function BridgeChart({ points, events, currentCash }: { points: WealthPoolProjection["points"]; events: WealthPoolProjection["events"]; currentCash?: number }) {
   const bridgeData = useMemo(() => {
     // Engine points are END-of-month states. Display month m+1 so x = months
     // elapsed, and prepend a true t0 ("Now" = today's actual cash) so this chart
@@ -211,6 +211,22 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
   }, [points, currentCash]);
 
   if (bridgeData.length === 0) return null;
+
+  // Draw-start markers come from the plan: the engine emits "SEPP starts" /
+  // "RRIF starts" only when those draws are configured, at their start month
+  // (x = months elapsed when the first draw lands). Nothing configured → no line.
+  const lastX = bridgeData[bridgeData.length - 1].month ?? 0;
+  const drawStarts = new Map<number, string[]>();
+  for (const e of events) {
+    const kind = e.label === "SEPP starts" ? "SEPP" : e.label === "RRIF starts" ? "RRIF" : null;
+    if (kind && e.month <= lastX) drawStarts.set(e.month, [...(drawStarts.get(e.month) ?? []), kind]);
+  }
+  const drawStartLines = [...drawStarts.entries()].map(([x, kinds]) => ({ x, label: kinds.join("+") }));
+  const zoneLabel = [...new Set(drawStartLines.flatMap((l) => l.label.split("+")))].join("+");
+  const bridgeEnd = events.find((e) => e.label === "59\u00BD")?.month ?? Infinity;
+  const zone = drawStartLines.length
+    ? { x1: Math.min(...drawStartLines.map((l) => l.x)), x2: Math.min(bridgeEnd, lastX) }
+    : null;
 
   const minCash = Math.min(...bridgeData.map((p) => p.cash));
   const minCashMonth = bridgeData.find((p) => p.cash === minCash);
@@ -321,8 +337,10 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
             }}
           />
 
-          {/* SEPP/RRIF activation zone */}
-          <ReferenceArea x1={12} x2={59} fill="var(--blue)" fillOpacity={0.03} />
+          {/* Draw zone: first configured SEPP/RRIF draw → 59½ (or chart end) */}
+          {zone && zone.x2 > zone.x1 && (
+            <ReferenceArea x1={zone.x1} x2={zone.x2} fill="var(--blue)" fillOpacity={0.03} />
+          )}
 
           {/* Zero line */}
           <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.5} />
@@ -330,14 +348,17 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
           {/* Event markers */}
           {eventMarkers}
 
-          {/* SEPP start marker */}
-          <ReferenceLine
-            x={12}
-            stroke="var(--purple, #7a6aaa)"
-            strokeDasharray="4 4"
-            strokeOpacity={0.5}
-            label={{ value: "SEPP+RRIF", position: "top", fill: "var(--purple, #7a6aaa)", fontSize: 9 }}
-          />
+          {/* Draw start markers */}
+          {drawStartLines.map((l) => (
+            <ReferenceLine
+              key={l.x}
+              x={l.x}
+              stroke="var(--purple, #7a6aaa)"
+              strokeDasharray="4 4"
+              strokeOpacity={0.5}
+              label={{ value: l.label, position: "top", fill: "var(--purple, #7a6aaa)", fontSize: 9 }}
+            />
+          ))}
 
           {/* Cash balance area */}
           <Area type="monotone" dataKey="cash" stroke="var(--green)" strokeWidth={2} fill="url(#gradBridgeCash)" dot={false} />
@@ -355,7 +376,7 @@ function BridgeChart({ points, currentCash }: { points: WealthPoolProjection["po
           { label: "Cash Balance", color: "var(--green)" },
           { label: "Net Monthly", color: "var(--blue)", dashed: true },
           { label: "Events", color: "var(--yellow)", dot: true },
-          { label: "SEPP+RRIF zone", color: "var(--purple, #7a6aaa)", dashed: true },
+          ...(zoneLabel ? [{ label: `${zoneLabel} zone`, color: "var(--purple, #7a6aaa)", dashed: true }] : []),
         ].map((l) => (
           <div key={l.label} className="flex items-center gap-1.5">
             <div

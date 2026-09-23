@@ -1733,6 +1733,11 @@ class FireProjectionsEngine:
                 {"month": sepp_start_month, "age": round(current_age + sepp_start_month / 12, 1),
                  "label": "SEPP starts", "color": "#4d8eff"},
             )
+        if rrsp_monthly_net and rrsp_total_available:
+            chart_events.append(
+                {"month": rrsp_start_month, "age": round(current_age + rrsp_start_month / 12, 1),
+                 "label": "RRIF starts", "color": "#9e4a7a"},
+            )
         chart_events.extend([
             {"month": months_to_59_5, "age": 59.5, "label": "59\u00BD", "color": "#4d8eff"},
             {"month": months_to_ss, "age": float(ss_claim_age), "label": f"SS at {ss_claim_age}", "color": "#00d4aa"},
