@@ -472,11 +472,22 @@ function SpendingSensitivityCard({
   const healthcare = sensitivity?.healthcare_monthly ?? 0;
   const b = sensitivity?.breakdown;
   const displayBase = baseOverride ?? currentBase;
-  const total = displayBase + healthcare;
   const isModified = baseOverride != null;
+  // property_sales configs: per-property lines, some possibly carried ON TOP of
+  // the budget while held (in_base_burn: false) — the modeled monthly total
+  // includes them. Legacy configs keep the fixed three-bucket breakdown.
+  const lines = b?.properties ?? [];
+  const inBudget = lines.filter((l) => l.in_budget);
+  const onTop = lines.filter((l) => !l.in_budget);
+  const outside = b?.outside_budget_monthly ?? 0;
+  const total = displayBase + healthcare + outside;
 
   // Recompute non-housing when user adjusts total budget
-  const nonHousing = b ? displayBase - b.primary_property_all_in - b.income_property_cost - b.secondary_property_cost : 0;
+  const nonHousing = !b
+    ? 0
+    : lines.length
+      ? displayBase - inBudget.reduce((sum, l) => sum + l.monthly_cost, 0)
+      : displayBase - b.primary_property_all_in - b.income_property_cost - b.secondary_property_cost;
 
   return (
     <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-5">
@@ -514,6 +525,7 @@ function SpendingSensitivityCard({
           <span className="text-xs text-[var(--text-secondary)]">/mo</span>
           <span className="text-xs text-[var(--text-secondary)] ml-2">
             + ${healthcare.toLocaleString()} healthcare
+            {outside > 0 && ` + $${outside.toLocaleString()} unsold-property carry`}
           </span>
           <span className="text-xs font-mono font-bold ml-auto" style={{ color: isModified ? "var(--blue)" : "var(--text-primary)" }}>
             = ${total.toLocaleString()}/mo
@@ -521,8 +533,63 @@ function SpendingSensitivityCard({
         </div>
       </div>
 
-      {/* Breakdown: what's inside the budget */}
-      {b && (
+      {/* Breakdown (property_sales): each property as the engine treats it */}
+      {b && lines.length > 0 && (
+        <div className="mb-4 py-3 border-t border-[var(--border)]">
+          <div className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2">
+            What's in the ${displayBase.toLocaleString()}
+          </div>
+          <div className="space-y-1.5 text-xs">
+            {inBudget.map((l) => (
+              <div key={l.label}>
+                <div className="flex justify-between">
+                  <span className="text-[var(--text-secondary)]">{l.label} housing</span>
+                  <span className="font-mono text-[var(--text-primary)]">${l.monthly_cost.toLocaleString()}</span>
+                </div>
+                {l.mortgage_pi > 0 && (
+                  <div className="flex justify-between pl-3">
+                    <span className="text-[var(--text-secondary)] opacity-60">P&I ${l.mortgage_pi.toLocaleString()} + other ${(l.monthly_cost - l.mortgage_pi).toLocaleString()}</span>
+                  </div>
+                )}
+              </div>
+            ))}
+            <div className="flex justify-between pt-1 border-t border-[var(--border)]/50">
+              <span className="text-[var(--text-secondary)] font-medium">Non-housing living</span>
+              <span className="font-mono font-bold" style={{ color: nonHousing < 2000 ? "var(--red)" : "var(--text-primary)" }}>
+                ${nonHousing.toLocaleString()}
+              </span>
+            </div>
+          </div>
+          {onTop.length > 0 && (
+            <>
+              <div className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mt-3 mb-2">
+                On top of the budget until sold
+              </div>
+              <div className="space-y-1.5 text-xs">
+                {onTop.map((l) => (
+                  <div key={l.label} className="flex justify-between">
+                    <span className="text-[var(--text-secondary)]">{l.label} carrying cost</span>
+                    <span className="font-mono text-[var(--text-primary)]">+${l.monthly_cost.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          <div className="mt-3 text-[10px] text-[var(--text-secondary)] opacity-60 leading-relaxed">
+            {lines.map((l) => (
+              <span key={l.label}>
+                After {l.label} sells: −${l.monthly_cost.toLocaleString()}
+                {l.post_sale_rent > 0 && ` +$${l.post_sale_rent.toLocaleString()} rent`}.{" "}
+              </span>
+            ))}
+            Healthcare ${healthcare.toLocaleString()}/mo added pre-65, drops at Medicare.
+            Spending phases: 85% at 70, 75% at 80.
+          </div>
+        </div>
+      )}
+
+      {/* Breakdown (legacy keys): what's inside the budget */}
+      {b && lines.length === 0 && (
         <div className="mb-4 py-3 border-t border-[var(--border)]">
           <div className="text-[11px] uppercase tracking-wider text-[var(--text-secondary)] mb-2">
             What's in the ${displayBase.toLocaleString()}

@@ -121,6 +121,15 @@ export interface SpendingSensitivityPoint {
   cash_zero_month: number | null;
 }
 
+export interface PropertyCostLine {
+  label: string;
+  monthly_cost: number;
+  mortgage_pi: number;
+  /** true: inside target spending (removed at sale); false: added on top while held */
+  in_budget: boolean;
+  post_sale_rent: number;
+}
+
 export interface SpendingBreakdown {
   primary_property_all_in: number;
   primary_property_pi: number;
@@ -128,6 +137,9 @@ export interface SpendingBreakdown {
   secondary_property_cost: number;
   non_housing: number;
   post_sale_rent: number;
+  /** property_sales configs: one line per property; empty for legacy configs */
+  properties?: PropertyCostLine[];
+  outside_budget_monthly?: number;
 }
 
 export interface SpendingSensitivity {

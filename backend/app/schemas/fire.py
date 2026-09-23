@@ -270,6 +270,15 @@ class SpendingSensitivityPoint(BaseModel):
     cash_zero_month: int | None
 
 
+class PropertyCostLine(BaseModel):
+    """One property's carrying cost, as the pool engine treats it (property_sales)."""
+    label: str
+    monthly_cost: float  # all-in carrying cost while held
+    mortgage_pi: float = 0
+    in_budget: bool  # True: inside target spending, removed at sale. False: added ON TOP while held.
+    post_sale_rent: float = 0
+
+
 class SpendingBreakdown(BaseModel):
     """What's inside the total monthly budget."""
     primary_property_all_in: float  # P&I + HOA + insurance + utilities
@@ -278,6 +287,10 @@ class SpendingBreakdown(BaseModel):
     secondary_property_cost: float  # secondary-property costs removed when it sells
     non_housing: float  # remainder — groceries, transport, insurance, discretionary
     post_sale_rent: float  # replaces primary-property costs after sale
+    # Generic path (custom_assumptions.property_sales): one line per property with its
+    # in_base_burn treatment. Empty for legacy configs, which use the fields above.
+    properties: list[PropertyCostLine] = []
+    outside_budget_monthly: float = 0  # held costs the engine adds on top of the budget
 
 
 class SpendingSensitivityResponse(BaseModel):

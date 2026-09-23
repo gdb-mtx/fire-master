@@ -41,6 +41,7 @@ from app.schemas.fire import (
     RetirementTimelineResponse,
     ScenarioComparison,
     ScenarioInput,
+    PropertyCostLine,
     SpendingBreakdown,
     SpendingSensitivityPoint,
     SpendingSensitivityResponse,
@@ -322,6 +323,67 @@ async def get_wealth_projection(
     )
 
 
+def spending_breakdown(ca: dict, base_monthly: float) -> SpendingBreakdown:
+    """What sits inside (and on top of) the monthly budget, per the effective config."""
+    # Housing ingredients from the effective config (scenario-aware).
+    # LEGACY single-property keys (miami_sale / park_city / sauvie_sale) — superseded
+    # by property_sales; read with neutral defaults for author back-compat.
+    miami_cfg = ca.get("miami_sale", {})
+    pc_cfg = ca.get("park_city", {})
+    proj_cfg = ca.get("projection", {})
+    primary_all_in = miami_cfg.get("monthly_cost", 0)
+    primary_pi = proj_cfg.get("primary_property_mortgage_pi", 0)
+    income_property_cost = ca.get("sauvie_sale", {}).get("monthly_cost_saved", 0)
+    secondary_property_cost = pc_cfg.get("monthly_cost", 0)
+    post_sale_rent = miami_cfg.get("post_sale_rent", 0)
+
+    # Generic property_sales supersede the legacy keys (same gate as the pool
+    # engine). Describe each property the way the engine treats it: in_base_burn
+    # costs sit INSIDE the budget and leave at sale; the others are added ON TOP
+    # while held. Reading only the legacy keys showed an add-on property inside
+    # the budget and understated the modeled monthly total by its cost.
+    property_lines: list[PropertyCostLine] = []
+    outside_budget = 0.0
+    sales = ca.get("property_sales") or []
+    if sales:
+        buckets = {"miami": "primary", "park_city": "secondary", "sauvie": "income"}
+        in_budget_by_bucket = {"primary": 0.0, "secondary": 0.0, "income": 0.0}
+        primary_all_in = primary_pi = post_sale_rent = 0
+        for sale in sales:
+            cost = float(sale.get("monthly_cost", 0) or 0)
+            in_budget = bool(sale.get("in_base_burn", True))
+            bucket = buckets.get(sale.get("re_bucket"), sale.get("re_bucket"))
+            property_lines.append(PropertyCostLine(
+                label=str(sale.get("key", "property")).replace("_", " ").title(),
+                monthly_cost=cost,
+                mortgage_pi=float(sale.get("mortgage_pi", 0) or 0),
+                in_budget=in_budget,
+                post_sale_rent=float(sale.get("post_sale_rent", 0) or 0),
+            ))
+            if in_budget and bucket in in_budget_by_bucket:
+                in_budget_by_bucket[bucket] += cost
+            if not in_budget:
+                outside_budget += cost
+            if bucket == "primary":
+                primary_pi = float(sale.get("mortgage_pi", 0) or 0)
+                post_sale_rent = float(sale.get("post_sale_rent", 0) or 0)
+        primary_all_in = in_budget_by_bucket["primary"]
+        income_property_cost = in_budget_by_bucket["income"]
+        secondary_property_cost = in_budget_by_bucket["secondary"]
+    non_housing = base_monthly - primary_all_in - income_property_cost - secondary_property_cost
+
+    return SpendingBreakdown(
+        primary_property_all_in=primary_all_in,
+        primary_property_pi=primary_pi,
+        income_property_cost=income_property_cost,
+        secondary_property_cost=secondary_property_cost,
+        non_housing=non_housing,
+        post_sale_rent=post_sale_rent,
+        properties=property_lines,
+        outside_budget_monthly=outside_budget,
+    )
+
+
 @router.get("/spending-sensitivity", response_model=SpendingSensitivityResponse)
 async def spending_sensitivity(
     step: int = 100_000,
@@ -337,19 +399,8 @@ async def spending_sensitivity(
     healthcare = config.healthcare_monthly_cost or 0
     ca = config.custom_assumptions or {}
 
-    # Extract housing ingredients from effective config (scenario-aware).
-    # LEGACY single-property keys (miami_sale / park_city / sauvie_sale) — superseded
-    # by property_sales; read with neutral defaults for author back-compat.
-    miami_cfg = ca.get("miami_sale", {})
-    pc_cfg = ca.get("park_city", {})
-    proj_cfg = ca.get("projection", {})
-    primary_all_in = miami_cfg.get("monthly_cost", 0)
-    primary_pi = proj_cfg.get("primary_property_mortgage_pi", 0)
-    income_property_cost = ca.get("sauvie_sale", {}).get("monthly_cost_saved", 0)
-    secondary_property_cost = pc_cfg.get("monthly_cost", 0)
-    post_sale_rent = miami_cfg.get("post_sale_rent", 0)
     base_monthly = round(base_spending / 12 / 100, 0)
-    non_housing = base_monthly - primary_all_in - income_property_cost - secondary_property_cost
+    breakdown = spending_breakdown(ca, base_monthly)
 
     # Center on current spending, ± levels//2 steps
     half = levels // 2
@@ -369,14 +420,7 @@ async def spending_sensitivity(
         current_monthly=base_monthly,
         base_monthly=base_monthly,
         healthcare_monthly=round(healthcare / 100, 0),
-        breakdown=SpendingBreakdown(
-            primary_property_all_in=primary_all_in,
-            primary_property_pi=primary_pi,
-            income_property_cost=income_property_cost,
-            secondary_property_cost=secondary_property_cost,
-            non_housing=non_housing,
-            post_sale_rent=post_sale_rent,
-        ),
+        breakdown=breakdown,
         points=points,
     )
 
