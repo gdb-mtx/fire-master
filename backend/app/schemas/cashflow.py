@@ -3,7 +3,7 @@
 import datetime as _dt
 from uuid import UUID
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, Field, computed_field
 
 
 class CashflowEventCreate(BaseModel):
@@ -14,7 +14,7 @@ class CashflowEventCreate(BaseModel):
     is_recurring: bool = False
     recurrence: str | None = None  # "monthly", "quarterly", "annual"
     end_date: _dt.date | None = None
-    probability: float = 1.0
+    probability: float = Field(1.0, ge=0.0, le=1.0)  # 0 is valid: a parked event
     status: str = "planned"
     category: str | None = None
     linked_account_id: UUID | None = None
@@ -29,7 +29,7 @@ class CashflowEventUpdate(BaseModel):
     is_recurring: bool | None = None
     recurrence: str | None = None
     end_date: _dt.date | None = None
-    probability: float | None = None
+    probability: float | None = Field(None, ge=0.0, le=1.0)
     status: str | None = None
     category: str | None = None
     linked_account_id: UUID | None = None

@@ -101,6 +101,18 @@ function EventModal({
         },
   );
 
+  // Probability is edited as raw text and parsed on save. Coercing on every
+  // keystroke (`parseFloat(v) || 1`) snapped a blank field and a typed "0"
+  // back to 1, so no value starting with 0 could ever be entered.
+  const [probabilityDraft, setProbabilityDraft] = useState<string>(
+    String(form.probability),
+  );
+  const submit = () => {
+    const p = parseFloat(probabilityDraft);
+    const probability = isNaN(p) ? 1 : Math.min(1, Math.max(0, p));
+    onSubmit({ ...form, probability });
+  };
+
   const inputCls =
     "w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:outline-none focus:border-[var(--blue)] transition-colors";
   const labelCls =
@@ -242,13 +254,9 @@ function EventModal({
               min="0"
               max="1"
               className={inputCls}
-              value={form.probability}
-              onChange={(e) =>
-                setForm({
-                  ...form,
-                  probability: parseFloat(e.target.value) || 1,
-                })
-              }
+              value={probabilityDraft}
+              onChange={(e) => setProbabilityDraft(e.target.value)}
+              placeholder="1.0"
             />
           </div>
           <div>
@@ -279,7 +287,7 @@ function EventModal({
         <div className="flex gap-3 pt-2">
           <button
             className="flex-1 px-4 py-2 text-sm rounded bg-[var(--green)] text-[#0a0a0f] font-medium hover:opacity-90 transition-opacity"
-            onClick={() => onSubmit(form)}
+            onClick={submit}
           >
             {isEdit ? "Save Changes" : "Add Event"}
           </button>
