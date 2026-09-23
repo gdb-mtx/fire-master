@@ -19,12 +19,14 @@ import {
   useDeleteCashflowEvent,
   useUpdateCashflowEvent,
   useFireConfig,
+  useUpdateFireConfig,
 } from "../api/queries";
 import { formatCurrency, fmtAxis, fmtCompact } from "../utils/formatting";
 import { TOOLTIP_STYLE } from "../utils/theme";
 import { useEventMarkers } from "../components/charts/EventMarkers";
 import type { EventMarkerGroup } from "../components/charts/EventMarkers";
 import type { CashflowEvent, CashflowEventCreate } from "../types/cashflow";
+import type { FireConfig } from "../types/fire";
 import { fmtDate, fmtMonthYear, parseLocalDate, todayISO } from "../utils/dates";
 
 /** Category-axis key of the chart's leading "today" point. */
@@ -505,20 +507,21 @@ export default function RunwayPage() {
   const [incomeDraft, setIncomeDraft] = useState<string>("");
   const [burnDraft, setBurnDraft] = useState<string>("");
 
-  // Seed income/burn once from custom_assumptions.runway (if set),
-  // falling back to target_annual_spending for burn.
+  // Seed income/burn once from the SAVED defaults (custom_assumptions.runway,
+  // written by "Save as default"). Nothing saved → no override: income comes
+  // from declared sources, burn from the trailing 90 days with planned-event
+  // payments excluded (the backend defaults). The old fallback seeded the burn
+  // from target spending, so the page showed a plan number as if it were actuals.
+  const savedDefaults = (fireConfig?.custom_assumptions?.runway ?? {}) as {
+    monthly_income?: number | null;
+    monthly_burn?: number | null;
+  };
   const seeded = useRef(false);
   useEffect(() => {
     if (seeded.current || !fireConfig) return;
     const runway = (fireConfig.custom_assumptions?.runway ?? {}) as Record<string, number>;
     const seedIncome = runway.monthly_income;
-    // Seed burn to MATCH the Retirement page's monthly total: spending + healthcare
-    // (the pages disagreed by exactly the healthcare line before).
-    const seedBurn = runway.monthly_burn
-      ?? (fireConfig.target_annual_spending
-        ? Math.round(fireConfig.target_annual_spending / 12 / 100)
-          + Math.round((fireConfig.healthcare_monthly_cost ?? 0) / 100)
-        : undefined);
+    const seedBurn = runway.monthly_burn;
     if (seedIncome != null && seedIncome > 0) {
       setIncomeDraft(String(seedIncome));
       setIncomeOverride(seedIncome);
@@ -549,6 +552,7 @@ export default function RunwayPage() {
   } = useRunway(24, incomeOverride, burnOverride);
   const { data: events, isLoading: eventsLoading } = useCashflowEvents();
   const createEvent = useCreateCashflowEvent();
+  const updateConfig = useUpdateFireConfig();
   const updateEvent = useUpdateCashflowEvent();
   const deleteEvent = useDeleteCashflowEvent();
 
@@ -667,6 +671,11 @@ export default function RunwayPage() {
   }
 
   const zeroDate = runway.cash_zero_date ? fmtDate(runway.cash_zero_date) : null;
+  const excludedPerMonth = Math.max(0, (runway.trailing_burn_raw ?? runway.trailing_burn) - runway.trailing_burn);
+  const hasSavedDefaults = savedDefaults.monthly_income != null || savedDefaults.monthly_burn != null;
+  const savedMatchesCurrent =
+    (savedDefaults.monthly_income ?? undefined) === incomeOverride &&
+    (savedDefaults.monthly_burn ?? undefined) === burnOverride;
 
   return (
     <Layout>
@@ -766,10 +775,29 @@ export default function RunwayPage() {
                 placeholder="Use trailing average"
               />
               <span className="text-[10px] text-[var(--text-secondary)] mt-0.5 block whitespace-nowrap">
-                Trailing: {formatCurrency(runway.trailing_burn)}/mo
+                Trailing 90d: {formatCurrency(runway.trailing_burn)}/mo
+                {excludedPerMonth > 0 && ` · excl. ${formatCurrency(excludedPerMonth)}/mo planned events`}
               </span>
             </div>
-            <div>
+            <div className="col-span-2 flex flex-wrap items-center gap-2">
+              <button
+                className="px-4 py-2 text-xs rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--blue)] transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                disabled={savedMatchesCurrent || updateConfig.isPending}
+                onClick={() =>
+                  updateConfig.mutate({
+                    // JSON Merge Patch: null deletes a key (the server merges).
+                    custom_assumptions: {
+                      runway:
+                        incomeOverride == null && burnOverride == null
+                          ? null
+                          : { monthly_income: incomeOverride ?? null, monthly_burn: burnOverride ?? null },
+                    },
+                  } as Partial<FireConfig>)
+                }
+                title="Remember these values: the Runway opens with them next time"
+              >
+                Save as default
+              </button>
               <button
                 className="px-4 py-2 text-xs rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--blue)] transition-colors"
                 onClick={() => {
@@ -781,10 +809,49 @@ export default function RunwayPage() {
               >
                 Clear Overrides
               </button>
-              {/* invisible spacer matching the inputs' hint line so items-end aligns the button with the input row */}
-              <span className="text-[10px] mt-0.5 block invisible" aria-hidden="true">.</span>
+              <span className="text-[10px] text-[var(--text-secondary)] basis-full">
+                {hasSavedDefaults ? (
+                  <>
+                    Saved default:{" "}
+                    {savedDefaults.monthly_income != null && `income ${formatCurrency(savedDefaults.monthly_income)}`}
+                    {savedDefaults.monthly_income != null && savedDefaults.monthly_burn != null && " · "}
+                    {savedDefaults.monthly_burn != null && `burn ${formatCurrency(savedDefaults.monthly_burn)}`}
+                    {" — "}
+                    <button
+                      className="underline hover:text-[var(--text-primary)]"
+                      onClick={() =>
+                        updateConfig.mutate({ custom_assumptions: { runway: null } } as Partial<FireConfig>)
+                      }
+                    >
+                      remove
+                    </button>
+                  </>
+                ) : (
+                  "No saved default — income from your sources, burn from the last 90 days"
+                )}
+              </span>
             </div>
           </div>
+          {runway.burn_exclusions && runway.burn_exclusions.length > 0 && (
+            <details className="mt-3 text-[11px] text-[var(--text-secondary)]">
+              <summary className="cursor-pointer select-none">
+                Left out of the trailing burn: {runway.burn_exclusions.length} payment
+                {runway.burn_exclusions.length > 1 ? "s" : ""} that paid a planned event (raw
+                average {formatCurrency(runway.trailing_burn_raw ?? runway.trailing_burn)}/mo)
+              </summary>
+              <div className="mt-1.5 space-y-0.5 pl-3">
+                {runway.burn_exclusions.map((ex) => (
+                  <div key={`${ex.event_name}-${ex.date}`} className="flex gap-2">
+                    <span className="text-[var(--text-primary)]">{ex.event_name.trim()}</span>
+                    <span className="font-mono">{formatCurrency(ex.amount)}</span>
+                    <span className="opacity-60">
+                      {ex.merchant && `(${ex.merchant})`} {fmtDate(ex.date)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
 
         {/* Cash Flow Projection Chart */}

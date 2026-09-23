@@ -14,9 +14,23 @@ from app.models.category_mapping import CategoryMapping
 from app.models.fire_config import FireConfig
 from app.models.income_source import IncomeSource
 from app.models.transaction import Transaction
-from app.schemas.cashflow import MonthlyProjectionPoint, RunwayResponse, ScenarioSale
+from app.engines.event_matching import (
+    DATE_WINDOW_DAYS,
+    Candidate,
+    expense_occurrences,
+    match_occurrences,
+)
+from app.schemas.cashflow import (
+    BurnExclusion,
+    MonthlyProjectionPoint,
+    RunwayResponse,
+    ScenarioSale,
+)
 
 logger = logging.getLogger(__name__)
+
+# Trailing window for the burn baseline (the income reference uses the same span).
+TRAILING_DAYS = 90
 
 
 def _cents_to_dollars(cents: int) -> float:
@@ -60,26 +74,25 @@ class CashflowEngine:
         )
         return _cents_to_dollars(int(total))
 
-    async def get_trailing_monthly_burn(self, months: int = 3) -> float:
-        """Average monthly spending over the last N months from transaction data."""
-        start = date.today() - timedelta(days=months * 30)
-
+    async def _outflows(self, start: date, end: date) -> list[Candidate]:
+        """Spending transactions in [start, end]: non-income, non-transfer outflows
+        (property spend included — Runway burn deliberately counts it)."""
         result = await self.db.execute(
-            select(func.sum(-Transaction.amount).label("total_cents"))
+            select(Transaction.id, Transaction.date, Transaction.amount, Transaction.merchant)
             .join(CategoryMapping, Transaction.category == CategoryMapping.raw_category)
             .where(
                 Transaction.date >= start,
+                Transaction.date <= end,
                 CategoryMapping.is_income == False,
                 CategoryMapping.is_transfer == False,
                 Transaction.amount < 0,
             )
         )
-        total_cents = result.scalar() or 0
-        return _cents_to_dollars(int(total_cents)) / months
+        return [Candidate(r.id, r.date, -int(r.amount), r.merchant) for r in result.all()]
 
-    async def get_trailing_monthly_income(self, months: int = 3) -> float:
+    async def get_trailing_monthly_income(self, months: int = 3, today: date | None = None) -> float:
         """Average monthly income over the last N months from transaction data."""
-        start = date.today() - timedelta(days=months * 30)
+        start = (today or date.today()) - timedelta(days=months * 30)
 
         result = await self.db.execute(
             select(func.sum(Transaction.amount).label("total_cents"))
@@ -198,7 +211,9 @@ class CashflowEngine:
 
         BURN keeps its trailing fallback deliberately — spending is a continuous
         flow, so a trailing average is a defensible estimator; income arrives in
-        lumps from discrete dated sources, so it must be modeled.
+        lumps from discrete dated sources, so it must be modeled. The average
+        EXCLUDES payments matched to cashflow events (engines/event_matching.py):
+        a finished special assessment is not an ongoing cost.
 
         Overrides (user-declared flat baselines) win over both when provided.
 
@@ -225,13 +240,36 @@ class CashflowEngine:
 
         today = today or date.today()
         current_cash = await self.get_current_cash()
-        trailing_burn = await self.get_trailing_monthly_burn(months=3)
-        trailing_income = await self.get_trailing_monthly_income(months=3)
-
-        monthly_burn = burn_override if burn_override is not None else trailing_burn
+        burn_start = today - timedelta(days=TRAILING_DAYS)
+        outflows = await self._outflows(burn_start, today)
+        trailing_income = await self.get_trailing_monthly_income(months=3, today=today)
         sources, retirement_date, inflation = await self._get_income_model_inputs()
 
         events = await self.get_active_events()
+
+        # Trailing burn, CLEANED: a payment that paid a cashflow event (a special
+        # assessment installment, a one-off bill) is the event, already modeled —
+        # left in the average it would be projected forward as if it recurred.
+        burn_matches = match_occurrences(
+            expense_occurrences(events, burn_start - timedelta(days=DATE_WINDOW_DAYS), today),
+            outflows,
+        )
+        months_in_window = TRAILING_DAYS / 30
+        raw_cents = sum(c.amount_cents for c in outflows)
+        matched_cents = sum(m.txn.amount_cents for m in burn_matches)
+        trailing_burn_raw = _cents_to_dollars(raw_cents) / months_in_window
+        trailing_burn = _cents_to_dollars(raw_cents - matched_cents) / months_in_window
+        burn_exclusions = [
+            BurnExclusion(
+                event_name=m.event_name,
+                amount=_cents_to_dollars(m.txn.amount_cents),
+                date=m.txn.date,
+                merchant=m.txn.merchant,
+            )
+            for m in burn_matches
+        ]
+
+        monthly_burn = burn_override if burn_override is not None else trailing_burn
 
         start_month = today.replace(day=1)
         days_in_month = calendar.monthrange(today.year, today.month)[1]
@@ -355,6 +393,8 @@ class CashflowEngine:
             cash_zero_date=cash_zero_date,
             income_provenance="override" if income_override is not None else "modeled",
             trailing_burn=round(trailing_burn, 2),
+            trailing_burn_raw=round(trailing_burn_raw, 2),
+            burn_exclusions=burn_exclusions,
             trailing_income=round(trailing_income, 2),
             projection=projection,
             scenario_name=scenario_name,

@@ -42,6 +42,14 @@ export interface MonthlyProjectionPoint {
   from_day?: number | null;
 }
 
+/** A trailing-window payment left out of the burn because it paid a cashflow event. */
+export interface BurnExclusion {
+  event_name: string;
+  amount: number;
+  date: string;
+  merchant?: string | null;
+}
+
 /** A pinned property sale from the active plan, as the Runway applies it. */
 export interface ScenarioSale {
   key: string;
@@ -66,4 +74,7 @@ export interface RunwayResponse {
   projection: MonthlyProjectionPoint[];
   scenario_name?: string | null;
   scenario_sales?: ScenarioSale[];
+  /** Trailing 90-day average with nothing excluded (trailing_burn excludes event-matched payments). */
+  trailing_burn_raw?: number;
+  burn_exclusions?: BurnExclusion[];
 }

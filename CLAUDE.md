@@ -24,6 +24,8 @@ If a `CLAUDE.local.md` exists here, read it too — it carries the owner's machi
 
 Test suite: **276 unit tests, <1s** (`cd backend && uv run pytest -v`) + **14 Postgres integration tests** (skipped unless `TEST_DATABASE_URL` points at a scratch DB; CI runs them). Run after engine, config, tax, or scenario changes.
 
+**Runway burn:** default = trailing 90-day outflows MINUS payments matched to cashflow expense events (`engines/event_matching.py`, shared with the Tracker's Adjusted mode): a paid special-assessment installment is the event, not recurring spend. Unmatched one-offs stay in — add a (past) event to exclude one. Saved overrides live in `custom_assumptions.runway` ("Save as default" on the page); no fallback to target spending.
+
 **Property P&L gotchas:**
 - Transactions are classified to a property by DB-stored merchant rules (`property_rules`), stamped onto `transactions.property_id/property_category/property_source` by `PropertyPnLEngine.reclassify()` (runs post-sync + on `POST /api/properties/reclassify`).
 - **Rental income can't land on a credit card.** A positive Airbnb-style amount on a credit-card account is a *guest refund* (a trip the owner booked), NOT a host payout — host payouts hit checking. `classify_transaction(..., is_credit_card=)` skips the income branch for credit-card rows; `reclassify`/`clear_override` join `accounts` to supply it. The guard is income-only — property expenses on a credit card still classify.

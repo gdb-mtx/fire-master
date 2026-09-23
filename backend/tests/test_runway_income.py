@@ -77,7 +77,20 @@ def _cash_account(cents):
     return a
 
 
-def _mock_db_for_runway(*, cash_cents, trailing_income_cents, sources, events):
+def _outflow(cents, d, merchant="Store", id_=None):
+    r = MagicMock()
+    r.id = id_ or f"{merchant}-{d.isoformat()}-{cents}"
+    r.date = d
+    r.amount = -cents
+    r.merchant = merchant
+    return r
+
+
+# Default trailing window: $15,000 of spending → $5,000/mo burn.
+DEFAULT_OUTFLOWS = [_outflow(5_000_00, date(2026, 5, 10 + i), f"Bill {i}") for i in range(3)]
+
+
+def _mock_db_for_runway(*, cash_cents, trailing_income_cents, sources, events, outflows=None):
     """AsyncMock db serving project_runway's 6 execute() calls in order."""
     def scalar(v):
         m = MagicMock(); m.scalar.return_value = v; return m
@@ -85,10 +98,12 @@ def _mock_db_for_runway(*, cash_cents, trailing_income_cents, sources, events):
         m = MagicMock(); m.scalars.return_value.all.return_value = v; return m
     def scalars_first(v):
         m = MagicMock(); m.scalars.return_value.first.return_value = v; return m
+    def rows(v):
+        m = MagicMock(); m.all.return_value = v; return m
     db = AsyncMock()
     db.execute.side_effect = [
         scalars_all([_cash_account(cash_cents)]),  # get_current_cash (role-based)
-        scalar(3 * 5_000_00),            # trailing burn (3-mo sum)
+        rows(DEFAULT_OUTFLOWS if outflows is None else outflows),  # trailing outflows
         scalar(trailing_income_cents),   # trailing income (3-mo sum) — THE LUMP
         scalars_all(sources),            # income sources
         scalars_first(None),             # fire config (none -> no retirement date)
@@ -289,3 +304,40 @@ async def test_only_pinned_sales_reach_the_runway():
         sales, appreciation, scenario = await CashflowEngine(db)._get_plan_sales()
     assert [s["key"] for s in sales] == ["condo"]
     assert (appreciation, scenario) == (0.02, "Plan B")
+
+
+class TestBurnBaselineExcludesModeledEvents:
+    """A payment that paid a cashflow event is the event — already modeled — and
+    must not be averaged into the burn and projected forward as if it recurred."""
+
+    @pytest.mark.asyncio
+    async def test_event_matched_payment_leaves_the_average(self):
+        today = date(2026, 9, 22)
+        assessment = _event("Assessment #4", 4_400_00, date(2026, 7, 14), etype="expense")
+        outflows = [
+            _outflow(4_429_04, date(2026, 7, 14), "HOA portal"),        # paid the assessment
+            _outflow(4_500_00, date(2026, 7, 20), "Rent"),
+            _outflow(4_500_00, date(2026, 8, 20), "Rent"),
+            _outflow(4_500_00, date(2026, 9, 20), "Rent"),
+        ]
+        db = _mock_db_for_runway(
+            cash_cents=50_000_00, trailing_income_cents=0, sources=[], events=[assessment],
+            outflows=outflows,
+        )
+        r = await _engine(db).project_runway(months=3, today=today)
+        assert r.trailing_burn_raw == pytest.approx((3 * 4_500 + 4_429.04) / 3, abs=0.01)
+        assert r.trailing_burn == pytest.approx(4_500.0, abs=0.01)
+        assert r.monthly_burn == pytest.approx(4_500.0, abs=0.01)  # the default is the clean one
+        [ex] = r.burn_exclusions
+        assert (ex.event_name, ex.amount, ex.date) == ("Assessment #4", 4_429.04, date(2026, 7, 14))
+
+    @pytest.mark.asyncio
+    async def test_unmatched_one_off_stays_in(self):
+        # No event describes it, so nothing says it won't recur — it stays.
+        outflows = [_outflow(2_721_00, date(2026, 9, 21), "Tax payment")]
+        db = _mock_db_for_runway(
+            cash_cents=50_000_00, trailing_income_cents=0, sources=[], events=[], outflows=outflows,
+        )
+        r = await _engine(db).project_runway(months=3, today=date(2026, 9, 22))
+        assert r.trailing_burn == r.trailing_burn_raw == pytest.approx(907.0, abs=0.01)
+        assert r.burn_exclusions == []
