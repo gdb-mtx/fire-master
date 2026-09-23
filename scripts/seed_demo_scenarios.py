@@ -30,6 +30,7 @@ users exploring demo mode can also run it manually:
 """
 
 import asyncio
+from datetime import date
 import sys
 from pathlib import Path
 
@@ -40,6 +41,13 @@ from sqlalchemy import select
 from app.core.database import async_session_factory
 from app.models.fire_config import FireConfig
 from app.models.fire_scenario import FireScenario
+from app.engines.plan_months import pin_plan_months
+
+
+def _pinned(overrides: dict) -> dict:
+    """Plan-month offsets (sale_month, ...) pinned to calendar months at seed time."""
+    ca = overrides.get("custom_assumptions")
+    return {**overrides, "custom_assumptions": pin_plan_months(ca, date.today())} if ca else overrides
 
 
 # The demo persona's two property_sales entries (must match seed_demo.py —
@@ -165,14 +173,14 @@ async def main():
             if s_data["name"] in existing:
                 scenario = existing[s_data["name"]]
                 scenario.description = s_data["description"]
-                scenario.overrides = s_data["overrides"]
+                scenario.overrides = _pinned(s_data["overrides"])
                 updated += 1
                 print(f"  UPDATE scenario '{s_data['name']}'")
             else:
                 scenario = FireScenario(
                     name=s_data["name"],
                     description=s_data["description"],
-                    overrides=s_data["overrides"],
+                    overrides=_pinned(s_data["overrides"]),
                     is_active=s_data["is_active"],
                 )
                 session.add(scenario)

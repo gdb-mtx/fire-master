@@ -234,9 +234,9 @@ class CashflowEngine:
         from app.engines.fire_projections import (
             build_cashflow_schedule,
             property_sale_net_proceeds,
-            resolve_month_offset,
             sale_event_suppressed,
         )
+        from app.engines.plan_months import resolve_month_offset
 
         today = today or date.today()
         current_cash = await self.get_current_cash()

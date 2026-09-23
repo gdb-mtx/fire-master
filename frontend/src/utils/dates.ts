@@ -58,3 +58,11 @@ export function planMonth(pinned: unknown, offset: unknown): { offset: number; l
   const n = Number(offset ?? 0);
   return { offset: n, label: `Month ${n} from now` };
 }
+
+/** "YYYY-MM" for the calendar month n months after this one. */
+export function monthFromNow(n: number): string {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}

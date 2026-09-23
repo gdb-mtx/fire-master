@@ -12,7 +12,7 @@ import {
   useActivateScenario,
 } from "../api/queries";
 import { formatCurrency } from "../utils/formatting";
-import { planMonth } from "../utils/dates";
+import { monthFromNow, planMonth } from "../utils/dates";
 import type { FireScenario } from "../types/fire";
 
 export default function FireConfigPage() {
@@ -52,7 +52,7 @@ export default function FireConfigPage() {
     cash_reserve_months: "12",
     cash_savings_rate_early: "1",
     cash_savings_rate_late: "0",
-    cash_savings_cutover_month: "60",
+    cash_savings_cutover_date: monthFromNow(60),
     re_appreciation_rate: "1",
     primary_property_purchase_price: "",
     primary_property_agent_fee_pct: "6",
@@ -111,7 +111,10 @@ export default function FireConfigPage() {
         cash_reserve_months: (proj?.cash_reserve_months as number)?.toString() || "12",
         cash_savings_rate_early: proj?.cash_savings_rate_early != null ? ((proj.cash_savings_rate_early as number) * 100).toString() : "1",
         cash_savings_rate_late: proj?.cash_savings_rate_late != null ? ((proj.cash_savings_rate_late as number) * 100).toString() : "0",
-        cash_savings_cutover_month: (proj?.cash_savings_cutover_month as number)?.toString() || "60",
+        // A calendar month (pinned); a legacy offset is shown where it points today.
+        cash_savings_cutover_date:
+          (proj?.cash_savings_cutover_date as string | undefined)
+          || monthFromNow(Number(proj?.cash_savings_cutover_month ?? 60)),
         re_appreciation_rate: proj?.re_appreciation_rate != null ? ((proj.re_appreciation_rate as number) * 100).toString() : "1",
         primary_property_purchase_price: (proj?.primary_property_purchase_price as number)?.toString() || "",
         primary_property_agent_fee_pct: proj?.primary_property_agent_fee_pct != null ? ((proj.primary_property_agent_fee_pct as number) * 100).toString() : "6",
@@ -170,7 +173,8 @@ export default function FireConfigPage() {
         cash_reserve_months: parseInt(form.cash_reserve_months) || 12,
         cash_savings_rate_early: pf(form.cash_savings_rate_early, 1) / 100,
         cash_savings_rate_late: pf(form.cash_savings_rate_late, 0) / 100,
-        cash_savings_cutover_month: parseInt(form.cash_savings_cutover_month) || 60,
+        cash_savings_cutover_date: form.cash_savings_cutover_date || null,
+        cash_savings_cutover_month: null, // legacy offset: slid with today — deleted on save
         re_appreciation_rate: pf(form.re_appreciation_rate, 1) / 100,
         primary_property_purchase_price: form.primary_property_purchase_price
           ? parseInt(form.primary_property_purchase_price)
@@ -437,8 +441,9 @@ export default function FireConfigPage() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mt-3">
             <div>
-              <label className={labelCls}>HYSA Cutover Month</label>
-              <input type="number" step="12" value={form.cash_savings_cutover_month} onChange={(e) => setForm(f => ({ ...f, cash_savings_cutover_month: e.target.value }))} className={inputCls} />
+              <label className={labelCls}>HYSA Rate Drops</label>
+              <input type="month" value={form.cash_savings_cutover_date} onChange={(e) => setForm(f => ({ ...f, cash_savings_cutover_date: e.target.value }))} className={inputCls} />
+              <p className="text-[10px] text-[var(--text-secondary)] mt-1">Cash earns the early rate until this month</p>
             </div>
             <div>
               <label className={labelCls}>IRA-B Draw Threshold (mo)</label>

@@ -57,6 +57,7 @@ from sqlalchemy import delete, select
 
 from app.core.database import async_session_factory
 from app.engines.net_worth import NetWorthEngine
+from app.engines.plan_months import pin_plan_months
 from app.engines.property_pnl import PropertyPnLEngine
 from app.ingestion.category_sync import CategorySyncService
 from app.models.account import Account
@@ -305,7 +306,9 @@ def build_demo_config_values(anchor: date) -> dict:
         medicare_start_age=65,
         rmd_start_age=73,
         target_legacy=0,
-        custom_assumptions={
+        # Plan months are written as offsets for readability and pinned to calendar
+        # months at seed time (engines/plan_months.py) — stored plans never drift.
+        custom_assumptions=pin_plan_months({
             "demo_persona": True,  # sentinel: lets re-runs (and --remove) recognize this config
             "sepp_bridge": True,
             "bridge_end_age": 59.5,
@@ -406,7 +409,7 @@ def build_demo_config_values(anchor: date) -> dict:
                 "spending_phase_floor_age": 80,
                 "ira_b_draw_threshold_months": 12,
             },
-        },
+        }, date.today()),
     )
 
 

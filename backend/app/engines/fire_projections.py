@@ -33,6 +33,7 @@ from app.models.income_source import IncomeSource
 from app.models.net_worth_snapshot import NetWorthSnapshot
 from app.engines.event_calendar import RECURRENCE_STEP_MONTHS as _RECURRENCE_STEP_MONTHS
 from app.engines.event_calendar import event_occurrence_dates
+from app.engines.plan_months import resolve_month_offset
 from app.engines.net_worth import NetWorthEngine
 from app.engines.tax_engine import _get_rmd_divisor
 from app.engines.spending import SpendingEngine
@@ -168,32 +169,6 @@ def sale_event_suppressed(cf, property_sales: list[dict]) -> bool:
         for s in property_sales
         if isinstance(s, dict) and s.get("suppress_cashflow_match")
     )
-
-
-def resolve_month_offset(
-    cfg: dict, date_key: str, month_key: str, today: date, default: int = 0,
-) -> int:
-    """A plan month (property sale, SEPP/RRSP start) as an offset from today's month.
-
-    `date_key` holds an absolute calendar month — "2027-07" (a day, if given, is
-    ignored) — and wins. `month_key` is the legacy offset counted FROM TODAY, so it
-    slides a month later every month the plan isn't edited ("sale_month: 13" is
-    always 13 months away). Calendar offsets match build_cashflow_schedule, so a
-    pinned sale and a cashflow event dated the same month land on the same month.
-    A pinned month already past resolves to 0 (now); a malformed one falls back
-    to the legacy offset.
-    """
-    raw = cfg.get(date_key)
-    if raw:
-        try:
-            year, month = int(str(raw)[0:4]), int(str(raw)[5:7])
-            if not 1 <= month <= 12:
-                raise ValueError(raw)
-            return max(0, (year - today.year) * 12 + (month - today.month))
-        except (TypeError, ValueError):
-            logger.warning("Ignoring malformed %s=%r; using %s", date_key, raw, month_key)
-    val = cfg.get(month_key, default)
-    return int(val) if val is not None else default
 
 
 def build_cashflow_schedule(
@@ -1158,7 +1133,8 @@ class FireProjectionsEngine:
 
         # Debt paydown assumptions from custom_assumptions
         debt_cfg = (config.custom_assumptions or {}).get("debt_paydown", {})
-        debt_car_payoff_month = debt_cfg.get("car_loan_payoff_month", None)
+        debt_car_payoff_month = resolve_month_offset(
+            debt_cfg, "car_loan_payoff_date", "car_loan_payoff_month", today, default=None)
         debt_car_payment = debt_cfg.get("car_loan_payment", 0)
 
         # --- Projection assumptions (all configurable via custom_assumptions["projection"]) ---
@@ -1170,7 +1146,8 @@ class FireProjectionsEngine:
         cash_reserve_months = proj_cfg.get("cash_reserve_months", 12)  # emergency fund = N months expenses
         cash_savings_rate_early = proj_cfg.get("cash_savings_rate_early", 0.01)  # 1% real (savings ~4% nominal - 3% inflation)
         cash_savings_rate_late = proj_cfg.get("cash_savings_rate_late", 0.0)  # 0% real (long-term savings ≈ inflation)
-        cash_savings_cutover_month = proj_cfg.get("cash_savings_cutover_month", 60)  # month when rate drops
+        cash_savings_cutover_month = resolve_month_offset(  # month when the rate drops
+            proj_cfg, "cash_savings_cutover_date", "cash_savings_cutover_month", today, default=60)
         # Real estate
         re_appreciation_rate = proj_cfg.get("re_appreciation_rate", 0.01)  # 1% real (RE historically tracks inflation + ~1%)
         primary_property_purchase_price = proj_cfg.get("primary_property_purchase_price", 0)  # for dynamic sale calc

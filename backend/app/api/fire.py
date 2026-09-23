@@ -1,3 +1,4 @@
+from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,6 +10,7 @@ from app.core.database import get_db
 from app.core.merge import json_merge_patch
 from app.engines.fire_projections import FireProjectionsEngine
 from app.engines.net_worth import NetWorthEngine
+from app.engines.plan_months import pin_plan_months
 from app.engines.spending import SpendingEngine
 from app.models.fire_config import FireConfig
 from app.models.fire_config_history import FireConfigHistory
@@ -53,6 +55,13 @@ router = APIRouter(prefix="/api/fire", tags=["fire"])
 # --- FIRE Config ---
 
 
+def _pinned_overrides(overrides: dict | None) -> dict | None:
+    """Scenario overrides with plan-month offsets pinned to calendar months."""
+    if not isinstance(overrides, dict) or "custom_assumptions" not in overrides:
+        return overrides
+    return {**overrides, "custom_assumptions": pin_plan_months(overrides["custom_assumptions"], date.today())}
+
+
 @router.get("/config", response_model=FireConfigResponse)
 async def get_fire_config(
     _user: str = Depends(get_current_user),
@@ -79,7 +88,11 @@ async def update_fire_config(
         if field == "custom_assumptions":
             # RFC 7386 merge patch, NOT replace (fire-master#9): omitted keys
             # survive, explicit null deletes, explicit top-level null clears.
-            value = json_merge_patch(config.custom_assumptions, value)
+            # Plan-month offsets in the patch are pinned to calendar months first
+            # (engines/plan_months.py) — nothing stored slides with today.
+            value = json_merge_patch(
+                config.custom_assumptions, pin_plan_months(value, date.today(), as_patch=True)
+            )
         setattr(config, field, value)
     # JSONB columns need explicit dirty-flagging for SQLAlchemy change detection
     if "custom_assumptions" in update_data:
@@ -135,6 +148,10 @@ async def restore_config_history(
         **{k: v for k, v in entry.data.items() if k in FireConfigUpdate.model_fields}
     )
     for field, value in snapshot.model_dump(exclude_unset=True).items():
+        if field == "custom_assumptions":
+            # An old snapshot may hold plan-month offsets; pin them where they
+            # point today, as every other write does.
+            value = pin_plan_months(value, date.today())
         setattr(config, field, value)
     flag_modified(config, "custom_assumptions")
     await db.commit()
@@ -522,18 +539,19 @@ async def restore_scenario_history(
         raise HTTPException(status_code=404, detail="History entry not found")
 
     data = entry.data
+    overrides = _pinned_overrides(data.get("overrides"))
     scenario = await db.get(FireScenario, UUID(data["id"]))
     if scenario:
         scenario.name = data["name"]
         scenario.description = data.get("description")
-        scenario.overrides = data.get("overrides")
+        scenario.overrides = overrides
         flag_modified(scenario, "overrides")
     else:
         scenario = FireScenario(
             id=UUID(data["id"]),
             name=data["name"],
             description=data.get("description"),
-            overrides=data.get("overrides"),
+            overrides=overrides,
             is_active=False,
             created_at=_datetime.fromisoformat(data["created_at"]),
         )
@@ -558,7 +576,7 @@ async def create_scenario(
     scenario = FireScenario(
         name=data.name,
         description=data.description,
-        overrides=data.overrides,
+        overrides=_pinned_overrides(data.overrides),
         is_active=data.is_active,
     )
     db.add(scenario)
@@ -582,6 +600,8 @@ async def update_scenario(
         raise HTTPException(status_code=404, detail="Scenario not found")
 
     update_data = data.model_dump(exclude_unset=True)
+    if "overrides" in update_data:
+        update_data["overrides"] = _pinned_overrides(update_data["overrides"])
     for field, value in update_data.items():
         setattr(scenario, field, value)
     await db.commit()
