@@ -100,6 +100,7 @@ class RunwayResponse(BaseModel):
     months_remaining: float | None  # from the projection's cash-zero crossing; None if cash never hits zero in the window
     cash_zero_date: _dt.date | None
     income_provenance: str = "modeled"  # "override" | "modeled" — where monthly_income came from
+    modeled_income: float = 0  # this month's income-sources figure, reported even when an override replaces it
     trailing_burn: float  # trailing 90-day average, event-matched payments excluded (the default burn)
     trailing_burn_raw: float = 0  # the same average with nothing excluded
     burn_exclusions: list[BurnExclusion] = []

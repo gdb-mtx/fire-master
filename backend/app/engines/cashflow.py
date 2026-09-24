@@ -373,12 +373,12 @@ class CashflowEngine:
         # Headline figures reflect the CURRENT month's modeled baseline (income
         # tapers, so there is no single flat "income/mo"); months_remaining comes
         # from the projection's actual cash-zero crossing, not flat division.
-        income_now = (
-            income_override if income_override is not None
-            else _cents_to_dollars(self.modeled_income_for_month(
-                sources, today, retirement_date, 0.0, inflation
-            ))
-        )
+        # The modeled figure is reported even when an override replaces it, so the
+        # page's reference line stays put while the user types.
+        modeled_now = _cents_to_dollars(self.modeled_income_for_month(
+            sources, today, retirement_date, 0.0, inflation
+        ))
+        income_now = income_override if income_override is not None else modeled_now
         net_monthly = income_now - monthly_burn
         months_remaining: float | None = None
         if cash_zero_date is not None:
@@ -392,6 +392,7 @@ class CashflowEngine:
             months_remaining=months_remaining,
             cash_zero_date=cash_zero_date,
             income_provenance="override" if income_override is not None else "modeled",
+            modeled_income=round(modeled_now, 2),
             trailing_burn=round(trailing_burn, 2),
             trailing_burn_raw=round(trailing_burn_raw, 2),
             burn_exclusions=burn_exclusions,

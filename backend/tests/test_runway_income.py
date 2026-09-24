@@ -192,6 +192,21 @@ class TestLumpImmunityAndEvents:
         assert r.trailing_income == 22077.0  # still visible — as reference only
 
     @pytest.mark.asyncio
+    async def test_zero_income_override_is_honored_and_modeled_figure_still_reported(self):
+        """A 0 override means "no income" — sources drop out of the projection —
+        while the sources figure is still returned so the page's reference line
+        does not change when the user types."""
+        db = _mock_db_for_runway(
+            cash_cents=50_000_00, trailing_income_cents=3 * 4_870_00,
+            sources=[_src("Consulting", 12_000_00)], events=[],  # $1,000/mo declared
+        )
+        r = await _engine(db).project_runway(months=6, income_override=0, today=FIRST_OF_MONTH)
+        assert all(p.income == 0.0 for p in r.projection)
+        assert r.monthly_income == 0.0 and r.income_provenance == "override"
+        assert r.modeled_income == 1000.0   # what sources would give, unchanged by the override
+        assert r.trailing_income == 4870.0  # reference only
+
+    @pytest.mark.asyncio
     async def test_event_counted_once_in_its_month(self):
         ev = MagicMock()
         ev.amount_cents = 28_000_00

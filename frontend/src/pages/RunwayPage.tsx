@@ -525,11 +525,12 @@ export default function RunwayPage() {
     const runway = (fireConfig.custom_assumptions?.runway ?? {}) as Record<string, number>;
     const seedIncome = runway.monthly_income;
     const seedBurn = runway.monthly_burn;
-    if (seedIncome != null && seedIncome > 0) {
+    // A saved 0 is a real override ("no income"); only null/absent means unset.
+    if (seedIncome != null && seedIncome >= 0) {
       setIncomeDraft(String(seedIncome));
       setIncomeOverride(seedIncome);
     }
-    if (seedBurn != null && seedBurn > 0) {
+    if (seedBurn != null && seedBurn >= 0) {
       setBurnDraft(String(seedBurn));
       setBurnOverride(seedBurn);
     }
@@ -729,7 +730,7 @@ export default function RunwayPage() {
             label="Monthly Income"
             value={formatCurrency(runway.monthly_income)}
             color="var(--green)"
-            sub={`${runway.income_provenance === "override" ? "Your override" : "From income sources"} · 90d actual: ${formatCurrency(runway.trailing_income)}/mo`}
+            sub={`${runway.income_provenance === "override" ? "Your override" : "From income sources"} · received last 90d: ${formatCurrency(runway.trailing_income)}/mo`}
           />
           <StatCard
             label="Monthly Burn"
@@ -759,9 +760,8 @@ export default function RunwayPage() {
                 placeholder="From income sources"
               />
               <span className="text-[10px] text-[var(--text-secondary)] mt-0.5 block whitespace-nowrap">
-                {runway.income_provenance === "override"
-                  ? `Sources: ${formatCurrency(runway.trailing_income)}/mo received 90d`
-                  : `Sources: ${formatCurrency(runway.monthly_income)}/mo`}
+                Income sources: {formatCurrency(runway.modeled_income ?? runway.monthly_income)}/mo
+                {" · "}received last 90d: {formatCurrency(runway.trailing_income)}/mo
               </span>
             </div>
             <div>

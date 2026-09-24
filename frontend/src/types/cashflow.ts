@@ -69,6 +69,8 @@ export interface RunwayResponse {
   months_remaining: number | null;
   cash_zero_date: string | null;
   income_provenance: "override" | "modeled";
+  /** This month's income-sources figure, present even when an override replaces it. */
+  modeled_income?: number;
   trailing_burn: number;
   trailing_income: number;
   projection: MonthlyProjectionPoint[];
