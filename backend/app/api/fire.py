@@ -330,13 +330,19 @@ async def get_wealth_projection(
     end_age: int = 82,
     bridge_months: int = 0,
     spending_override: int | None = None,
+    scenario_id: UUID | None = None,
+    base: bool = False,
     _user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Pool-aware projection of the active plan; `scenario_id` previews another
+    plan without activating it, `base=true` the base plan (unknown id → 404)."""
     engine = FireProjectionsEngine(db)
     return await engine.project_wealth_pools(
         end_age, bridge_months=bridge_months,
+        scenario_id=scenario_id,
         spending_override_cents=spending_override,
+        base_only=base and scenario_id is None,
     )
 
 

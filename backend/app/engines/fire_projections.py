@@ -15,6 +15,7 @@ Two modeling STRUCTURES remain (do not copy mechanics between them):
 """
 
 import logging
+import math
 import uuid as uuid_mod
 from copy import deepcopy
 from datetime import date, timedelta
@@ -39,12 +40,15 @@ from app.engines.tax_engine import _get_rmd_divisor
 from app.engines.spending import SpendingEngine
 from app.schemas.fire import (
     BridgeStatus,
+    CashRule,
     FireNumberResponse,
     IncomeStream,
     LifetimeProjectionResponse,
     Milestone,
     MilestonesResponse,
     NetWorthBreakdown,
+    ProjectionAssumption,
+    ProjectionMilestone,
     ProjectionPoint,
     ReadinessBreakdown,
     ReadinessResponse,
@@ -234,6 +238,136 @@ def cashflow_by_year(by_month: dict[int, list[tuple[str, float]]], total_years: 
     return out
 
 
+def _fmt_pct(rate: float) -> str:
+    """0.065 → '6.5%', 0.06 → '6%' (one decimal at most)."""
+    return f"{round(float(rate) * 100, 1):g}%"
+
+
+def _fmt_usd(dollars: float) -> str:
+    return f"${float(dollars):,.0f}"
+
+
+def _fmt_month(d: date) -> str:
+    return d.strftime("%b %Y")
+
+
+def build_projection_assumptions(config: FireConfig, facts: dict) -> list[ProjectionAssumption]:
+    """Every rule project_wealth_pools() rests on, in one plain sentence each.
+
+    Built from the EFFECTIVE config (active scenario applied), so the list always
+    describes the numbers on screen. `facts` carries what only the run knows
+    (resolved values, which pools exist). A setting the user never set is flagged
+    is_default — the engine default is quietly in use (e.g. brokerage growth 6.5%).
+    """
+    ca = config.custom_assumptions or {}
+    proj = ca.get("projection") or {}
+    sepp = ca.get("sepp") or {}
+    taxable_cfg = ca.get("taxable_pool") or {}
+    out: list[ProjectionAssumption] = []
+
+    def add(key, label, detail, value, kind="setting", is_default=False):
+        out.append(ProjectionAssumption(key=key, label=label, detail=detail, value=value,
+                                        kind=kind, is_default=is_default))
+
+    today = facts["today"]
+    add("real_terms", "All figures are in today's dollars",
+        f"Growth rates are after inflation, so $1 in {today.year + 24} buys what $1 buys now.",
+        "today's $", kind="rule")
+
+    rule = facts["cash_rule"]
+    if rule.mode == "cushion":
+        refill = []
+        if facts["has_iras"] and facts["enforce_rmd"]:
+            refill.append("required IRA withdrawals")
+        refill.append("the brokerage")
+        if facts["has_ira_b"]:
+            refill.append("the IRAs after 59½")
+        if facts["has_roth"]:
+            refill.append("the Roth")
+        floor = f", never less than {_fmt_usd(rule.cushion_floor)}" if rule.cushion_floor else ""
+        detail = (f"Cash is kept at {rule.cushion_months:g} months of what your income doesn't "
+                  f"cover{floor}. When it dips, it's refilled from {', then '.join(refill)}.")
+        if rule.invest_above_cushion:
+            detail += " Cash above the cushion is invested in the brokerage."
+        value = f"{rule.cushion_months:g} months" + (f", {_fmt_usd(rule.cushion_floor)} floor" if rule.cushion_floor else "")
+        add("cash_rule", "Cash cushion", detail, value)
+    else:
+        n = rule.threshold_months
+        add("cash_rule", "When savings start paying",
+            f"Cash pays the bills until it falls below {n:g} months of what income doesn't cover. "
+            "From then on savings pay each month's shortfall, so cash holds about where it was.",
+            f"below {n:g} months", is_default="ira_b_draw_threshold_months" not in proj)
+
+    if facts["has_brokerage"]:
+        add("brokerage_growth", "Brokerage growth",
+            "After inflation." + (" Home-sale money goes here." if facts["sales_to_brokerage"] else ""),
+            f"{_fmt_pct(facts['taxable_rate'])} a year",
+            is_default=taxable_cfg.get("return_rate") is None)
+    if facts["has_iras"]:
+        add("ira_growth", "IRA growth", "After inflation, for every IRA.",
+            f"{_fmt_pct(facts['ira_rate'])} a year", is_default="ira_growth_rate" not in sepp)
+    add("cash_growth", "Cash growth",
+        f"Until {_fmt_month(facts['cash_cutover'])}, then {_fmt_pct(facts['cash_rate_late'])}. "
+        f"Cash above {facts['cash_reserve_months']:g} months of spending earns "
+        f"{_fmt_pct(facts['surplus_rate'])}.",
+        f"{_fmt_pct(facts['cash_rate_early'])} a year",
+        is_default=not any(k in proj for k in ("cash_savings_rate_early", "cash_savings_rate_late",
+                                              "surplus_investment_rate")))
+    if facts["has_real_estate"]:
+        add("home_values", "Home values",
+            "Until each home is sold." if facts["has_sales"] else "Homes you keep.",
+            f"{_fmt_pct(facts['re_rate'])} a year", is_default="re_appreciation_rate" not in proj)
+    slow, floor_m = facts["spending_slow"], facts["spending_floor"]
+    if (slow != 1 or floor_m != 1) and facts["current_age"] < facts["spending_floor_age"]:
+        add("spending_steps", "Spending steps down",
+            f"To {_fmt_pct(slow)} of today's spending at {facts['spending_slow_age']:g}, and "
+            f"{_fmt_pct(floor_m)} at {facts['spending_floor_age']:g}. Retirees tend to spend less as they age.",
+            f"at {facts['spending_slow_age']:g} and {facts['spending_floor_age']:g}",
+            is_default=not any(k in proj for k in ("spending_phase_slow", "spending_phase_floor",
+                                                  "spending_phase_slow_age", "spending_phase_floor_age")))
+    if facts["healthcare_monthly"] > 0 and facts["current_age"] < facts["medicare_age"]:
+        add("health_cost", "Health insurance",
+            f"Added on top of spending until Medicare at {facts['medicare_age']:g}.",
+            f"{_fmt_usd(facts['healthcare_monthly'])} a month")
+    if facts["ss_monthly"] > 0:
+        add("social_security", "Social Security",
+            f"From age {facts['ss_age']:g}, steady in today's dollars.",
+            f"{_fmt_usd(facts['ss_monthly'])} a month")
+    else:
+        add("social_security", "Social Security",
+            "None is counted. Enter your benefit and claiming age in Configure.", "none entered")
+    if facts["has_rental"]:
+        match = ca.get("occupancy_source_match") or []
+        add("rental_occupancy", "Rental income",
+            "Rent is counted at this share of a full year"
+            + (f" (rentals matching: {', '.join(match)})." if match else "."),
+            f"{_fmt_pct(facts['occupancy'])} occupancy",
+            is_default="rental_occupancy_rate" not in ca)
+    if facts["has_events"]:
+        add("uncertain_money", "Uncertain money",
+            "Each planned event counts at its odds on its date: a 50% event counts as half.",
+            "by probability", kind="rule")
+    if facts["has_iras"] and facts["enforce_rmd"]:
+        add("required_withdrawals", "Required withdrawals",
+            f"From {facts['rmd_age']:g} the IRS minimum leaves the IRAs every year; "
+            "what isn't spent goes to the brokerage.",
+            f"from {facts['rmd_age']:g}", kind="rule")
+    if facts["has_ira_a"]:
+        add("ira_access", "Which IRA money can be spent",
+            "After 59½ only the IRA not set aside for 72(t) is drawn. The 72(t) account pays only "
+            "its 72(t) payments" + (f" and required withdrawals from {facts['rmd_age']:g}."
+                                   if facts["enforce_rmd"] else "."),
+            "one IRA only", kind="rule")
+    add("withdrawal_taxes", "Taxes on withdrawals",
+        "IRA, 72(t) and RRIF withdrawals are spent in full. Real results will be lower.",
+        "not counted", kind="limit")
+    add("work_income", "Paychecks and new savings",
+        "Not in this projection yet. Add work income as an income source of type Other, "
+        "with start and end dates, and it will count.",
+        "not counted", kind="limit")
+    return out
+
+
 class ScenarioNotFoundError(LookupError):
     """An explicit scenario_id matched no saved scenario (the API answers 404)."""
 
@@ -257,14 +391,15 @@ class FireProjectionsEngine:
         return config
 
     async def get_effective_config(
-        self, scenario_id: uuid_mod.UUID | None = None
+        self, scenario_id: uuid_mod.UUID | None = None, base_only: bool = False,
     ) -> FireConfig:
         """Get FIRE config merged with the active scenario (or a specific one).
 
         If scenario_id is provided, use that scenario — and raise
         ScenarioNotFoundError when it doesn't exist, rather than quietly answering
         with the base plan under the scenario's name.
-        Otherwise, check for an active scenario.
+        Otherwise, check for an active scenario — unless base_only, which answers
+        with the base plan whatever is active (the Retirement page's comparison).
         If no scenario, returns a copy of the base config.
 
         Always returns a DETACHED copy — safe to read or tweak, never written back.
@@ -282,7 +417,7 @@ class FireProjectionsEngine:
             scenario = result.scalar_one_or_none()
             if scenario is None:
                 raise ScenarioNotFoundError(f"Scenario {scenario_id} not found")
-        else:
+        elif not base_only:
             result = await self.db.execute(
                 select(FireScenario).where(FireScenario.is_active == True).limit(1)
             )
@@ -1081,6 +1216,7 @@ class FireProjectionsEngine:
         bridge_months: int = 0,
         scenario_id: uuid_mod.UUID | None = None,
         spending_override_cents: int | None = None,
+        base_only: bool = False,
     ) -> WealthPoolProjection:
         """Pool-aware wealth projection: cash, IRA-A (SEPP), IRA-B (growth).
 
@@ -1089,8 +1225,10 @@ class FireProjectionsEngine:
         SEPP/IRA split parameters stored in fire_config.custom_assumptions["sepp"].
         If scenario_id is provided, uses that scenario's overrides directly.
         If spending_override_cents is provided, replaces target_annual_spending.
+        base_only projects the base plan even while a scenario is active.
         """
-        config = await self.get_effective_config(scenario_id=scenario_id)
+        config = (await self.get_effective_config(scenario_id=scenario_id, base_only=True)
+                  if base_only else await self.get_effective_config(scenario_id=scenario_id))
         if not config.date_of_birth:
             return WealthPoolProjection(
                 points=[], events=[], cash_zero_month=None,
@@ -1201,6 +1339,19 @@ class FireProjectionsEngine:
         spending_phase_floor_age = proj_cfg.get("spending_phase_floor_age", 80)  # when no-go starts
         # IRA-B draw behavior
         ira_b_draw_threshold_months = proj_cfg.get("ira_b_draw_threshold_months", 12)  # draw when cash < N months of gap
+        # Cash cushion (opt-in, Oct 2026). Setting cash_cushion_months switches the
+        # waterfall to "keep cash at N months of the REGULAR shortfall, never less
+        # than cash_cushion_floor dollars; refill it from required withdrawals, then
+        # the brokerage, then IRA-B after 59½, then the Roth". The shortfall leaves
+        # cashflow events and one-off lumps out, so a windfall month can't zero the
+        # cushion. invest_cash_above_cushion also moves cash above the cushion into
+        # the brokerage each month. Unset = the legacy threshold rule above, byte
+        # for byte (tests/test_wealth_pools_golden.py).
+        _cushion_months = proj_cfg.get("cash_cushion_months")
+        cushion_on = _cushion_months is not None
+        cushion_months = max(0.0, float(_cushion_months or 0))
+        cushion_floor = max(0.0, float(proj_cfg.get("cash_cushion_floor") or 0)) if cushion_on else 0.0
+        invest_above_cushion = cushion_on and bool(proj_cfg.get("invest_cash_above_cushion", False))
         # Required minimum distributions (fire-master#14). From config.rmd_start_age
         # the IRS Uniform Lifetime minimum is forced out of the tax-deferred IRAs
         # (IRA-A + IRA-B aggregate, as the IRS aggregates traditional IRAs) whenever
@@ -1315,6 +1466,7 @@ class FireProjectionsEngine:
         re_primary = _cents_to_dollars(re_primary)
         re_income_prop = _cents_to_dollars(re_income_prop)
         re_equity = re_secondary + re_primary + re_income_prop
+        re_primary_start, re_secondary_start, re_income_start = re_primary, re_secondary, re_income_prop
         secondary_sold = False
         illiquid = breakdown.illiquid_private
 
@@ -1345,6 +1497,25 @@ class FireProjectionsEngine:
         cf_by_month, cf_labels_by_month = build_cashflow_schedule(
             cashflow_events, today, total_months, skip=_sale_suppresses,
         )
+        # The one-off subset of the same schedule (same rules, same skip): what the
+        # Retirement page shows as one-time money. Reporting only — the math above
+        # already holds these amounts.
+        one_off_by_month, _ = build_cashflow_schedule(
+            [cf for cf in cashflow_events if not cf.is_recurring], today, total_months,
+            skip=_sale_suppresses,
+        )
+
+        def _cash_interest(cash_open: float, expenses_m: float, m: int) -> float:
+            """Tiered interest on the OPENING balance: the reserve (N months of
+            expenses) earns the savings rate, anything above it the surplus rate."""
+            savings_rate = cash_savings_rate_early if m < cash_savings_cutover_month else cash_savings_rate_late
+            reserve_threshold = max(0, expenses_m) * cash_reserve_months
+            if cash_open > reserve_threshold and cash_open > 0:
+                reserve_interest = reserve_threshold * (savings_rate / 12)
+                surplus = cash_open - reserve_threshold
+                surplus_interest = surplus * (surplus_investment_rate / 12)
+                return reserve_interest + surplus_interest
+            return max(0, cash_open) * (savings_rate / 12)
 
         # Build income source schedule (non-salary, by month offset from today)
         def _source_income_at_month(m: int) -> float:
@@ -1374,6 +1545,10 @@ class FireProjectionsEngine:
         chart_events: list[dict] = []
         cash_zero_month = None
         sepp_depletes_age = None
+        money_runs_out_month = None
+        rrsp_runs_out_month = None
+        sale_moments: list[ProjectionMilestone] = []
+        starting_cash = cash
 
         for m in range(total_months):
             age = current_age + m / 12.0
@@ -1381,16 +1556,24 @@ class FireProjectionsEngine:
 
             # --- Income (non-IRA) ---
             income = _source_income_at_month(m)
+            # Reporting split of `income` (never feeds the default math): Social
+            # Security, cashflow events, and one-off lumps that land in cash
+            # outside the event table (legacy sale proceeds, a recast paydown).
+            ss_inc = ev_in = ev_out = lump_in = lump_out = sepp_part = 0.0
+            cushion_val = cash_invested = 0.0
 
             # Social Security
             if m >= ss_start_month:
                 income += ss_amount
+                ss_inc = ss_amount
 
             # RRSP/RRIF drawdown — tracked as visible pool, not lumped into income
             rrsp_draw = 0.0
             if m >= rrsp_start_month and rrsp_remaining > 0:
                 rrsp_draw = min(rrsp_monthly_net, rrsp_remaining)
                 rrsp_remaining -= rrsp_draw
+                if rrsp_remaining <= 0 and rrsp_runs_out_month is None:
+                    rrsp_runs_out_month = m
 
             # Cashflow events: accumulate money every month an event fires.
             # (Sale-suppressed events were filtered out at construction, so
@@ -1398,6 +1581,10 @@ class FireProjectionsEngine:
             if m in cf_by_month:
                 for label, amount in cf_by_month[m]:
                     income += amount
+                    if amount > 0:
+                        ev_in += amount
+                    else:
+                        ev_out -= amount
                     # Both matchers below convert an asset into cash, so only an
                     # INCOME event (amount > 0) can trigger them — the same rule as
                     # sale_event_suppressed and _single_pool_event_skip. An expense
@@ -1428,6 +1615,10 @@ class FireProjectionsEngine:
                 # Net proceeds go to cash (after mortgage paydown allocation)
                 cash_from_sale = sauvie_net_proceeds - sauvie_miami_mortgage_paydown - sauvie_pc_loan_paydown
                 income += max(0, cash_from_sale)
+                lump_in += max(0, cash_from_sale)
+                sale_moments.append(ProjectionMilestone(
+                    month=m, age=round(age, 1), kind="sale", label="Income property sold",
+                    amount=round(max(0, cash_from_sale), 0), destination="cash"))
                 # Remove the income property from RE equity
                 re_equity -= re_income_prop
                 re_income_prop = 0
@@ -1449,6 +1640,7 @@ class FireProjectionsEngine:
             if recast_enabled and m == recast_month and not mortgage_recast_done:
                 mortgage_recast_done = True
                 income -= recast_paydown  # cash outflow for principal paydown
+                lump_out += recast_paydown
                 # Reduce ongoing burn by P&I savings (monthly_burn includes the original cost)
                 pi_savings = primary_property_mortgage_pi - recast_new_pi
                 monthly_burn -= pi_savings
@@ -1488,6 +1680,13 @@ class FireProjectionsEngine:
                 else:
                     actual_proceeds = net_after_tax  # no mortgage info — assume paid off
                 income += actual_proceeds
+                if actual_proceeds >= 0:
+                    lump_in += actual_proceeds
+                else:
+                    lump_out -= actual_proceeds
+                sale_moments.append(ProjectionMilestone(
+                    month=m, age=round(age, 1), kind="sale", label="Primary home sold",
+                    amount=round(actual_proceeds, 0), destination="cash"))
                 re_equity -= re_primary  # primary-property equity moves to cash
                 re_primary = 0
                 event_label = f"Sell Miami (+${actual_proceeds:,.0f})"
@@ -1503,8 +1702,18 @@ class FireProjectionsEngine:
                     net_proceeds = 0.0 if is_closed(s) else property_sale_net_proceeds(s, m, re_appreciation_rate)
                     if s.get("proceeds_to", "taxable") == "cash":
                         income += net_proceeds
+                        if net_proceeds >= 0:
+                            lump_in += net_proceeds
+                        else:
+                            lump_out -= net_proceeds
                     else:
                         taxable += net_proceeds
+                    if not is_closed(s):  # a closed sale already happened: no moment ahead
+                        sale_moments.append(ProjectionMilestone(
+                            month=m, age=round(age, 1), kind="sale",
+                            label=f"{key.replace('_', ' ').title()} sold",
+                            amount=round(net_proceeds, 0),
+                            destination="cash" if s.get("proceeds_to", "taxable") == "cash" else "brokerage"))
                     # Move the matching RE bucket out of equity (also keeps the property
                     # flags coherent for the LEGACY STR/recast/marker paths)
                     bucket = s.get("re_bucket")
@@ -1594,6 +1803,7 @@ class FireProjectionsEngine:
                 draw = min(sepp_monthly, ira_a)
                 ira_a -= draw
                 ira_draw += draw
+                sepp_part = draw
                 if ira_a <= 0 and sepp_depletes_age is None:
                     sepp_depletes_age = age
 
@@ -1608,113 +1818,164 @@ class FireProjectionsEngine:
             if roth > 0:
                 roth *= (1 + roth_rate_m)
 
-            # --- Drawdown waterfall ---
-            # Order: taxable brokerage → IRA-B (after 59½) → forced RMDs → Roth.
-            # Each step sees only the gap the previous ones left, and a pool is
-            # drawable whenever it holds money — configured starting balance, sale
-            # proceeds, or RMD redeposits alike (no flag gates this block; see
-            # use_generic_sales above, fire-master#12).
-            #
-            # Taxable brokerage is penalty-free at any age → draw it FIRST when cash
-            # is thin (this gap credits RRSP income). IRA-B is drawn only after 59½,
-            # on the residual gap, using the SAME formula as the pre-taxable engine
-            # (it does NOT credit rrsp_draw) so legacy baselines are unaffected.
-            # This is what lets the projection answer "is 72(t)/SEPP still needed?":
-            # with sepp_monthly=0, if taxable covers every pre-59½ gap (cash never
-            # hits zero), it isn't.
             taxable_draw = 0.0
-            gap_t = expenses - income - ira_draw - rrsp_draw
-            if gap_t > 0 and cash < gap_t * ira_b_draw_threshold_months and taxable > 0:
-                taxable_draw = min(gap_t, taxable)
-                taxable -= taxable_draw
-            if m >= months_to_59_5 and ira_b > 0:
-                gap_b = expenses - income - ira_draw - taxable_draw
-                if gap_b > 0 and cash < gap_b * ira_b_draw_threshold_months:
-                    b_draw = min(gap_b, ira_b)
+            rmd_redeposit = 0.0
+            roth_draw = 0.0
+            if not cushion_on:
+                # --- Drawdown waterfall ---
+                # Order: taxable brokerage → IRA-B (after 59½) → forced RMDs → Roth.
+                # Each step sees only the gap the previous ones left, and a pool is
+                # drawable whenever it holds money — configured starting balance, sale
+                # proceeds, or RMD redeposits alike (no flag gates this block; see
+                # use_generic_sales above, fire-master#12).
+                #
+                # Taxable brokerage is penalty-free at any age → draw it FIRST when cash
+                # is thin (this gap credits RRSP income). IRA-B is drawn only after 59½,
+                # on the residual gap, using the SAME formula as the pre-taxable engine
+                # (it does NOT credit rrsp_draw) so legacy baselines are unaffected.
+                # This is what lets the projection answer "is 72(t)/SEPP still needed?":
+                # with sepp_monthly=0, if taxable covers every pre-59½ gap (cash never
+                # hits zero), it isn't.
+                gap_t = expenses - income - ira_draw - rrsp_draw
+                if gap_t > 0 and cash < gap_t * ira_b_draw_threshold_months and taxable > 0:
+                    taxable_draw = min(gap_t, taxable)
+                    taxable -= taxable_draw
+                if m >= months_to_59_5 and ira_b > 0:
+                    gap_b = expenses - income - ira_draw - taxable_draw
+                    if gap_b > 0 and cash < gap_b * ira_b_draw_threshold_months:
+                        b_draw = min(gap_b, ira_b)
+                        ira_b -= b_draw
+                        ira_draw += b_draw
+
+                # --- Required minimum distributions (fire-master#14) ---
+                # From rmd_start_age the IRS forces (aggregate traditional IRA balance /
+                # Uniform Lifetime divisor) out per year, whether or not it is needed.
+                # Monthly approximation: balance / divisor / 12, mirroring the tax
+                # engine's planner. When the month's voluntary draws (SEPP + IRA-B gap
+                # draw) already meet it nothing changes; otherwise the shortfall is
+                # forced out of IRA-B first, then IRA-A. Forced money is cash in hand:
+                # it covers whatever gap is still open this month, and the surplus is
+                # NOT spending — it is redeposited (gross) into the taxable brokerage,
+                # where next month's waterfall can draw it. The redeposit rides inside
+                # ira_draw for reporting (it IS a taxable distribution) but is carried
+                # separately as rmd_redeposit so the cash line never counts it.
+                if enforce_rmd and age >= rmd_start_age:
+                    deferred = max(0.0, ira_a) + max(0.0, ira_b)
+                    if deferred > 0:
+                        rmd_monthly = deferred / _get_rmd_divisor(int(age)) / 12
+                        if rmd_monthly > ira_draw:
+                            excess = min(rmd_monthly - ira_draw, deferred)
+                            from_b = min(excess, max(0.0, ira_b))
+                            ira_b -= from_b
+                            ira_a -= excess - from_b
+                            if ira_a <= 0 and sepp_monthly and sepp_depletes_age is None and m >= sepp_start_month:
+                                sepp_depletes_age = age  # RMDs finished off IRA-A
+                            gap_open = max(0.0, expenses - income - ira_draw - rrsp_draw - taxable_draw)
+                            ira_draw += excess
+                            rmd_redeposit = max(0.0, excess - gap_open)
+                            taxable += rmd_redeposit
+
+                # --- Roth: last resort on whatever gap survives (fire-master#13) ---
+                if roth > 0:
+                    gap_r = expenses - income - (ira_draw - rmd_redeposit) - rrsp_draw - taxable_draw
+                    if gap_r > 0 and cash < gap_r * ira_b_draw_threshold_months:
+                        roth_draw = min(gap_r, roth)
+                        roth -= roth_draw
+
+                # Cash repair: negative cash is genuine bridge stress only while
+                # no drawable pool exists — nobody runs checking negative for
+                # years beside a funded brokerage. Once a penalty-free pool has
+                # money (taxable first, then Roth), sell enough extra to bring cash
+                # back to zero. Pre-rescue dips (no pool yet) still show, and
+                # cash == 0 still trips cash_zero_month, so the stress signal survives.
+                # (The repair reaches cash through the net line below, via *_draw.)
+                # The shortfall is measured AFTER this month's flows (interest aside:
+                # it accrues on the opening balance). Measuring the OPENING balance
+                # sold a month's deficit out of the pool even when the month's own
+                # inflow — a payout, a sale — already covered it, stranding the money
+                # in cash; and it let a month that starts positive but ends negative
+                # wait a month for its repair.
+                cash_after_flows = cash + (income + ira_draw - rmd_redeposit + rrsp_draw
+                                           + taxable_draw + roth_draw - expenses)
+                deficit = -cash_after_flows if cash_after_flows < 0 else 0.0
+                if deficit > 0 and taxable > 0:
+                    repair = min(deficit, taxable)
+                    taxable -= repair
+                    taxable_draw += repair
+                    deficit -= repair
+                if deficit > 0 and roth > 0:
+                    repair = min(deficit, roth)
+                    roth -= repair
+                    roth_draw += repair
+                    deficit -= repair
+
+            else:
+                # --- Cash cushion waterfall (opt-in; see cushion_on above) ---
+                # Interest first (it accrues on the opening balance either way) so the
+                # refill lands cash exactly on the cushion. The cushion is sized on the
+                # REGULAR shortfall: spending minus income sources, Social Security,
+                # 72(t) and RRIF. Events and lumps stay out of it (a windfall month once
+                # set it to $0); they still move cash through `income`, so cash above the
+                # cushion pays first and a lump that drains cash triggers a refill.
+                cash_interest = _cash_interest(cash, expenses, m)
+                regular_income = income - (ev_in - ev_out) - (lump_in - lump_out)
+                shortfall = expenses - regular_income - ira_draw - rrsp_draw  # ira_draw is the 72(t) payment so far
+                cushion_val = max(cushion_floor, cushion_months * max(0.0, shortfall))
+                cash_after = cash + income + ira_draw + rrsp_draw + cash_interest - expenses
+                need = max(0.0, cushion_val - cash_after)
+                # 1. Required withdrawals leave the IRAs whether needed or not, so they
+                #    fill the need before anything is sold; the rest is redeposited.
+                if enforce_rmd and age >= rmd_start_age:
+                    deferred = max(0.0, ira_a) + max(0.0, ira_b)
+                    if deferred > 0:
+                        rmd_monthly = deferred / _get_rmd_divisor(int(age)) / 12
+                        if rmd_monthly > ira_draw:
+                            excess = min(rmd_monthly - ira_draw, deferred)
+                            from_b = min(excess, max(0.0, ira_b))
+                            ira_b -= from_b
+                            ira_a -= excess - from_b
+                            if ira_a <= 0 and sepp_monthly and sepp_depletes_age is None and m >= sepp_start_month:
+                                sepp_depletes_age = age  # RMDs finished off IRA-A
+                            used = min(excess, need)
+                            need -= used
+                            ira_draw += excess
+                            rmd_redeposit = excess - used
+                            taxable += rmd_redeposit
+                # 2. The brokerage (penalty-free at any age).
+                if need > 0 and taxable > 0:
+                    taxable_draw = min(need, taxable)
+                    taxable -= taxable_draw
+                    need -= taxable_draw
+                # 3. IRA-B, from 59½.
+                if need > 0 and m >= months_to_59_5 and ira_b > 0:
+                    b_draw = min(need, ira_b)
                     ira_b -= b_draw
                     ira_draw += b_draw
-
-            # --- Required minimum distributions (fire-master#14) ---
-            # From rmd_start_age the IRS forces (aggregate traditional IRA balance /
-            # Uniform Lifetime divisor) out per year, whether or not it is needed.
-            # Monthly approximation: balance / divisor / 12, mirroring the tax
-            # engine's planner. When the month's voluntary draws (SEPP + IRA-B gap
-            # draw) already meet it nothing changes; otherwise the shortfall is
-            # forced out of IRA-B first, then IRA-A. Forced money is cash in hand:
-            # it covers whatever gap is still open this month, and the surplus is
-            # NOT spending — it is redeposited (gross) into the taxable brokerage,
-            # where next month's waterfall can draw it. The redeposit rides inside
-            # ira_draw for reporting (it IS a taxable distribution) but is carried
-            # separately as rmd_redeposit so the cash line never counts it.
-            rmd_redeposit = 0.0
-            if enforce_rmd and age >= rmd_start_age:
-                deferred = max(0.0, ira_a) + max(0.0, ira_b)
-                if deferred > 0:
-                    rmd_monthly = deferred / _get_rmd_divisor(int(age)) / 12
-                    if rmd_monthly > ira_draw:
-                        excess = min(rmd_monthly - ira_draw, deferred)
-                        from_b = min(excess, max(0.0, ira_b))
-                        ira_b -= from_b
-                        ira_a -= excess - from_b
-                        if ira_a <= 0 and sepp_monthly and sepp_depletes_age is None and m >= sepp_start_month:
-                            sepp_depletes_age = age  # RMDs finished off IRA-A
-                        gap_open = max(0.0, expenses - income - ira_draw - rrsp_draw - taxable_draw)
-                        ira_draw += excess
-                        rmd_redeposit = max(0.0, excess - gap_open)
-                        taxable += rmd_redeposit
-
-            # --- Roth: last resort on whatever gap survives (fire-master#13) ---
-            roth_draw = 0.0
-            if roth > 0:
-                gap_r = expenses - income - (ira_draw - rmd_redeposit) - rrsp_draw - taxable_draw
-                if gap_r > 0 and cash < gap_r * ira_b_draw_threshold_months:
-                    roth_draw = min(gap_r, roth)
+                    need -= b_draw
+                # 4. The Roth, last (fire-master#13).
+                if need > 0 and roth > 0:
+                    roth_draw = min(need, roth)
                     roth -= roth_draw
-
-            # Cash repair: negative cash is genuine bridge stress only while
-            # no drawable pool exists — nobody runs checking negative for
-            # years beside a funded brokerage. Once a penalty-free pool has
-            # money (taxable first, then Roth), sell enough extra to bring cash
-            # back to zero. Pre-rescue dips (no pool yet) still show, and
-            # cash == 0 still trips cash_zero_month, so the stress signal survives.
-            # (The repair reaches cash through the net line below, via *_draw.)
-            # The shortfall is measured AFTER this month's flows (interest aside:
-            # it accrues on the opening balance). Measuring the OPENING balance
-            # sold a month's deficit out of the pool even when the month's own
-            # inflow — a payout, a sale — already covered it, stranding the money
-            # in cash; and it let a month that starts positive but ends negative
-            # wait a month for its repair.
-            cash_after_flows = cash + (income + ira_draw - rmd_redeposit + rrsp_draw
-                                       + taxable_draw + roth_draw - expenses)
-            deficit = -cash_after_flows if cash_after_flows < 0 else 0.0
-            if deficit > 0 and taxable > 0:
-                repair = min(deficit, taxable)
-                taxable -= repair
-                taxable_draw += repair
-                deficit -= repair
-            if deficit > 0 and roth > 0:
-                repair = min(deficit, roth)
-                roth -= repair
-                roth_draw += repair
-                deficit -= repair
+                    need -= roth_draw
+                # No separate repair: the cushion is >= $0, so meeting the need already
+                # covers any negative balance while a pool has money.
 
             # --- Net cash flow ---
             # Cash earns tiered returns:
             # - Reserve (N months of expenses): savings rate (4% yr 1-5, 2% after)
             # - Surplus above reserve: investment rate (default 6%)
-            savings_rate = cash_savings_rate_early if m < cash_savings_cutover_month else cash_savings_rate_late
-            reserve_threshold = max(0, expenses) * cash_reserve_months
-            if cash > reserve_threshold and cash > 0:
-                reserve_interest = reserve_threshold * (savings_rate / 12)
-                surplus = cash - reserve_threshold
-                surplus_interest = surplus * (surplus_investment_rate / 12)
-                cash_interest = reserve_interest + surplus_interest
-            else:
-                cash_interest = max(0, cash) * (savings_rate / 12)
+            if not cushion_on:
+                cash_interest = _cash_interest(cash, expenses, m)
             # ira_draw includes any RMD redeposit, which went to taxable, not cash.
             net = (income + ira_draw - rmd_redeposit + rrsp_draw + taxable_draw
                    + roth_draw + cash_interest - expenses)
             cash += net
+            # Invest cash above the cushion (opt-in): it moves to the brokerage at
+            # month end, so cash rests on the cushion and the brokerage pays the bills.
+            if invest_above_cushion and cash > cushion_val:
+                cash_invested = cash - cushion_val
+                taxable += cash_invested
+                cash = cushion_val
 
             if cash <= 0 and cash_zero_month is None:
                 cash_zero_month = m
@@ -1759,9 +2020,18 @@ class FireProjectionsEngine:
                     cash_interest=round(cash_interest, 0),
                     month=m,
                     event=event_label,
+                    ss_income=round(ss_inc, 0),
+                    event_income=round(ev_in + lump_in, 0),
+                    event_expense=round(ev_out + lump_out, 0),
+                    one_time_income=round(
+                        sum(a for _, a in one_off_by_month.get(m, ()) if a > 0) + lump_in, 0),
+                    sepp_draw=round(sepp_part, 0),
+                    cash_cushion=round(cushion_val, 0),
+                    cash_invested=round(cash_invested, 0),
                 ))
 
             if cash <= 0 and ira_b <= 0 and ira_a <= 0 and taxable <= 0 and roth <= 0:
+                money_runs_out_month = m
                 break
 
         # Key events for chart markers
@@ -1808,6 +2078,94 @@ class FireProjectionsEngine:
                 {"month": months_to_rmd, "age": float(rmd_start_age), "label": f"RMDs at {rmd_start_age}", "color": "#4d8eff"},
             )
 
+        # --- Plan moments, in plain words (Retirement page milestones) ---
+        moments: list[ProjectionMilestone] = list(sale_moments)
+
+        def _moment(month, kind, label, amount=None):
+            if month is not None and 0 < month < total_months:
+                moments.append(ProjectionMilestone(
+                    month=month, age=round(current_age + month / 12, 1), kind=kind,
+                    label=label, amount=None if amount is None else round(amount, 0)))
+
+        def _first_month_at(age_mark: float):
+            """First month the engine treats as `age >= age_mark` (same test as the loop)."""
+            m0 = math.ceil((age_mark - current_age) * 12 - 1e-9)
+            return m0 if 0 <= m0 < total_months else None
+
+        has_iras = bool(ira_a_start or ira_b_start)
+        if sepp_monthly and ira_a_start:
+            _moment(sepp_start_month, "draw", "72(t) payments start", sepp_monthly)
+        if rrsp_monthly_net and rrsp_total_available:
+            _moment(rrsp_start_month, "draw", "RRIF payments start", rrsp_monthly_net)
+            _moment(rrsp_runs_out_month, "draw", "RRIF money runs out")
+        if has_iras and current_age < 59.5:
+            _moment(months_to_59_5, "age", "Age 59½")
+        if ss_amount > 0:
+            _moment(ss_start_month, "age", "Social Security starts", ss_amount)
+        if healthcare_monthly > 0 and current_age < medicare_age:
+            _moment(_first_month_at(medicare_age), "age", f"Medicare at {medicare_age:g}", -healthcare_monthly)
+        if spending_phase_slow != 1 and current_age < spending_phase_slow_age:
+            _moment(_first_month_at(spending_phase_slow_age), "age",
+                    f"Spending steps to {_fmt_pct(spending_phase_slow)}")
+        if spending_phase_floor != 1 and current_age < spending_phase_floor_age:
+            _moment(_first_month_at(spending_phase_floor_age), "age",
+                    f"Spending steps to {_fmt_pct(spending_phase_floor)}")
+        if enforce_rmd and has_iras and current_age < rmd_start_age:
+            _moment(_first_month_at(rmd_start_age), "age", "Required IRA withdrawals start")
+        for _m, _entries in one_off_by_month.items():
+            for _label, _amount in _entries:
+                if abs(_amount) >= 5_000:
+                    _moment(_m, "money", _label, _amount)
+        if money_runs_out_month is not None:
+            # The plan ends here: later moments have no chart to land on.
+            moments = [x for x in moments if x.month <= money_runs_out_month]
+            moments.append(ProjectionMilestone(
+                month=money_runs_out_month, age=round(current_age + money_runs_out_month / 12, 1),
+                kind="warning", label="Money runs out"))
+        moments.sort(key=lambda x: (x.month, x.kind != "sale"))
+
+        cash_rule = CashRule(
+            mode="cushion" if cushion_on else "threshold",
+            cushion_months=cushion_months if cushion_on else None,
+            cushion_floor=cushion_floor,
+            invest_above_cushion=invest_above_cushion,
+            threshold_months=float(ira_b_draw_threshold_months),
+        )
+        assumptions = build_projection_assumptions(config, {
+            "today": today,
+            "cash_rule": cash_rule,
+            "current_age": current_age,
+            "has_iras": has_iras,
+            "has_ira_a": bool(ira_a_start),
+            "has_ira_b": bool(ira_b_start),
+            "has_roth": bool(roth_cfg.get("starting_balance")),
+            "enforce_rmd": enforce_rmd,
+            "rmd_age": rmd_start_age,
+            "has_brokerage": bool(taxable_cfg.get("starting_balance")) or any(p.taxable > 0 for p in points),
+            "sales_to_brokerage": any(x.kind == "sale" and x.destination == "brokerage" for x in sale_moments),
+            "taxable_rate": taxable_rate_m * 12,
+            "ira_rate": ira_growth_rate,
+            "cash_rate_early": cash_savings_rate_early,
+            "cash_rate_late": cash_savings_rate_late,
+            "cash_cutover": today + relativedelta(months=cash_savings_cutover_month),
+            "cash_reserve_months": cash_reserve_months,
+            "surplus_rate": surplus_investment_rate,
+            "has_real_estate": (re_primary_start + re_secondary_start + re_income_start) > 0,
+            "has_sales": bool(sales_by_month) or bool(miami_sale_month) or sauvie_sale_enabled,
+            "re_rate": re_appreciation_rate,
+            "spending_slow": spending_phase_slow,
+            "spending_floor": spending_phase_floor,
+            "spending_slow_age": spending_phase_slow_age,
+            "spending_floor_age": spending_phase_floor_age,
+            "healthcare_monthly": healthcare_monthly,
+            "medicare_age": medicare_age,
+            "ss_monthly": ss_amount,
+            "ss_age": ss_claim_age,
+            "has_rental": any(src.income_type.value == "rental" for src in sources),
+            "occupancy": rental_occupancy_rate,
+            "has_events": bool(cf_by_month),
+        })
+
         return WealthPoolProjection(
             points=points,
             events=chart_events,
@@ -1816,6 +2174,12 @@ class FireProjectionsEngine:
             sepp_monthly=sepp_monthly,
             sepp_depletes_age=round(sepp_depletes_age, 1) if sepp_depletes_age else None,
             demo_persona=bool((config.custom_assumptions or {}).get("demo_persona")),
+            starting_cash=round(starting_cash, 0),
+            end_age=end_age,
+            money_runs_out_month=money_runs_out_month,
+            cash_rule=cash_rule,
+            milestones=moments,
+            assumptions=assumptions,
         )
 
     async def project_wealth_pools_for_scenario(

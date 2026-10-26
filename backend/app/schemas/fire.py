@@ -252,6 +252,49 @@ class WealthPoolPoint(BaseModel):
     cash_interest: float = 0  # monthly interest earned
     month: int | None = None  # month offset from start
     event: str | None = None  # event marker label
+    # Reporting split of the month (Oct 2026 Retirement redesign). Additive: none
+    # of these feed the legacy math. Display identity, per month:
+    #   expenses + event_expense + Δcash + cash_invested
+    #     = (income − ss_income − event_income + event_expense)   regular income
+    #       + (event_income − one_time_income)                    recurring events
+    #       + cash_interest + ss_income + one_time_income
+    #       + (ira_draw − rmd_redeposit) + roth_draw + rrsp_draw + taxable_draw
+    ss_income: float = 0  # Social Security inside `income`
+    event_income: float = 0  # positive cashflow events + one-off lumps into cash (inside `income`)
+    event_expense: float = 0  # negative cashflow events + one-off lumps out of cash, as a positive number
+    one_time_income: float = 0  # the non-recurring part of event_income
+    sepp_draw: float = 0  # the 72(t) payment inside ira_draw
+    cash_cushion: float = 0  # cash target this month (projection.cash_cushion_months); 0 when unset
+    cash_invested: float = 0  # cash above the cushion moved to the brokerage (invest_cash_above_cushion)
+
+
+class ProjectionMilestone(BaseModel):
+    """A dated moment in the plan, in plain words, computed from the data."""
+    month: int  # month offset from today
+    age: float
+    kind: str  # sale | draw | age | money | warning
+    label: str  # "Coastal Condo sold", "Social Security starts", an event's own name
+    amount: float | None = None  # signed $: sale net proceeds, one-off event, monthly payment
+    destination: str | None = None  # sale proceeds: "brokerage" | "cash"
+
+
+class ProjectionAssumption(BaseModel):
+    """One rule the projection rests on, as the effective config sets it."""
+    key: str
+    label: str
+    detail: str  # one plain sentence (or two)
+    value: str  # display value: "6.5% a year", "6 months", "not counted"
+    kind: str  # setting (from the plan) | rule (how the engine works) | limit (not modeled yet)
+    is_default: bool = False  # a setting the user never set: the engine default is in use
+
+
+class CashRule(BaseModel):
+    """How the projection decides when savings refill cash."""
+    mode: str  # "cushion" (projection.cash_cushion_months set) | "threshold" (legacy)
+    cushion_months: float | None = None
+    cushion_floor: float = 0
+    invest_above_cushion: bool = False
+    threshold_months: float = 12  # legacy rule: pools pay once cash < N months of the gap
 
 
 class WealthPoolProjection(BaseModel):
@@ -262,6 +305,13 @@ class WealthPoolProjection(BaseModel):
     sepp_monthly: float  # SEPP payment amount
     sepp_depletes_age: float | None  # age when IRA-A hits zero
     demo_persona: bool = False  # config still carries the seeded persona — data is synthetic
+    # Oct 2026 Retirement redesign (additive)
+    starting_cash: float = 0  # cash at month 0, before the first month's flows
+    end_age: int | None = None
+    money_runs_out_month: int | None = None  # cash ≤ 0 with every spendable pool empty
+    cash_rule: CashRule | None = None
+    milestones: list[ProjectionMilestone] = []
+    assumptions: list[ProjectionAssumption] = []
 
 
 class SpendingSensitivityPoint(BaseModel):
