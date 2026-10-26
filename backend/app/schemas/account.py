@@ -37,6 +37,13 @@ class AccountResponse(BaseModel):
     def has_enrichment(self) -> bool:
         return any([self.notes, self.tags, self.fire_role, self.strategy])
 
+    @computed_field
+    @property
+    def monarch_orphaned_at(self) -> str | None:
+        """Set when Monarch stopped returning this account (deleted, hidden or
+        re-linked): sync excluded it from net worth. Cleared if it reappears."""
+        return (self.custom_data or {}).get("monarch_orphaned_at")
+
     model_config = {"from_attributes": True}
 
     @classmethod

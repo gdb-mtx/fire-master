@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import case, delete, select, text
+from sqlalchemy import Text, case, cast, delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,13 @@ BATCH_SIZE = 500
 # plus a buffer. If the stack is ever offline longer than this, run a full backfill:
 #   uv run python -c "import asyncio; from datetime import date; ..."  (or run_full_sync(full_history=True))
 INCREMENTAL_SYNC_DAYS = 45
+
+
+# custom_data key stamped on a MONARCH account Monarch stopped returning (see
+# _orphan_accounts_stmt). Cleared by the upsert when the account reappears.
+ORPHAN_FLAG = "monarch_orphaned_at"
+# Accounts with this fire_role are never orphaned, whatever Monarch returns.
+SYSTEM_FIRE_ROLE = "system"
 
 
 def _chunks(lst: list, n: int):
@@ -138,7 +145,44 @@ def _account_upsert_stmt(raw: dict):
                 "monarch_subtype": raw.get("subtype"),
                 "is_closed": raw.get("isArchived", False),
             },
+            # Monarch returned it again: drop the orphan flag. include_in_net_worth
+            # above already follows Monarch's includeInNetWorth again.
+            "custom_data": Account.custom_data.op("-")(cast(literal(ORPHAN_FLAG), Text)),
         },
+    )
+
+
+def _orphan_accounts_stmt(live_external_ids: set[str], now: datetime):
+    """Exclude MONARCH accounts that Monarch no longer returns from net worth.
+
+    Deleted and re-linked accounts vanish from Monarch's account list (deactivated
+    ones are treated the same), but their rows used to stay counted with a stale
+    balance forever (Oct 24 2026: a re-link duplicated accounts and inflated net
+    worth by ~$1.2M). Hidden accounts are NOT orphaned — they still exist in Monarch
+    and stay in the live set. The row is never deleted — transactions and enrichment
+    (fire_role, notes) stay — it is flagged with custom_data.monarch_orphaned_at and
+    excluded. Only rows not yet flagged are touched, so a user who re-includes an
+    orphan by hand is not overridden next sync. MANUAL accounts and accounts with
+    fire_role "system" never match.
+    """
+    flag = func.jsonb_build_object(ORPHAN_FLAG, now.isoformat())
+    # literal '{}'::jsonb — cast("{}", JSONB) would bind the JSON *string* "{}",
+    # and string || object yields an array
+    return (
+        update(Account)
+        .where(
+            Account.source == DataSource.MONARCH,
+            Account.external_id.isnot(None),
+            Account.external_id.notin_(live_external_ids),
+            or_(Account.custom_data.is_(None), ~Account.custom_data.has_key(ORPHAN_FLAG)),
+            # never orphan system accounts; NULL-safe (fire_role != 'system' drops NULLs)
+            or_(Account.fire_role.is_(None), Account.fire_role != SYSTEM_FIRE_ROLE),
+        )
+        .values(
+            include_in_net_worth=False,
+            custom_data=func.coalesce(Account.custom_data, text("'{}'::jsonb")).op("||")(flag),
+        )
+        .execution_options(synchronize_session=False)
     )
 
 
@@ -185,20 +229,42 @@ class MonarchSyncService:
         self.client = client
 
     async def sync_accounts(self) -> int:
-        """Upsert all Monarch accounts into the database."""
+        """Upsert all Monarch accounts, then exclude the ones Monarch no longer returns."""
         raw_accounts = await self.client.get_accounts()
         count = 0
+        # Accounts Monarch still reports. A deactivated account is not live (it gets
+        # orphaned below); a hidden one, or one whose upsert merely failed, still is.
+        live_ids: set[str] = set()
 
         for raw in raw_accounts:
             try:
-                # Skip hidden/deactivated accounts
-                if raw.get("isHidden") or raw.get("deactivatedAt"):
+                # Deactivated: Monarch closed it — not live, so it is orphaned below.
+                if raw.get("deactivatedAt"):
+                    continue
+                # Hidden: still exists in Monarch, so it stays live (never orphaned);
+                # it is just not upserted, as before.
+                live_ids.add(str(raw["id"]))
+                if raw.get("isHidden"):
                     continue
 
                 await self.db.execute(_account_upsert_stmt(raw))
                 count += 1
             except Exception as e:
                 logger.error("Failed to sync account %s: %s", raw.get("id"), e)
+
+        # A failed fetch raises before this point; an empty list (or one with nothing
+        # live) is never trusted as "every account is gone".
+        if live_ids:
+            result = await self.db.execute(
+                _orphan_accounts_stmt(live_ids, datetime.now(timezone.utc))
+            )
+            if result.rowcount:
+                logger.warning(
+                    "Excluded %d Monarch account(s) no longer returned by Monarch from net worth",
+                    result.rowcount,
+                )
+        else:
+            logger.warning("Monarch returned no live accounts; skipping orphan exclusion")
 
         await self.db.flush()
 
@@ -207,7 +273,9 @@ class MonarchSyncService:
         # stale accounts whose historical snapshots lag behind.
         result = await self.db.execute(
             select(Account.id, Account.current_balance, Account.is_asset).where(
-                Account.source == DataSource.MONARCH
+                Account.source == DataSource.MONARCH,
+                # orphans' balances are stale; don't extend their history
+                or_(Account.custom_data.is_(None), ~Account.custom_data.has_key(ORPHAN_FLAG)),
             )
         )
         today_rows = [

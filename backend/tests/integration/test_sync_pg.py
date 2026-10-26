@@ -116,3 +116,125 @@ class TestAccountUpsertAgainstPostgres:
         db.expire_all()
         acct = await _fetch(db, eid)
         assert acct.account_type == AccountType.ROTH_IRA
+
+
+class _AccountsClient:
+    def __init__(self, accounts):
+        self.accounts = accounts
+
+    async def get_accounts(self):
+        return self.accounts
+
+
+async def _sync_accounts(db, accounts):
+    from app.ingestion.monarch_sync import MonarchSyncService
+
+    await MonarchSyncService(db, _AccountsClient(accounts)).sync_accounts()
+    db.expire_all()
+
+
+class TestOrphanedAccountsAgainstPostgres:
+    """Oct 24 2026: a Monarch re-link left the old rows counted (~$1.2M inflation).
+    The orphan UPDATE and the flag-clearing upsert are JSONB expressions on an enum
+    filter — exactly the bind/operator class mocks can't see."""
+
+    async def test_vanished_account_excluded_with_enrichment_kept(self, db):
+        keep, gone = uuid.uuid4().hex, uuid.uuid4().hex
+        await _sync_accounts(db, [_raw(keep), _raw(gone)])
+        acct = await _fetch(db, gone)
+        acct.fire_role = "bridge"
+        acct.notes = "old link"
+        acct.custom_data = {"account_type_manual": True}
+        await db.flush()
+
+        await _sync_accounts(db, [_raw(keep)])
+
+        acct = await _fetch(db, gone)
+        assert acct.include_in_net_worth is False
+        assert acct.custom_data["monarch_orphaned_at"]
+        assert acct.custom_data["account_type_manual"] is True  # merged, not replaced
+        assert (acct.fire_role, acct.notes) == ("bridge", "old link")
+        live = await _fetch(db, keep)
+        assert live.include_in_net_worth is True
+        assert "monarch_orphaned_at" not in (live.custom_data or {})
+
+    async def test_hidden_account_stays_live(self, db):
+        keep, hidden = uuid.uuid4().hex, uuid.uuid4().hex
+        await _sync_accounts(db, [_raw(keep), _raw(hidden)])
+        await _sync_accounts(db, [_raw(keep), {**_raw(hidden), "isHidden": True}])
+        acct = await _fetch(db, hidden)
+        assert acct.include_in_net_worth is True
+        assert "monarch_orphaned_at" not in (acct.custom_data or {})
+
+    async def test_deactivated_account_is_orphaned(self, db):
+        keep, closed = uuid.uuid4().hex, uuid.uuid4().hex
+        await _sync_accounts(db, [_raw(keep), _raw(closed)])
+        await _sync_accounts(db, [_raw(keep), {**_raw(closed), "deactivatedAt": "2026-10-01T00:00:00Z"}])
+        acct = await _fetch(db, closed)
+        assert acct.include_in_net_worth is False
+        assert acct.custom_data["monarch_orphaned_at"]
+
+    async def test_system_account_never_orphaned(self, db):
+        keep, system = uuid.uuid4().hex, uuid.uuid4().hex
+        await _sync_accounts(db, [_raw(keep), _raw(system)])
+        acct = await _fetch(db, system)
+        acct.fire_role = "system"
+        await db.flush()
+
+        await _sync_accounts(db, [_raw(keep)])  # Monarch stops returning it
+
+        acct = await _fetch(db, system)
+        assert acct.include_in_net_worth is True
+        assert "monarch_orphaned_at" not in (acct.custom_data or {})
+
+    async def test_reappearance_restores_and_follows_monarch(self, db):
+        keep, back = uuid.uuid4().hex, uuid.uuid4().hex
+        await _sync_accounts(db, [_raw(keep), _raw(back)])
+        await _sync_accounts(db, [_raw(keep)])
+        assert (await _fetch(db, back)).include_in_net_worth is False
+
+        await _sync_accounts(db, [_raw(keep), _raw(back)])
+        acct = await _fetch(db, back)
+        assert acct.include_in_net_worth is True
+        assert "monarch_orphaned_at" not in (acct.custom_data or {})
+
+        # ...and it follows Monarch's flag, whatever it is
+        await _sync_accounts(db, [_raw(keep), {**_raw(back), "includeInNetWorth": False}])
+        assert (await _fetch(db, back)).include_in_net_worth is False
+
+    async def test_manual_account_untouched(self, db):
+        from app.models.enums import DataSource
+
+        keep = uuid.uuid4().hex
+        manual = Account(name="Off-Monarch", account_type=AccountType.CHECKING,
+                         current_balance=500, source=DataSource.MANUAL, include_in_net_worth=True)
+        db.add(manual)
+        await db.flush()
+
+        await _sync_accounts(db, [_raw(keep)])
+
+        await db.refresh(manual)
+        assert manual.include_in_net_worth is True
+        assert manual.custom_data is None
+
+    async def test_empty_fetch_excludes_nothing(self, db):
+        eid = uuid.uuid4().hex
+        await _sync_accounts(db, [_raw(eid)])
+        await _sync_accounts(db, [])
+        acct = await _fetch(db, eid)
+        assert acct.include_in_net_worth is True
+        assert "monarch_orphaned_at" not in (acct.custom_data or {})
+
+    async def test_manual_reinclude_of_orphan_sticks(self, db):
+        keep, gone = uuid.uuid4().hex, uuid.uuid4().hex
+        await _sync_accounts(db, [_raw(keep), _raw(gone)])
+        await _sync_accounts(db, [_raw(keep)])
+        acct = await _fetch(db, gone)
+        stamped = acct.custom_data["monarch_orphaned_at"]
+        acct.include_in_net_worth = True
+        await db.flush()
+
+        await _sync_accounts(db, [_raw(keep)])
+        acct = await _fetch(db, gone)
+        assert acct.include_in_net_worth is True
+        assert acct.custom_data["monarch_orphaned_at"] == stamped
