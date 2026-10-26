@@ -29,6 +29,68 @@ docker compose exec backend uv run python ../scripts/upgrade_check.py
 
 ---
 
+## October 2026 — a strengthening pass: events, sold properties, scenarios
+
+**In short:**
+- A sold property can be marked `closed`, so its proceeds are never counted twice.
+- The Runway's event list says what the projection does with each event, and an event can
+  now be marked completed or cancelled from the form.
+- A few name and status rules that quietly gave wrong numbers now hold everywhere.
+- Scenario saves reject settings that never did anything; unknown scenario ids return 404.
+- Smaller fixes: the account page suggests the recognized FIRE roles and says when a role
+  isn't one (the account then does nothing in projections); after logging in you land on
+  the page you asked for; Runway and Retirement refresh after you switch scenarios or edit
+  events.
+
+No migration runs. Your stored data is untouched; the upgrade check lists anything in it
+that this update affects.
+
+### What moves in your numbers
+
+| Where | Before | After |
+|---|---|---|
+| **Retirement: sale and vest name matchers** | An EXPENSE event whose name contained `sell_event_label_match` (e.g. "Mountain House Special Assessment") removed that property's equity in its month; one containing a vest word drained the illiquid pool | Only income events trigger them, like every other name matcher. Numbers move only if one of your expense events matched |
+| **Runway: default burn** | Marking a paid expense event *completed* put its payment back into the 90-day average | Completed events still clean the burn; they just never project forward |
+| **Runway: completed income** | Marking a received inflow completed was not possible from the form | Completed events never project forward: the money is already in your balance |
+| **Savings rate, readiness, spending** | A category named "… Income" (e.g. "Rental Income", "Interest Income") outside Monarch's Income group counted as spending | It counts as income from the next category sync. Moves your numbers only if you have such a category |
+| **Property sales** | A sale whose date had passed kept landing its proceeds "now", every month, in the Runway and Retirement | Unchanged until you mark it `closed: true` (below) |
+
+### Decide these
+
+- **Events whose date passed but aren't marked done.** Projections stop counting a planned or
+  confirmed event once its date is gone, whether or not the money arrived; the Runway list
+  used to call these "realized". They now read **date passed**. For each one: if it
+  happened, edit it and set **Status: Completed**; if it slipped, move the date.
+- **A property you have actually sold.** Add `"closed": true` to its `property_sales` entry
+  (in the scenario that models it). It then counts as sold from now with no proceeds, because
+  they are already in your accounts, and its carrying cost and rent changes apply. Don't
+  delete the entry instead: its carrying cost would come back into the plan.
+
+### For agents: API changes
+
+- **`property_sales[].closed: true`.** Sold as of month 0 in every engine, zero proceeds,
+  burn/income deltas applied, `suppress_cashflow_match` still applies. Runway
+  `scenario_sales[]` gains `closed`.
+- **Scenario overrides are validated on create/update.** A top-level key must be a fire_config
+  setting (`id`, `created_at`, `updated_at` excluded), `custom_assumptions` must be an
+  object, and date settings must be ISO dates. Anything else returns 422 with the reason.
+  Stored scenarios are read tolerantly: a bad entry is skipped with a server-log warning.
+- **Unknown `scenario_id` returns 404** on every endpoint that takes one
+  (`/api/tax/withdrawal-plan`, `/roth-conversion-plan`, `/monte-carlo`). It used to answer
+  with the base plan.
+- **Cashflow event status** `completed` and `cancelled` are now offered by the UI. Runway burn
+  matching reads planned, confirmed and completed events; only planned and confirmed
+  project forward.
+- **`GET /api/cashflow/runway`** parameter descriptions corrected: without overrides, income
+  is declared income (sources + events) and burn is the cleaned 90-day average.
+
+### Undo
+
+Nothing in your data was rewritten. Scenario and config edits you make while acting on
+this update are archived as usual (see the September section's Undo).
+
+---
+
 ## September 2026 — plan dates stop drifting; Runway and Retirement agree
 
 **In short:**

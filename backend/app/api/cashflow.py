@@ -107,10 +107,10 @@ async def delete_event(
 async def get_runway(
     months: int = 24,
     income_override: float | None = Query(
-        None, description="Override monthly income baseline (dollars). If omitted, uses trailing 3-month average."
+        None, description="Override monthly income baseline (dollars). If omitted, uses DECLARED income: active income sources (dates honored) plus income events."
     ),
     burn_override: float | None = Query(
-        None, description="Override monthly expense baseline (dollars). If omitted, uses trailing 3-month average."
+        None, description="Override monthly expense baseline (dollars). If omitted, uses trailing 90-day outflows minus payments matched to cashflow expense events."
     ),
     _user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

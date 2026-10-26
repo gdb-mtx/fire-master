@@ -11,10 +11,12 @@ once. You can also enrich account-by-account in the UI — this script just make
 full first pass faster.
 
 fire_role values the engine understands (see app/engines/fire_projections.py):
-  liquid:      cash_reserve | operating_account | speculative
+  liquid:      cash_reserve | operating_account
   retirement:  retirement_core | retirement_bridge | retirement_supplemental | tax_free_reserve
   real estate: primary_residence | primary_mortgage | sell_candidate | sell_with_property | income_producing
-  other:       illiquid_private | system
+  inert:       illiquid_private | speculative | depreciating | system
+(Authoritative list: GET /api/setup/status → valid_fire_roles. Anything else is
+accepted but treated as "other", so the account does nothing in projections.)
 
 Usage:
     API_URL=http://localhost:8000 FIREMASTER_USER=me FIREMASTER_PASSWORD=... \

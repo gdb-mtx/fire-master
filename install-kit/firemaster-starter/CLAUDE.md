@@ -189,7 +189,12 @@ A scenario is a set of **overrides deep-merged onto the base FIRE config**. Work
    `POST /api/fire/scenarios/deactivate` to clear). Re-pull `GET /api/fire/wealth-projection` to
    see the effect.
 Tip: most knobs live under `custom_assumptions.projection` (all rates real). Read the config to
-see what's there before composing an override — never invent keys that aren't in it.
+see what's there before composing an override — never invent keys that aren't in it (the API now
+rejects a top-level key that isn't a config setting). **Lists replace wholesale:** to change one
+`property_sales` entry, send the whole list, or the other entries vanish from that scenario.
+When a property sale has actually closed, set `"closed": true` on its entry — a past `sale_date`
+otherwise lands the proceeds again every month. When a planned cashflow event happens, set its
+status to `completed`; a past-dated event that is still planned/confirmed silently stops counting.
 
 ### 3. Properties (only if the user owns property)
 Two pieces: the property record, then merchant **rules** that classify transactions to it.
