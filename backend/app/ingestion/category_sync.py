@@ -182,7 +182,10 @@ PARENT_GROUP: dict[str, str] = {
 # Categories flagged as income by NAME. This is a fallback only — the primary signal is
 # the parent group Monarch itself assigned (see classify_flags). fire-master#11: custom-named
 # income categories ("Alice - Paycheck") under Monarch's Income group were silently non-income.
-INCOME_CATEGORIES = {"Paychecks", "Paycheck", "Other Income", "Business Income", "Interest"}
+INCOME_CATEGORIES = {
+    "Paychecks", "Paycheck", "Other Income", "Business Income", "Interest",
+    "Dividend & Cap Gains", "Dividends & Capital Gains",
+}
 INCOME_PARENT = "Income"
 TRANSFER_PARENT = "Transfers"
 INVESTMENT_PARENT = "Investments"
@@ -215,8 +218,20 @@ def classify_flags(normalized: str, parent: str | None) -> tuple[bool, bool]:
     table. A category is never both.
     """
     is_transfer = parent in TRANSFER_PARENTS or normalized in TRANSFER_CATEGORIES
-    is_income = not is_transfer and (parent == INCOME_PARENT or normalized in INCOME_CATEGORIES)
+    is_income = not is_transfer and (
+        parent == INCOME_PARENT or normalized in INCOME_CATEGORIES or _named_income(normalized)
+    )
     return is_income, is_transfer
+
+
+def _named_income(normalized: str) -> bool:
+    """A name that ENDS in the word "Income" ("Rental Income", "Interest Income", plain
+    "Income") is income whatever group it sits in. The exact-name set above missed
+    "Rental Income" filed under Monarch's "Other" group (Sept 2026), the same class as
+    fire-master#11; a rule catches spellings no list anticipates. "Income Tax" does
+    not end in the word, and an Investments/Transfers parent still wins as a transfer."""
+    name = normalized.strip().lower()
+    return name == "income" or name.endswith(" income")
 
 
 class CategorySyncService:

@@ -21,6 +21,15 @@ from app.ingestion.category_sync import classify_flags
     ("Buy", None, (False, True)),                         # no parent at all: name-set fallback
     ("Credit Card Payment", "Other", (False, True)),     # name fallback
     ("Paychecks", None, (True, False)),
+    # Income-named categories outside Monarch's Income group (Track 3 #7)
+    ("Rental Income", "Other", (True, False)),
+    ("Interest Income", "Other", (True, False)),
+    ("Income", "Other", (True, False)),
+    ("Consulting Income", "Business", (True, False)),
+    ("Dividend & Cap Gains", "Other", (True, False)),
+    ("Income Tax", "Taxes", (False, False)),             # doesn't END in the word
+    ("Employee Wages & Contract Labor", "Business", (False, False)),
+    ("Fixed Income", "Investments", (False, True)),      # an Investments parent stays a transfer
 ])
 def test_classify_flags(name, parent, expected):
     assert classify_flags(name, parent) == expected
