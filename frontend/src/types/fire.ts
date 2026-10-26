@@ -214,6 +214,42 @@ export interface WealthPoolPoint {
   cash_interest: number;
   month: number | null;
   event: string | null;
+  // Reporting split of the month (Oct 2026 redesign). Display identity:
+  // expenses + event_expense + Δcash + cash_invested = regular income + recurring
+  // events + cash_interest + ss_income + one_time_income + withdrawals.
+  ss_income?: number;
+  event_income?: number; // positive events + one-off lumps into cash (inside `income`)
+  event_expense?: number; // negative events + lumps out of cash, as a positive number
+  one_time_income?: number; // the non-recurring part of event_income
+  sepp_draw?: number; // the 72(t) payment inside ira_draw
+  cash_cushion?: number; // cash target this month; 0 when no cushion is set
+  cash_invested?: number; // cash above the cushion moved to the brokerage
+}
+
+export interface ProjectionMilestone {
+  month: number;
+  age: number;
+  kind: "sale" | "draw" | "age" | "money" | "warning";
+  label: string;
+  amount: number | null;
+  destination: "brokerage" | "cash" | null;
+}
+
+export interface ProjectionAssumption {
+  key: string;
+  label: string;
+  detail: string;
+  value: string;
+  kind: "setting" | "rule" | "limit";
+  is_default: boolean;
+}
+
+export interface CashRule {
+  mode: "cushion" | "threshold";
+  cushion_months: number | null;
+  cushion_floor: number;
+  invest_above_cushion: boolean;
+  threshold_months: number;
 }
 
 export interface WealthPoolProjection {
@@ -223,6 +259,13 @@ export interface WealthPoolProjection {
   total_at_end: number;
   sepp_monthly: number;
   sepp_depletes_age: number | null;
+  demo_persona?: boolean;
+  starting_cash?: number;
+  end_age?: number | null;
+  money_runs_out_month?: number | null;
+  cash_rule?: CashRule | null;
+  milestones?: ProjectionMilestone[];
+  assumptions?: ProjectionAssumption[];
 }
 
 export interface Milestone {

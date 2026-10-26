@@ -1,37 +1,32 @@
-import { useMemo, useState, useRef, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import {
-  useActivateScenario,
-  useBridgeProjection,
   useBridgeStatus,
   useFireNumber,
   useFireReadiness,
-  useFireTimeline,
   useMilestones,
+  useRetirementProjection,
   useScenarios,
   useSpendingSensitivity,
-  useWealthProjection,
 } from "../api/queries";
 import Layout from "../components/Layout";
-import { formatCurrency as fmt, fmtCompact, fmtAxis } from "../utils/formatting";
-import { useEventMarkers } from "../components/charts/EventMarkers";
-import { useIsMobile } from "../hooks/useIsMobile";
-import type { EventMarkerGroup } from "../components/charts/EventMarkers";
-import { TOOLTIP_STYLE } from "../utils/theme";
-import type { Milestone, SpendingSensitivity, WealthPoolProjection } from "../types/fire";
-import {
-  Area,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceLine,
-  CartesianGrid,
-  Line,
-  ComposedChart,
-  ReferenceArea,
-} from "recharts";
+import { formatCurrency as fmt, fmtCompact } from "../utils/formatting";
+import type { Milestone, SpendingSensitivity } from "../types/fire";
 import { fmtMonthYear } from "../utils/dates";
+import "../components/retirement/retirement.css";
+import { bridgeAnswer, holdingsAnswer, sourcesAnswer, toPlan, verdictWords } from "../components/retirement/model";
+import Verdict from "../components/retirement/Verdict";
+import BeforeYouRely from "../components/retirement/BeforeYouRely";
+import BridgeCashChart from "../components/retirement/BridgeCashChart";
+import MoneySourcesChart from "../components/retirement/MoneySourcesChart";
+import HoldingsChart from "../components/retirement/HoldingsChart";
+import HowItWorks from "../components/retirement/HowItWorks";
+import { ComparePicker, ScenarioSelector } from "../components/retirement/PlanControls";
+import { money } from "../components/retirement/format";
+
+// Retirement (Oct 2026 redesign): answer first, one question per chart, every
+// sentence computed from the projection. The cards that predate the redesign
+// sit under "More detail", unchanged.
 
 function StatCard({
   label,
@@ -176,285 +171,6 @@ function MilestoneTimeline({ milestones, currentAge }: { milestones: Milestone[]
           );
         })}
       </div>
-    </div>
-  );
-}
-
-function BridgeChart({ points, events, currentCash }: { points: WealthPoolProjection["points"]; events: WealthPoolProjection["events"]; currentCash?: number }) {
-  const bridgeData = useMemo(() => {
-    // Engine points are END-of-month states. Display month m+1 so x = months
-    // elapsed, and prepend a true t0 ("Now" = today's actual cash) so this chart
-    // opens on the same number as the Runway page.
-    const shifted = points
-      .filter((p) => p.month != null && p.month <= 60)
-      .map((p) => ({
-        ...p,
-        month: (p.month ?? 0) + 1,
-        // Mirrors the engine's net line: pool draws that reach cash, minus the
-        // RMD excess that was redeposited to taxable instead of spent.
-        net:
-          p.income +
-          p.ira_draw -
-          (p.rmd_redeposit ?? 0) +
-          p.rrsp_draw +
-          (p.taxable_draw ?? 0) +
-          (p.roth_draw ?? 0) +
-          p.cash_interest -
-          p.expenses,
-      }));
-    if (shifted.length === 0) return shifted;
-    if (currentCash == null) return shifted;
-    return [
-      { ...shifted[0], month: 0, cash: currentCash, net: 0, income: 0, expenses: 0, event: undefined },
-      ...shifted,
-    ];
-  }, [points, currentCash]);
-
-  if (bridgeData.length === 0) return null;
-
-  // Draw-start markers come from the plan: the engine emits "SEPP starts" /
-  // "RRIF starts" only when those draws are configured, at their start month
-  // (x = months elapsed when the first draw lands). Nothing configured → no line.
-  const lastX = bridgeData[bridgeData.length - 1].month ?? 0;
-  const drawStarts = new Map<number, string[]>();
-  for (const e of events) {
-    const kind = e.label === "SEPP starts" ? "SEPP" : e.label === "RRIF starts" ? "RRIF" : null;
-    if (kind && e.month <= lastX) drawStarts.set(e.month, [...(drawStarts.get(e.month) ?? []), kind]);
-  }
-  const drawStartLines = [...drawStarts.entries()].map(([x, kinds]) => ({ x, label: kinds.join("+") }));
-  const zoneLabel = [...new Set(drawStartLines.flatMap((l) => l.label.split("+")))].join("+");
-  const bridgeEnd = events.find((e) => e.label === "59\u00BD")?.month ?? Infinity;
-  const zone = drawStartLines.length
-    ? { x1: Math.min(...drawStartLines.map((l) => l.x)), x2: Math.min(bridgeEnd, lastX) }
-    : null;
-
-  const minCash = Math.min(...bridgeData.map((p) => p.cash));
-  const minCashMonth = bridgeData.find((p) => p.cash === minCash);
-  const lastPoint = bridgeData[bridgeData.length - 1];
-
-  // Significant one-time events for markers. Skip month 0-1: near-term
-  // one-off clutter obscures the meaningful bridge-period markers.
-  // Amounts are embedded in the backend label strings (e.g. "Sell Primary
-  // (+$610,000→taxable)") — display verbatim, no parsing.
-  const markerGroups = useMemo<EventMarkerGroup[]>(
-    () =>
-      bridgeData
-        .filter((p) => p.event && (p.month ?? 0) >= 2)
-        .map((p) => ({
-          x: p.month!,
-          y: p.cash,
-          events: p.event!.split("; ").map((label) => ({ label })),
-        })),
-    [bridgeData],
-  );
-
-  // x = months elapsed; each point keeps its engine date, whose calendar month
-  // is the month its events fall in — label with both so the bridge reads on
-  // the same calendar as the Runway page.
-  const dateByX = new Map(bridgeData.map((p) => [p.month, p.date]));
-  const monthLabel = (x: string | number) => {
-    const d = dateByX.get(Number(x));
-    return d ? `${fmtMonthYear(d)} · month ${x}` : `Month ${x}`;
-  };
-
-  const { markers: eventMarkers, overlay: eventOverlay, wrapperProps: chartWrapperProps } =
-    useEventMarkers(markerGroups, {
-      defaultColor: "var(--yellow)",
-      xLabel: monthLabel,
-    });
-
-  return (
-    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-[var(--text-secondary)]">
-          Bridge Period
-          <span className="ml-2 text-[10px] font-normal">first 60 months</span>
-        </h3>
-        <div className="flex items-center gap-5">
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">Start</span>
-            <span className="text-xs font-mono text-[var(--green)]">{fmtCompact(bridgeData[0]?.cash ?? 0)}</span>
-          </div>
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">Lowest</span>
-            <span className="text-xs font-mono" style={{ color: minCash > 20000 ? "var(--yellow)" : "var(--red)" }}>
-              {fmtCompact(minCash)} <span className="text-[var(--text-secondary)]">mo {minCashMonth?.month}</span>
-            </span>
-          </div>
-          <div className="text-center">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] block">At End</span>
-            <span className="text-xs font-mono text-[var(--green)]">{fmtCompact(lastPoint?.cash ?? 0)}</span>
-          </div>
-        </div>
-      </div>
-
-      <div {...chartWrapperProps}>
-      <ResponsiveContainer width="100%" height={400}>
-        <ComposedChart data={bridgeData} margin={{ top: 30, right: 10, left: 10, bottom: 0 }}>
-          <defs>
-            <linearGradient id="gradBridgeCash" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#2e8b6e" stopOpacity={0.6} />
-              <stop offset="100%" stopColor="#2e8b6e" stopOpacity={0.05} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(42,42,62,0.5)" />
-          <XAxis
-            dataKey="month"
-            stroke="#5c5c6a"
-            tick={{ fontSize: 10, fill: "#5c5c6a" }}
-            tickFormatter={(m) => {
-              if (m === 0) return "Now";
-              if (m === 12) return "Yr 1";
-              if (m === 24) return "Yr 2";
-              if (m === 36) return "Yr 3";
-              if (m === 48) return "Yr 4";
-              if (m === 59) return "Yr 5";
-              return "";
-            }}
-            interval={0}
-            ticks={[0, 12, 24, 36, 48, 59]}
-          />
-          <YAxis
-            stroke="#5c5c6a"
-            tick={{ fontSize: 10, fill: "#5c5c6a" }}
-            tickFormatter={fmtAxis}
-            width={55}
-          />
-          <Tooltip
-            {...TOOLTIP_STYLE}
-            labelFormatter={(m) => monthLabel(m as number)}
-            formatter={(value, name) => {
-              const labels: Record<string, string> = {
-                cash: "Cash Balance",
-                net: "Net Monthly",
-                ira_draw: "SEPP Draw",
-                rrsp_draw: "RRIF Draw",
-                cash_interest: "Cash Interest",
-                income: "Income",
-                expenses: "Expenses",
-              };
-              return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
-            }}
-          />
-
-          {/* Draw zone: first configured SEPP/RRIF draw → 59½ (or chart end) */}
-          {zone && zone.x2 > zone.x1 && (
-            <ReferenceArea x1={zone.x1} x2={zone.x2} fill="var(--blue)" fillOpacity={0.03} />
-          )}
-
-          {/* Zero line */}
-          <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.5} />
-
-          {/* Event markers */}
-          {eventMarkers}
-
-          {/* Draw start markers */}
-          {drawStartLines.map((l) => (
-            <ReferenceLine
-              key={l.x}
-              x={l.x}
-              stroke="var(--purple, #7a6aaa)"
-              strokeDasharray="4 4"
-              strokeOpacity={0.5}
-              label={{ value: l.label, position: "top", fill: "var(--purple, #7a6aaa)", fontSize: 9 }}
-            />
-          ))}
-
-          {/* Cash balance area */}
-          <Area type="monotone" dataKey="cash" stroke="var(--green)" strokeWidth={2} fill="url(#gradBridgeCash)" dot={false} />
-
-          {/* Net monthly flow line */}
-          <Line type="monotone" dataKey="net" stroke="var(--blue)" strokeWidth={1} strokeDasharray="4 3" dot={false} strokeOpacity={0.6} />
-
-        </ComposedChart>
-      </ResponsiveContainer>
-      {eventOverlay}
-      </div>
-
-      <div className="flex items-center gap-5 mt-3 pt-3 border-t border-[var(--border)]">
-        {[
-          { label: "Cash Balance", color: "var(--green)" },
-          { label: "Net Monthly", color: "var(--blue)", dashed: true },
-          { label: "Events", color: "var(--yellow)", dot: true },
-          ...(zoneLabel ? [{ label: `${zoneLabel} zone`, color: "var(--purple, #7a6aaa)", dashed: true }] : []),
-        ].map((l) => (
-          <div key={l.label} className="flex items-center gap-1.5">
-            <div
-              className={l.dot ? "w-2 h-2 rounded-full" : "w-3 h-[3px] rounded-full"}
-              style={{ backgroundColor: l.color, opacity: l.dashed ? 0.6 : 0.8 }}
-            />
-            <span className="text-[10px] text-[var(--text-secondary)]">{l.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ScenarioSelector() {
-  const { data: scenarios } = useScenarios();
-  const activate = useActivateScenario();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
-
-  const active = scenarios?.find((s) => s.is_active);
-  const label = active ? active.name : "No Scenario";
-
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        onClick={() => setOpen(!open)}
-        className="px-3 py-1.5 text-xs bg-[var(--bg-secondary)] border border-[var(--border)] rounded hover:border-[var(--blue)] transition-colors flex items-center gap-1.5"
-      >
-        <span
-          className="w-2 h-2 rounded-full"
-          style={{ background: active ? "var(--green)" : "var(--text-secondary)" }}
-        />
-        {label}
-        <svg className="w-3 h-3 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-      {open && scenarios && (
-        <div className="absolute right-0 top-full mt-1 w-64 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-50 py-1">
-          {scenarios.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => { activate.mutate(s.id); setOpen(false); }}
-              className={`w-full text-left px-3 py-2 text-xs hover:bg-[var(--bg-hover)] flex items-center gap-2 ${s.is_active ? "text-[var(--green)]" : "text-[var(--text-primary)]"}`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${s.is_active ? "bg-[var(--green)]" : "bg-transparent border border-[var(--text-secondary)]"}`} />
-              <div className="flex-1 min-w-0">
-                <div className="truncate">{s.name}</div>
-                {s.description && (
-                  <div className="text-[10px] text-[var(--text-secondary)] truncate">{s.description}</div>
-                )}
-              </div>
-            </button>
-          ))}
-          {scenarios.length === 0 && (
-            <div className="px-3 py-2 text-[10px] text-[var(--text-secondary)]">
-              No scenarios saved. Create one in Configure.
-            </div>
-          )}
-          <div className="h-px bg-[var(--border)] my-1" />
-          <Link
-            to="/settings"
-            onClick={() => setOpen(false)}
-            className="block px-3 py-2 text-[10px] text-[var(--blue)] hover:bg-[var(--bg-hover)]"
-          >
-            Manage Scenarios...
-          </Link>
-        </div>
-      )}
     </div>
   );
 }
@@ -686,544 +402,343 @@ function SpendingSensitivityCard({
   );
 }
 
+const COMPARE_KEY = "rt.compare";
+const readCompare = () => { try { return localStorage.getItem(COMPARE_KEY) ?? ""; } catch { return ""; } };
+const writeCompare = (v: string) => { try { localStorage.setItem(COMPARE_KEY, v); } catch { /* private mode */ } };
+
+function Skeleton() {
+  return (
+    <div aria-busy="true" aria-label="Loading your projection">
+      <div className="rt-skel" style={{ height: 44, width: "56%", marginTop: 44 }} />
+      <div className="rt-skel" style={{ height: 22, width: "72%", marginTop: 16 }} />
+      <div className="rt-skel" style={{ height: 96, marginTop: 34 }} />
+      <div className="rt-skel" style={{ height: 380, marginTop: 64 }} />
+    </div>
+  );
+}
+
 export default function RetirementPage() {
-  const isMobile = useIsMobile();
-  const { data: fireNum, isLoading: loadingNum } = useFireNumber();
-  const { data: readiness, isLoading: loadingReady } = useFireReadiness();
-  const { data: timeline } = useFireTimeline();
+  const { data: fireNum } = useFireNumber();
+  const { data: readiness } = useFireReadiness();
   const { data: milestones } = useMilestones();
   const { data: bridge } = useBridgeStatus();
   const { data: sensitivity } = useSpendingSensitivity();
+  const { data: scenarios } = useScenarios();
 
-  // Spending sensitivity state — ephemeral, not persisted
+  // Spending what-if from the card under "More detail" — ephemeral, never saved.
   const [baseOverride, setBaseOverride] = useState<number | null>(null);
   const [debouncedOverride, setDebouncedOverride] = useState<number | null>(null);
-
   useEffect(() => {
     const t = setTimeout(() => setDebouncedOverride(baseOverride), 500);
     return () => clearTimeout(t);
   }, [baseOverride]);
+  const spendingOverrideCents = debouncedOverride != null ? Math.round(debouncedOverride * 12 * 100) : undefined;
 
-  const spendingOverrideCents = debouncedOverride != null
-    ? Math.round(debouncedOverride * 12 * 100)
-    : undefined;
+  const { data: projection, isLoading } = useRetirementProjection("active", spendingOverrideCents);
 
-  const { data: wealthProjection, isLoading: loadingWealth } = useWealthProjection(spendingOverrideCents);
-  const { data: bridgeProjection } = useBridgeProjection(spendingOverrideCents);
+  // Compare with: another plan's line on the holdings chart (remembered per browser).
+  const [compareId, setCompareId] = useState<string>(readCompare);
+  const active = scenarios?.find((s) => s.is_active);
+  const compareValid = compareId !== "" && !!scenarios &&
+    (compareId === "base" ? !!active : scenarios.some((s) => s.id === compareId && !s.is_active));
+  const compareName = !compareValid ? "" : compareId === "base" ? "Base plan" : scenarios!.find((s) => s.id === compareId)!.name;
+  const { data: compareProjection } = useRetirementProjection(compareValid ? compareId : "active", undefined, compareValid);
+  const pickCompare = (v: string) => { setCompareId(v); writeCompare(v); };
 
-  // Wealth chart data, hoisted so the milestone markers can snap to the
-  // chart's own x values (category axis requires exact matches — the old
-  // Math.round(ev.age) only matched by luck).
-  const wealthChartData = useMemo(
-    () =>
-      (wealthProjection?.points ?? []).map((p) => ({
-        ...p,
-        cash: Math.max(0, p.cash), // clamp for stacked areas
-        taxable: Math.max(0, p.taxable ?? 0), // clamp for stacked areas
-        roth: Math.max(0, p.roth ?? 0),
-        annual_spending: p.expenses * 12,
-      })),
-    [wealthProjection],
+  const plan = useMemo(
+    () => (projection && projection.points.length ? toPlan(active?.name ?? "Base plan", projection) : null),
+    [projection, active?.name],
+  );
+  const compare = useMemo(
+    () => (compareValid && compareProjection && compareProjection.points.length ? toPlan(compareName, compareProjection) : null),
+    [compareValid, compareProjection, compareName],
   );
 
-  const wealthMarkerGroups = useMemo<EventMarkerGroup[]>(() => {
-    if (!wealthProjection || wealthChartData.length === 0) return [];
-    const byX = new Map<number, EventMarkerGroup>();
-    for (const ev of wealthProjection.events) {
-      const pt =
-        wealthChartData.find((p) => p.month === ev.month) ??
-        // Fallback: nearest point by age (events should always carry an
-        // in-range month, but never drop a milestone silently).
-        wealthChartData.reduce((best, p) =>
-          Math.abs(p.age - ev.age) < Math.abs(best.age - ev.age) ? p : best,
-        );
-      const existing = byX.get(pt.age);
-      const detail = { label: ev.label, color: ev.color };
-      if (existing) existing.events.push(detail);
-      else byX.set(pt.age, { x: pt.age, y: pt.total, events: [detail] });
-    }
-    return [...byX.values()];
-  }, [wealthProjection, wealthChartData]);
+  // One time cursor shared by the three charts. It opens on the first moment
+  // that moves money (a sale or one-time money) in the next five years.
+  const [cursor, setCursor] = useState<number | null>(null);
+  const firstMoment = plan?.milestones.find((x) => (x.kind === "sale" || x.kind === "money") && x.month < 60)?.month ?? 0;
+  const at = cursor ?? firstMoment;
 
-  const { markers: wealthMarkers, overlay: wealthOverlay, wrapperProps: wealthWrapperProps } =
-    useEventMarkers(wealthMarkerGroups, {
-      defaultColor: "var(--yellow)",
-      xLabel: (age) => `Age ${Number(age).toFixed(1)}`,
-    });
+  const words = useMemo(() => (plan ? verdictWords(plan, compare) : null), [plan, compare]);
+  const bridgeA = useMemo(() => (plan ? bridgeAnswer(plan) : null), [plan]);
 
-  const isLoading = loadingNum || loadingReady;
-
-  if (isLoading || !fireNum || !readiness) {
-    return (
-      <Layout>
-        <div className="flex items-center justify-center h-96 text-[var(--text-secondary)]">
-          Loading...
-        </div>
-      </Layout>
-    );
-  }
-
-  const monthsLeft = timeline?.months_remaining;
-  const yearsLeft = monthsLeft != null ? Math.floor(monthsLeft / 12) : null;
-  const monthsRemainder = monthsLeft != null ? monthsLeft % 12 : null;
-  const onTrack = timeline?.on_track ?? false;
-
-  const breakdown = fireNum.net_worth_breakdown;
-  const accessibleNW = fireNum.accessible_net_worth;
-  const accessiblePct = fireNum.accessible_progress_pct;
+  const breakdown = fireNum?.net_worth_breakdown;
+  const accessibleNW = fireNum?.accessible_net_worth;
+  const accessiblePct = fireNum?.accessible_progress_pct;
+  const bridgeProjection = projection; // Cash Runway reads the same run's cash_zero_month
 
   return (
     <Layout>
-      <div className="space-y-6">
-        {/* Header */}
-        <div className="flex items-start justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-[var(--text-primary)] tracking-tight">
-              Retirement
-            </h2>
-            <p className="text-sm text-[var(--text-secondary)] mt-1">
-              FIRE projections & lifetime planning &middot; all amounts in today&rsquo;s dollars
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <ScenarioSelector />
-            <Link
-              to="/settings"
-              className="px-3 py-1.5 text-xs bg-[var(--bg-secondary)] border border-[var(--border)] rounded hover:border-[var(--blue)] transition-colors"
-            >
-              Configure
-            </Link>
+      <div className="rt">
+        <div className="rt-top">
+          <p className="rt-crumb"><b>Retirement</b>, in today&rsquo;s dollars</p>
+          <div className="rt-controls">
+            {scenarios && <ScenarioSelector scenarios={scenarios} />}
+            {scenarios && <ComparePicker scenarios={scenarios} value={compareValid ? compareId : ""} onChange={pickCompare} />}
           </div>
         </div>
 
-        {/* FIRE Countdown Hero */}
-        {timeline ? (
-          <div
-            className="bg-[var(--bg-card)] border rounded-lg p-8 text-center card-hero"
-            style={{
-              borderColor: onTrack
-                ? "rgba(0,212,170,0.3)"
-                : "rgba(255,77,106,0.3)",
-            }}
-          >
-            <p className="text-xs uppercase tracking-widest text-[var(--text-secondary)] mb-2">
-              Projected Retirement
-            </p>
-            {monthsLeft != null && monthsLeft > 0 ? (
-              <div
-                className={`text-5xl font-bold font-mono tracking-tight mb-2 ${onTrack ? "glow-green" : "glow-red"}`}
-                style={{ color: onTrack ? "var(--green)" : "var(--red)" }}
-              >
-                {yearsLeft != null && yearsLeft > 0 && `${yearsLeft}y `}
-                {monthsRemainder != null && `${monthsRemainder}m`}
-              </div>
-            ) : (
-              <div className="text-5xl font-bold font-mono tracking-tight mb-2 text-[var(--green)] glow-green">
-                NOW
-              </div>
-            )}
-            {timeline.projected_retirement_date && (
-              <p className="text-sm text-[var(--text-secondary)]">
-                {fmtMonthYear(timeline.projected_retirement_date, "long")}
-                {timeline.moderate.retirement_age && ` (age ${Math.round(timeline.moderate.retirement_age)})`}
-              </p>
-            )}
-          </div>
-        ) : (
-          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-6 text-center">
-            <p className="text-sm text-[var(--text-secondary)] mb-2">
-              Set your date of birth and target retirement age to see projections.
-            </p>
-            <Link
-              to="/settings"
-              className="text-sm text-[var(--blue)] hover:underline"
-            >
-              Configure FIRE settings
-            </Link>
+        {debouncedOverride != null && (
+          <div className="rt-note" role="status">
+            <span>Showing this plan at <b className="num">{money(debouncedOverride)}</b> a month of spending, not your saved number.</span>
+            <button type="button" onClick={() => setBaseOverride(null)}>Back to the saved plan</button>
           </div>
         )}
 
-        {/* Stat Cards — 5 columns with Cash Runway */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-          {/* Cash Runway = the projection's own cash-zero month (the Bridge chart
-              below, and the Runway page's method): dated events, sales and pool
-              draws included. The old flat "cash ÷ today's deficit" ignored every
-              one of them and disagreed with both. */}
-          <StatCard
-            label="Cash Runway"
-            value={
-              !bridgeProjection
-                ? "—"
-                : bridgeProjection.cash_zero_month == null
-                  ? "Never"
-                  : `${bridgeProjection.cash_zero_month}mo`
-            }
-            color={
-              bridgeProjection?.cash_zero_month == null
-                ? "var(--green)"
-                : bridgeProjection.cash_zero_month > 12
-                  ? "var(--green)"
-                  : bridgeProjection.cash_zero_month > 6
-                    ? "var(--yellow)"
-                    : "var(--red)"
-            }
-            sub={bridge ? `projected · gap now ${fmtCompact(bridge.monthly_deficit)}/mo` : undefined}
-          />
-          <StatCard
-            label="FIRE Number"
-            value={fmtCompact(fireNum.fire_number)}
-            color="var(--text-primary)"
-            sub={`${fireNum.safe_withdrawal_rate}% SWR`}
-          />
-          <StatCard
-            label="Accessible Net Worth"
-            value={accessibleNW != null ? fmtCompact(accessibleNW) : fmtCompact(fireNum.current_net_worth)}
-            color="var(--green)"
-            sub={`${fmt(fireNum.current_net_worth)} total`}
-          />
-          <StatCard
-            label="Gap"
-            value={accessibleNW != null
-              ? fmtCompact(fireNum.fire_number - accessibleNW)
-              : fmtCompact(fireNum.gap)}
-            color={
-              (accessibleNW != null ? fireNum.fire_number - accessibleNW : fireNum.gap) <= 0
-                ? "var(--green)"
-                : "var(--yellow)"
-            }
-            sub="accessible vs FIRE number"
-          />
-          <StatCard
-            label="Accessible Progress"
-            value={`${accessiblePct ?? fireNum.progress_pct}%`}
-            color={
-              (accessiblePct ?? fireNum.progress_pct) >= 100
-                ? "var(--green)"
-                : (accessiblePct ?? fireNum.progress_pct) >= 50
-                  ? "var(--yellow)"
-                  : "var(--red)"
-            }
-            sub={`${fireNum.progress_pct}% gross`}
-          />
-        </div>
+        {isLoading && <Skeleton />}
 
-        {/* FIRE Progress Bar — Accessible */}
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs uppercase tracking-wider text-[var(--text-secondary)]">
-              Accessible Progress to FIRE
-            </span>
-            <span className="text-xs font-mono text-[var(--text-secondary)]">
-              {fmt(accessibleNW ?? fireNum.current_net_worth)} / {fmt(fireNum.fire_number)}
-            </span>
-          </div>
-          <div className="relative h-3 rounded-full bg-[var(--bg-secondary)] overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all duration-1000"
-              style={{
-                width: `${Math.min(100, accessiblePct ?? fireNum.progress_pct)}%`,
-                background:
-                  (accessiblePct ?? fireNum.progress_pct) >= 100
-                    ? "var(--green)"
-                    : `linear-gradient(90deg, var(--blue), var(--green))`,
-              }}
+        {!isLoading && !plan && (
+          <header className="rt-verdict">
+            <h1>Add your date of birth to see your plan.</h1>
+            <p>The projection runs month by month from today to {projection?.end_age ?? 82}, so it needs your age. <Link to="/settings" style={{ color: "var(--rt-navy)" }}>Open Configure</Link></p>
+          </header>
+        )}
+
+        {plan && words && bridgeA && (
+          <>
+            <Verdict words={words} />
+            <BeforeYouRely />
+
+            <section className="rt-q" aria-labelledby="q-bridge">
+              <h2 id="q-bridge">Does cash hold through the next five years?</h2>
+              <p className={"answer" + (bridgeA.bad ? " bad" : "")}>{bridgeA.text}</p>
+              <BridgeCashChart plan={plan} cursor={at} setCursor={setCursor} />
+            </section>
+
+            <section className="rt-q" aria-labelledby="q-sources">
+              <h2 id="q-sources">Where does the money come from each year?</h2>
+              <p className="answer">{sourcesAnswer(plan)}</p>
+              <MoneySourcesChart plan={plan} cursor={at} setCursor={setCursor} />
+            </section>
+
+            <section className="rt-q" aria-labelledby="q-own">
+              <h2 id="q-own">What do you own along the way?</h2>
+              <p className="answer">{holdingsAnswer(plan)}</p>
+              <HoldingsChart plan={plan} compare={compare} cursor={at} setCursor={setCursor} />
+            </section>
+
+            <HowItWorks items={projection?.assumptions ?? []} />
+          </>
+        )}
+
+        <section className="rt-more" aria-labelledby="rt-more-h">
+          <h2 id="rt-more-h">More detail</h2>
+          <p>The cards from before the redesign, unchanged. Editing the monthly budget below reruns everything above.</p>
+          <div className="space-y-6">
+            <SpendingSensitivityCard
+              baseOverride={baseOverride}
+              onBaseChange={setBaseOverride}
+              sensitivity={sensitivity}
             />
-          </div>
 
-          {/* Net Worth Breakdown */}
-          {breakdown && (
-            <div className="flex items-center gap-4 mt-3 pt-3 border-t border-[var(--border)]">
-              {[
-                { label: "Liquid", value: breakdown.liquid, color: "var(--green)" },
-                { label: "Retirement", value: breakdown.retirement, color: "var(--blue)" },
-                { label: "Real Estate", value: breakdown.real_estate_equity, color: "var(--yellow)" },
-                { label: "Private Venture", value: breakdown.illiquid_private, color: "var(--orange, #b06830)" },
-                { label: "Other", value: breakdown.other, color: "#6b7280" },
-              ]
-                .filter((b) => Math.abs(b.value) >= 100)
-                .map((b) => (
-                  <div key={b.label} className="flex items-center gap-1.5">
-                    <div
-                      className="w-2 h-2 rounded-full"
-                      style={{ backgroundColor: b.color }}
-                    />
-                    <span className="text-[10px] text-[var(--text-secondary)]">
-                      {b.label}
-                    </span>
-                    <span className="text-[10px] font-mono font-medium" style={{ color: b.color }}>
-                      {fmtCompact(b.value)}
-                    </span>
+            {/* Bridge Status — Two Column */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Monthly Cash Flow */}
+              <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
+                <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-3">Monthly Cash Flow</h3>
+                {bridge ? (
+                  <div className="space-y-2.5">
+                    {bridge.income_streams.map((s) => (
+                      <div key={s.label} className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: s.color }} />
+                          <span className="text-[11px] text-[var(--text-secondary)]">{s.label}</span>
+                        </div>
+                        <span className="text-[11px] font-mono" style={{ color: s.color }}>
+                          +${s.monthly.toLocaleString()}
+                        </span>
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between pt-1.5 border-t border-[var(--border)]">
+                      <span className="text-[11px] font-medium text-[var(--text-primary)]">Income</span>
+                      <span className="text-[11px] font-mono text-[var(--green)]">
+                        +${(bridge.monthly_income_total + bridge.monthly_ira_total).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-medium text-[var(--text-primary)]">Expenses</span>
+                      <span className="text-[11px] font-mono text-[var(--red)]">
+                        -${bridge.monthly_burn.toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1.5 border-t border-[var(--border)]">
+                      <span className="text-[11px] font-bold text-[var(--text-primary)]">
+                        Monthly gap
+                        {bridge.income_streams.some((st) => st.label.endsWith("(temp)")) && (
+                          <span className="font-normal text-[var(--text-secondary)]"> (excl. temp income)</span>
+                        )}
+                      </span>
+                      <span className="text-[11px] font-mono font-bold" style={{ color: bridge.monthly_deficit > 0 ? "var(--red)" : "var(--green)" }}>
+                        {bridge.monthly_deficit > 0 ? "-" : "+"}${Math.abs(bridge.monthly_deficit).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="mt-2 pt-2 border-t border-[var(--border)]">
+                      <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">After primary property sale</span>
+                      <div className="flex items-center justify-between mt-1">
+                        <span className="text-[11px] text-[var(--text-secondary)]">Gap drops to</span>
+                        <span className="text-[11px] font-mono font-bold" style={{ color: bridge.post_sale_deficit > 0 ? "var(--yellow)" : "var(--green)" }}>
+                          {bridge.post_sale_deficit > 0 ? "-" : "+"}${Math.abs(bridge.post_sale_deficit).toLocaleString()}/mo
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                ))}
-            </div>
-          )}
-        </div>
+                ) : (
+                  <div className="text-xs text-[var(--text-secondary)]">Loading...</div>
+                )}
+              </div>
 
-        {/* Spending Sensitivity */}
-        <SpendingSensitivityCard
-          baseOverride={baseOverride}
-          onBaseChange={setBaseOverride}
-          sensitivity={sensitivity}
-        />
-
-        {/* Bridge Chart — 60 Month Detail */}
-        {bridgeProjection && bridgeProjection.points.length > 0 && (
-          <BridgeChart points={bridgeProjection.points} events={bridgeProjection.events} currentCash={bridge?.cash_balance} />
-        )}
-
-        {/* Wealth Projection — Full Width */}
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-medium text-[var(--text-secondary)]">
-                Wealth Projection
-              </h3>
-              {wealthProjection && (
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`text-xl font-bold font-mono ${wealthProjection.total_at_end > 0 ? "glow-green" : "glow-red"}`}
-                    style={{ color: wealthProjection.total_at_end > 0 ? "var(--green)" : "var(--red)" }}
-                  >
-                    {fmtCompact(wealthProjection.total_at_end)}
-                  </span>
-                  <span className="text-sm text-[var(--text-secondary)]">at 82</span>
-                </div>
-              )}
-            </div>
-            {wealthProjection && wealthChartData.length > 0 ? (
-              <>
-                <div {...wealthWrapperProps}>
-                <ResponsiveContainer width="100%" height={400}>
-                  <ComposedChart
-                    data={wealthChartData}
-                    margin={{ top: 32, right: isMobile ? 8 : 60, left: isMobile ? 0 : 10, bottom: 0 }}
-                  >
-                    <defs>
-                      <linearGradient id="gradIraB" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#3d6e9e" stopOpacity={0.9} />
-                        <stop offset="100%" stopColor="#3d6e9e" stopOpacity={0.5} />
-                      </linearGradient>
-                      <linearGradient id="gradIraA" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#7a6aaa" stopOpacity={0.9} />
-                        <stop offset="100%" stopColor="#7a6aaa" stopOpacity={0.5} />
-                      </linearGradient>
-                      <linearGradient id="gradCash" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#2e8b6e" stopOpacity={0.9} />
-                        <stop offset="100%" stopColor="#2e8b6e" stopOpacity={0.5} />
-                      </linearGradient>
-                      <linearGradient id="gradRE" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#a07d1a" stopOpacity={0.85} />
-                        <stop offset="100%" stopColor="#a07d1a" stopOpacity={0.4} />
-                      </linearGradient>
-                      <linearGradient id="gradIlliquid" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#b06830" stopOpacity={0.85} />
-                        <stop offset="100%" stopColor="#b06830" stopOpacity={0.4} />
-                      </linearGradient>
-                      <linearGradient id="gradRRSP" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#9e4a7a" stopOpacity={0.85} />
-                        <stop offset="100%" stopColor="#9e4a7a" stopOpacity={0.4} />
-                      </linearGradient>
-                      <linearGradient id="gradTaxable" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#2aa6b8" stopOpacity={0.9} />
-                        <stop offset="100%" stopColor="#2aa6b8" stopOpacity={0.5} />
-                      </linearGradient>
-                      <linearGradient id="gradRoth" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#5b8c3a" stopOpacity={0.9} />
-                        <stop offset="100%" stopColor="#5b8c3a" stopOpacity={0.5} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(42,42,62,0.5)" />
-                    <XAxis
-                      dataKey="age"
-                      stroke="#5c5c6a"
-                      tick={{ fontSize: 11, fill: "#5c5c6a" }}
-                      tickFormatter={(v) => `${Math.round(v)}`}
-                    />
-                    <YAxis
-                      stroke="#5c5c6a"
-                      tick={{ fontSize: 11, fill: "#5c5c6a" }}
-                      tickFormatter={fmtAxis}
-                      width={isMobile ? 48 : 65}
-                    />
-                    <Tooltip
-                      {...TOOLTIP_STYLE}
-                      labelFormatter={(age) => `Age ${age}`}
-                      formatter={(value, name) => {
-                        const labels: Record<string, string> = {
-                          real_estate: "Real Estate",
-                          illiquid: "Private Venture",
-                          ira_growth: "IRA-B (growth)",
-                          rrsp: "RRSP/RRIF",
-                          ira_sepp: "IRA-A (SEPP)",
-                          cash: "Cash (bridge)",
-                          taxable: "Taxable brokerage",
-                          roth: "Roth (tax-free)",
-                          total: "Total",
-                          annual_spending: "Annual Spending",
-                        };
-                        return [fmtCompact(Number(value)), labels[String(name)] || String(name)];
-                      }}
-                    />
-
-                    <ReferenceLine y={0} stroke="var(--red)" strokeDasharray="4 4" strokeOpacity={0.6} />
-
-                    {/* Milestone markers */}
-                    {wealthMarkers}
-
-                    {/* Stacked areas: IRA-B + Taxable + Roth (bottom, stable), IRA-A, RRSP, Cash, Illiquid, RE (top, has discontinuities) */}
-                    <Area type="monotone" dataKey="ira_growth" stackId="wealth" stroke="var(--blue)" strokeWidth={0} fill="url(#gradIraB)" />
-                    <Area type="monotone" dataKey="taxable" stackId="wealth" stroke="#2aa6b8" strokeWidth={0} fill="url(#gradTaxable)" />
-                    <Area type="monotone" dataKey="roth" stackId="wealth" stroke="#5b8c3a" strokeWidth={0} fill="url(#gradRoth)" />
-                    <Area type="monotone" dataKey="ira_sepp" stackId="wealth" stroke="var(--purple, #7a6aaa)" strokeWidth={0} fill="url(#gradIraA)" />
-                    <Area type="monotone" dataKey="rrsp" stackId="wealth" stroke="var(--pink, #9e4a7a)" strokeWidth={0} fill="url(#gradRRSP)" />
-                    <Area type="monotone" dataKey="illiquid" stackId="wealth" stroke="var(--orange, #b06830)" strokeWidth={0} fill="url(#gradIlliquid)" />
-                    <Area type="monotone" dataKey="real_estate" stackId="wealth" stroke="var(--yellow)" strokeWidth={0} fill="url(#gradRE)" />
-                    <Area type="monotone" dataKey="cash" stackId="wealth" stroke="var(--green)" strokeWidth={0} fill="url(#gradCash)" />
-
-                    {/* Total line on top */}
-                    <Line type="monotone" dataKey="total" stroke="#1a1a1e" strokeWidth={2} dot={false} strokeOpacity={0.8} />
-
-                    {/* Annual spending line (right axis) */}
-                    <YAxis
-                      yAxisId="spending"
-                      orientation="right"
-                      stroke="var(--red)"
-                      tick={{ fontSize: 10, fill: "var(--red)" }}
-                      tickFormatter={fmtAxis}
-                      width={55}
-                      domain={[0, 200000]}
-                      hide={isMobile}
-                    />
-                    <Line yAxisId="spending" type="monotone" dataKey="annual_spending" stroke="var(--red)" strokeWidth={1.5} strokeDasharray="6 3" dot={false} strokeOpacity={0.7} />
-                  </ComposedChart>
-                </ResponsiveContainer>
-                {wealthOverlay}
-                </div>
-
-                {/* Legend + summary row */}
-                <div className="flex items-center justify-between mt-4 pt-4 border-t border-[var(--border)]">
-                  <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-                    {[
-                      { label: "Real Estate", color: "var(--yellow)" },
-                      { label: "Private Venture", color: "var(--orange, #b06830)" },
-                      { label: "Cash (bridge)", color: "var(--green)" },
-                      { label: "RRSP/RRIF", color: "var(--pink, #9e4a7a)" },
-                      { label: "IRA-A (SEPP)", color: "var(--purple, #7a6aaa)" },
-                      { label: "IRA-B (growth)", color: "var(--blue)" },
-                      { label: "Taxable", color: "#2aa6b8" },
-                      { label: "Roth", color: "#5b8c3a" },
-                      { label: "Total", color: "#1a1a1e", dashed: true },
-                      { label: "Spending/yr", color: "var(--red)", dashed: true },
-                    ].map((l) => (
-                      <div key={l.label} className="flex items-center gap-1.5">
-                        <div
-                          className="w-3 h-[3px] rounded-full"
-                          style={{
-                            backgroundColor: l.color,
-                            opacity: l.dashed ? 0.8 : 0.6,
-                            borderBottom: l.dashed ? `1px dashed ${l.color}` : undefined,
-                          }}
-                        />
-                        <span className="text-[10px] text-[var(--text-secondary)]">{l.label}</span>
+              {/* Upcoming Events */}
+              <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
+                <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-3">Upcoming Events</h3>
+                {bridge?.upcoming_events.length ? (
+                  <div className="space-y-2">
+                    {bridge.upcoming_events.map((ev) => (
+                      <div key={ev.name} className="flex items-center justify-between">
+                        <div className="flex flex-col">
+                          <span className="text-[11px] text-[var(--text-primary)]">{ev.name}</span>
+                          <span className="text-[10px] text-[var(--text-secondary)]">
+                            {fmtMonthYear(ev.date)}
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-mono font-medium" style={{ color: ev.amount >= 0 ? "var(--green)" : "var(--red)" }}>
+                          {ev.amount >= 0 ? "+" : ""}{fmtCompact(ev.amount)}
+                        </span>
                       </div>
                     ))}
                   </div>
+                ) : (
+                  <div className="text-xs text-[var(--text-secondary)]">No upcoming events</div>
+                )}
+              </div>
+            </div>
+
+            {milestones && milestones.milestones.length > 0 && (
+              <MilestoneTimeline milestones={milestones.milestones} currentAge={milestones.current_age} />
+            )}
+
+            {fireNum && readiness && (
+              <>
+                {/* Stat Cards — 5 columns with Cash Runway */}
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                  {/* Cash Runway = the projection's own cash-zero month (the Bridge chart
+                      below, and the Runway page's method): dated events, sales and pool
+                      draws included. The old flat "cash ÷ today's deficit" ignored every
+                      one of them and disagreed with both. */}
+                  <StatCard
+                    label="Cash Runway"
+                    value={
+                      !bridgeProjection
+                        ? "—"
+                        : bridgeProjection.cash_zero_month == null
+                          ? "Never"
+                          : `${bridgeProjection.cash_zero_month}mo`
+                    }
+                    color={
+                      bridgeProjection?.cash_zero_month == null
+                        ? "var(--green)"
+                        : bridgeProjection.cash_zero_month > 12
+                          ? "var(--green)"
+                          : bridgeProjection.cash_zero_month > 6
+                            ? "var(--yellow)"
+                            : "var(--red)"
+                    }
+                    sub={bridge ? `projected · gap now ${fmtCompact(bridge.monthly_deficit)}/mo` : undefined}
+                  />
+                  <StatCard
+                    label="FIRE Number"
+                    value={fmtCompact(fireNum.fire_number)}
+                    color="var(--text-primary)"
+                    sub={`${fireNum.safe_withdrawal_rate}% SWR`}
+                  />
+                  <StatCard
+                    label="Accessible Net Worth"
+                    value={accessibleNW != null ? fmtCompact(accessibleNW) : fmtCompact(fireNum.current_net_worth)}
+                    color="var(--green)"
+                    sub={`${fmt(fireNum.current_net_worth)} total`}
+                  />
+                  <StatCard
+                    label="Gap"
+                    value={accessibleNW != null
+                      ? fmtCompact(fireNum.fire_number - accessibleNW)
+                      : fmtCompact(fireNum.gap)}
+                    color={
+                      (accessibleNW != null ? fireNum.fire_number - accessibleNW : fireNum.gap) <= 0
+                        ? "var(--green)"
+                        : "var(--yellow)"
+                    }
+                    sub="accessible vs FIRE number"
+                  />
+                  <StatCard
+                    label="Accessible Progress"
+                    value={`${accessiblePct ?? fireNum.progress_pct}%`}
+                    color={
+                      (accessiblePct ?? fireNum.progress_pct) >= 100
+                        ? "var(--green)"
+                        : (accessiblePct ?? fireNum.progress_pct) >= 50
+                          ? "var(--yellow)"
+                          : "var(--red)"
+                    }
+                    sub={`${fireNum.progress_pct}% gross`}
+                  />
                 </div>
+
+                {/* FIRE Progress Bar — Accessible */}
+                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs uppercase tracking-wider text-[var(--text-secondary)]">
+                      Accessible Progress to FIRE
+                    </span>
+                    <span className="text-xs font-mono text-[var(--text-secondary)]">
+                      {fmt(accessibleNW ?? fireNum.current_net_worth)} / {fmt(fireNum.fire_number)}
+                    </span>
+                  </div>
+                  <div className="relative h-3 rounded-full bg-[var(--bg-secondary)] overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-1000"
+                      style={{
+                        width: `${Math.min(100, accessiblePct ?? fireNum.progress_pct)}%`,
+                        background:
+                          (accessiblePct ?? fireNum.progress_pct) >= 100
+                            ? "var(--green)"
+                            : `linear-gradient(90deg, var(--blue), var(--green))`,
+                      }}
+                    />
+                  </div>
+
+                  {/* Net Worth Breakdown */}
+                  {breakdown && (
+                    <div className="flex items-center gap-4 mt-3 pt-3 border-t border-[var(--border)]">
+                      {[
+                        { label: "Liquid", value: breakdown.liquid, color: "var(--green)" },
+                        { label: "Retirement", value: breakdown.retirement, color: "var(--blue)" },
+                        { label: "Real Estate", value: breakdown.real_estate_equity, color: "var(--yellow)" },
+                        { label: "Private Venture", value: breakdown.illiquid_private, color: "var(--orange, #b06830)" },
+                        { label: "Other", value: breakdown.other, color: "#6b7280" },
+                      ]
+                        .filter((b) => Math.abs(b.value) >= 100)
+                        .map((b) => (
+                          <div key={b.label} className="flex items-center gap-1.5">
+                            <div
+                              className="w-2 h-2 rounded-full"
+                              style={{ backgroundColor: b.color }}
+                            />
+                            <span className="text-[10px] text-[var(--text-secondary)]">
+                              {b.label}
+                            </span>
+                            <span className="text-[10px] font-mono font-medium" style={{ color: b.color }}>
+                              {fmtCompact(b.value)}
+                            </span>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+
               </>
-            ) : (
-              <div className="flex items-center justify-center h-[400px] text-[var(--text-secondary)] text-sm">
-                {loadingWealth ? "Computing wealth projection..." : "Configure FIRE settings and SEPP assumptions to see projection."}
-              </div>
             )}
           </div>
-
-        {/* Milestone Timeline */}
-        {milestones && milestones.milestones.length > 0 && (
-          <MilestoneTimeline
-            milestones={milestones.milestones}
-            currentAge={milestones.current_age}
-          />
-        )}
-
-        {/* Bridge Status — Two Column */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Monthly Cash Flow */}
-          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
-            <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-3">Monthly Cash Flow</h3>
-            {bridge ? (
-              <div className="space-y-2.5">
-                {bridge.income_streams.map((s) => (
-                  <div key={s.label} className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: s.color }} />
-                      <span className="text-[11px] text-[var(--text-secondary)]">{s.label}</span>
-                    </div>
-                    <span className="text-[11px] font-mono" style={{ color: s.color }}>
-                      +${s.monthly.toLocaleString()}
-                    </span>
-                  </div>
-                ))}
-                <div className="flex items-center justify-between pt-1.5 border-t border-[var(--border)]">
-                  <span className="text-[11px] font-medium text-[var(--text-primary)]">Income</span>
-                  <span className="text-[11px] font-mono text-[var(--green)]">
-                    +${(bridge.monthly_income_total + bridge.monthly_ira_total).toLocaleString()}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-medium text-[var(--text-primary)]">Expenses</span>
-                  <span className="text-[11px] font-mono text-[var(--red)]">
-                    -${bridge.monthly_burn.toLocaleString()}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between pt-1.5 border-t border-[var(--border)]">
-                  <span className="text-[11px] font-bold text-[var(--text-primary)]">
-                    Monthly gap
-                    {bridge.income_streams.some((st) => st.label.endsWith("(temp)")) && (
-                      <span className="font-normal text-[var(--text-secondary)]"> (excl. temp income)</span>
-                    )}
-                  </span>
-                  <span className="text-[11px] font-mono font-bold" style={{ color: bridge.monthly_deficit > 0 ? "var(--red)" : "var(--green)" }}>
-                    {bridge.monthly_deficit > 0 ? "-" : "+"}${Math.abs(bridge.monthly_deficit).toLocaleString()}
-                  </span>
-                </div>
-                <div className="mt-2 pt-2 border-t border-[var(--border)]">
-                  <span className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">After primary property sale</span>
-                  <div className="flex items-center justify-between mt-1">
-                    <span className="text-[11px] text-[var(--text-secondary)]">Gap drops to</span>
-                    <span className="text-[11px] font-mono font-bold" style={{ color: bridge.post_sale_deficit > 0 ? "var(--yellow)" : "var(--green)" }}>
-                      {bridge.post_sale_deficit > 0 ? "-" : "+"}${Math.abs(bridge.post_sale_deficit).toLocaleString()}/mo
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="text-xs text-[var(--text-secondary)]">Loading...</div>
-            )}
-          </div>
-
-          {/* Upcoming Events */}
-          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-4">
-            <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-3">Upcoming Events</h3>
-            {bridge?.upcoming_events.length ? (
-              <div className="space-y-2">
-                {bridge.upcoming_events.map((ev) => (
-                  <div key={ev.name} className="flex items-center justify-between">
-                    <div className="flex flex-col">
-                      <span className="text-[11px] text-[var(--text-primary)]">{ev.name}</span>
-                      <span className="text-[10px] text-[var(--text-secondary)]">
-                        {fmtMonthYear(ev.date)}
-                      </span>
-                    </div>
-                    <span className="text-[11px] font-mono font-medium" style={{ color: ev.amount >= 0 ? "var(--green)" : "var(--red)" }}>
-                      {ev.amount >= 0 ? "+" : ""}{fmtCompact(ev.amount)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-xs text-[var(--text-secondary)]">No upcoming events</div>
-            )}
-          </div>
-        </div>
+        </section>
       </div>
     </Layout>
   );

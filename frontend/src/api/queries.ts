@@ -322,6 +322,27 @@ export function useWealthProjection(spendingOverride?: number) {
   });
 }
 
+/** Month-by-month projection to end_age for the Retirement page. bridge_months is
+ * set past any possible horizon so every point is monthly, whatever the age.
+ * plan: "active" (default), "base" (the base plan while a scenario is active), or
+ * a scenario id (preview without activating). */
+export function useRetirementProjection(
+  plan: string = "active",
+  spendingOverride?: number,
+  enabled = true,
+) {
+  const params = new URLSearchParams({ bridge_months: "1200" });
+  if (plan === "base") params.set("base", "true");
+  else if (plan !== "active") params.set("scenario_id", plan);
+  if (spendingOverride != null) params.set("spending_override", String(spendingOverride));
+  return useQuery({
+    queryKey: ["fire", "wealth-projection", "monthly", plan, spendingOverride ?? "default"],
+    queryFn: () =>
+      fetchJSON<WealthPoolProjection>(`${BASE}/fire/wealth-projection?${params.toString()}`),
+    enabled,
+  });
+}
+
 export function useBridgeProjection(spendingOverride?: number) {
   const params = new URLSearchParams({ bridge_months: "60" });
   if (spendingOverride != null) params.set("spending_override", String(spendingOverride));
