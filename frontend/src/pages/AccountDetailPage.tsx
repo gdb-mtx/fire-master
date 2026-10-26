@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router";
-import { useAccountDetail, useUpdateAccountEnrichment } from "../api/queries";
+import { useAccountDetail, useFireRoleVocabulary, useUpdateAccountEnrichment } from "../api/queries";
 import LightweightChart from "../charts/LightweightChart";
 import Layout from "../components/Layout";
 import { formatCurrency } from "../utils/formatting";
@@ -34,6 +34,10 @@ export default function AccountDetailPage() {
   const [tagInput, setTagInput] = useState("");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved">("idle");
   const [initialized, setInitialized] = useState(false);
+  const { data: roleVocabulary } = useFireRoleVocabulary();
+  const role = form.fire_role.trim();
+  const unrecognizedRole =
+    !!role && !!roleVocabulary && !Object.values(roleVocabulary).some((roles) => roles.includes(role));
 
   // Initialize form from account data
   useEffect(() => {
@@ -255,13 +259,25 @@ export default function AccountDetailPage() {
                   </label>
                   <input
                     type="text"
+                    list="fire-role-vocabulary"
                     value={form.fire_role}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, fire_role: e.target.value }))
                     }
-                    placeholder="e.g. core retirement, bridge account, emergency fund"
+                    placeholder="e.g. cash_reserve, retirement_core, retirement_bridge"
                     className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] placeholder:opacity-50 focus:outline-none focus:border-[var(--blue)] transition-colors"
                   />
+                  <datalist id="fire-role-vocabulary">
+                    {Object.entries(roleVocabulary ?? {}).flatMap(([group, roles]) =>
+                      roles.map((r) => <option key={r} value={r} label={group.replace(/_/g, " ")} />),
+                    )}
+                  </datalist>
+                  {unrecognizedRole && (
+                    <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
+                      Not a recognized role, so projections count this account as
+                      &ldquo;other&rdquo;. Pick one from the list to put it to work.
+                    </p>
+                  )}
                 </div>
 
                 {/* Notes */}

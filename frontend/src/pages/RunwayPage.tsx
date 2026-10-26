@@ -199,6 +199,8 @@ function EventModal({
             >
               <option value="planned">Planned</option>
               <option value="confirmed">Confirmed</option>
+              <option value="completed">Completed (received / paid)</option>
+              <option value="cancelled">Cancelled</option>
             </select>
           </div>
         </div>
@@ -315,30 +317,66 @@ function EventModal({
 /* ------------------------------------------------------------------ */
 /*  Events List — splits into upcoming + past, dims the past block.    */
 /* ------------------------------------------------------------------ */
-function isEventRealized(evt: CashflowEvent, today: string): boolean {
+function isDatePassed(evt: CashflowEvent, today: string): boolean {
   // Recurring events count as past only when their entire run has ended.
-  // (No end_date = ongoing → never realized.)
+  // (No end_date = ongoing → never past.)
   if (evt.is_recurring) {
     return !!evt.end_date && evt.end_date < today;
   }
   return evt.date < today;
 }
 
+type EventState = "upcoming" | "done" | "cancelled" | "date-passed";
+
+/** What the projection actually does with the event. A passed date does NOT mean
+ *  the money moved: the engines simply stop counting a planned/confirmed event
+ *  once its date is gone, so a late inflow drops out silently. Only the status
+ *  says whether it happened. */
+function eventState(evt: CashflowEvent, today: string): EventState {
+  if (evt.status === "completed") return "done";
+  if (evt.status === "cancelled") return "cancelled";
+  return isDatePassed(evt, today) ? "date-passed" : "upcoming";
+}
+
+const STATE_CHIP: Record<Exclude<EventState, "upcoming">, { bg: string; fg: string; title: string }> = {
+  done: {
+    bg: "rgba(120,120,140,0.15)", fg: "var(--text-secondary)",
+    title: "Marked completed: the money already moved and is in your balances.",
+  },
+  cancelled: {
+    bg: "rgba(120,120,140,0.15)", fg: "var(--text-secondary)",
+    title: "Cancelled: ignored everywhere.",
+  },
+  "date-passed": {
+    bg: "rgba(255,192,77,0.15)", fg: "var(--amber, #c98a00)",
+    title:
+      "Its date has passed but it isn't marked completed, so projections no longer count it. " +
+      "If it happened, set the status to Completed. If it slipped, move the date.",
+  },
+};
+
 function EventRow({
   evt,
-  realized,
+  state,
   onEdit,
   onDelete,
 }: {
   evt: CashflowEvent;
-  realized: boolean;
+  state: EventState;
   onEdit: (evt: CashflowEvent) => void;
   onDelete: (id: string) => void;
 }) {
+  const dim = state === "done" || state === "cancelled";
+  const chip = state === "upcoming" ? null : STATE_CHIP[state];
+  const chipLabel =
+    state === "done" ? (evt.event_type === "income" ? "received" : "paid")
+    : state === "date-passed" ? "date passed"
+    : state === "cancelled" ? "cancelled"
+    : evt.status;
   return (
     <div
       className="flex flex-wrap items-center justify-between gap-y-1.5 p-3 rounded border border-[rgba(42,42,62,0.3)] hover:bg-[rgba(255,255,255,0.02)] transition-colors"
-      style={realized ? { opacity: 0.45, filter: "saturate(0.6)" } : undefined}
+      style={dim ? { opacity: 0.45, filter: "saturate(0.6)" } : undefined}
     >
       <div className="flex items-center gap-3 min-w-0 basis-full sm:basis-auto">
         <span
@@ -378,20 +416,21 @@ function EventRow({
         </span>
         <span
           className="inline-block px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider"
+          title={chip?.title}
           style={{
-            background: realized
-              ? "rgba(120,120,140,0.15)"
+            background: chip
+              ? chip.bg
               : evt.status === "confirmed"
               ? "rgba(0,212,170,0.1)"
               : "rgba(77,142,255,0.1)",
-            color: realized
-              ? "var(--text-secondary)"
+            color: chip
+              ? chip.fg
               : evt.status === "confirmed"
               ? "var(--green)"
               : "var(--blue)",
           }}
         >
-          {realized ? "realized" : evt.status}
+          {chipLabel}
         </span>
         <button
           className="text-[var(--text-secondary)] hover:text-[var(--blue)] transition-colors text-sm"
@@ -428,7 +467,7 @@ function EventsList({
     const up: CashflowEvent[] = [];
     const ps: CashflowEvent[] = [];
     for (const evt of events) {
-      (isEventRealized(evt, today) ? ps : up).push(evt);
+      (eventState(evt, today) === "upcoming" ? up : ps).push(evt);
     }
     // Upcoming sorted asc by date, past sorted desc (most recent first).
     up.sort((a, b) => a.date.localeCompare(b.date));
@@ -453,7 +492,7 @@ function EventsList({
           <EventRow
             key={evt.id}
             evt={evt}
-            realized={false}
+            state="upcoming"
             onEdit={onEdit}
             onDelete={onDelete}
           />
@@ -479,7 +518,7 @@ function EventsList({
                 <EventRow
                   key={evt.id}
                   evt={evt}
-                  realized={true}
+                  state={eventState(evt, todayISO())}
                   onEdit={onEdit}
                   onDelete={onDelete}
                 />

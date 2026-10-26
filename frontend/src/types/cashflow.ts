@@ -59,6 +59,7 @@ export interface ScenarioSale {
   proceeds_to: string;
   burn_change: number;
   income_change: number;
+  closed?: boolean; // the sale already happened: no proceeds, changes apply now
 }
 
 export interface RunwayResponse {

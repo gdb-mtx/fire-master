@@ -37,7 +37,8 @@ export async function fetchJSON<T>(
   // there reloads the page, loses the error, and (with demo auto-login) loops forever.
   if (res.status === 401 && !url.includes("/auth/login")) {
     localStorage.removeItem("token");
-    window.location.href = "/login";
+    const here = window.location.pathname + window.location.search;
+    window.location.href = here.startsWith("/login") ? "/login" : `/login?next=${encodeURIComponent(here)}`;
     throw new Error("Unauthorized");
   }
 

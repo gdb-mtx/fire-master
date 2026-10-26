@@ -241,6 +241,17 @@ export function useAccountDetail(id: string | null) {
   });
 }
 
+/** The recognized fire_role vocabulary, grouped (GET /api/setup/status). A role
+ *  outside it is accepted but projections treat the account as "other". */
+export function useFireRoleVocabulary() {
+  return useQuery({
+    queryKey: ["setup", "status"],
+    queryFn: () => fetchJSON<{ valid_fire_roles: Record<string, string[]> }>(`${BASE}/setup/status`),
+    staleTime: 5 * 60_000,
+    select: (d) => d.valid_fire_roles,
+  });
+}
+
 export function useUpdateAccountEnrichment() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -464,8 +475,10 @@ export function useActivateScenario() {
     mutationFn: (id: string) =>
       postJSON<FireScenario>(`${BASE}/fire/scenarios/${id}/activate`),
     onSuccess: () => {
-      // Invalidate all fire queries so dashboard refreshes with new scenario
+      // Invalidate all fire queries so dashboard refreshes with new scenario,
+      // and the Runway: it reads the active plan's property sales.
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["cashflow"] });
     },
   });
 }
@@ -477,6 +490,7 @@ export function useDeactivateScenario() {
       postJSON<{ ok: boolean }>(`${BASE}/fire/scenarios/deactivate`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fire"] });
+      queryClient.invalidateQueries({ queryKey: ["cashflow"] }); // Runway reads the active plan's sales
     },
   });
 }
@@ -579,6 +593,7 @@ export function useCreateCashflowEvent() {
       postJSON<CashflowEvent>(`${BASE}/cashflow/events`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["cashflow"] });
+      queryClient.invalidateQueries({ queryKey: ["fire"] }); // Retirement engines read events too
     },
   });
 }
@@ -590,6 +605,7 @@ export function useUpdateCashflowEvent() {
       putJSON<CashflowEvent>(`${BASE}/cashflow/events/${id}`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["cashflow"] });
+      queryClient.invalidateQueries({ queryKey: ["fire"] }); // Retirement engines read events too
     },
   });
 }
@@ -601,6 +617,7 @@ export function useDeleteCashflowEvent() {
       fetchJSON(`${BASE}/cashflow/events/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["cashflow"] });
+      queryClient.invalidateQueries({ queryKey: ["fire"] }); // Retirement engines read events too
     },
   });
 }

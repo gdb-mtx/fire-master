@@ -1,4 +1,4 @@
-import { Navigate } from "react-router";
+import { Navigate, useLocation } from "react-router";
 import type { ReactNode } from "react";
 
 function isTokenExpired(token: string): boolean {
@@ -11,10 +11,13 @@ function isTokenExpired(token: string): boolean {
 }
 
 export default function ProtectedRoute({ children }: { children: ReactNode }) {
+  const location = useLocation();
   const token = localStorage.getItem("token");
   if (!token || isTokenExpired(token)) {
     localStorage.removeItem("token");
-    return <Navigate to="/login" replace />;
+    // Remember where the visitor was headed; login sends them back there.
+    const from = location.pathname + location.search + location.hash;
+    return <Navigate to="/login" replace state={{ from }} />;
   }
   return <>{children}</>;
 }
