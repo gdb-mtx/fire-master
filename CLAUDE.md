@@ -24,7 +24,7 @@ If a `CLAUDE.local.md` exists here, read it too — it carries the owner's machi
 | Transactions Ledger | `app/api/transactions.py`, `/api/transactions`, `/transactions` page |
 | Monarch tag sync (bidirectional) | `scripts/monarch_tag_writeback.py` (out), `reclassify()` tag map (in) |
 
-Test suite: **389 unit tests, ~2s** (`cd backend && uv run pytest -v`) + **14 Postgres integration tests** (skipped unless `TEST_DATABASE_URL` points at a scratch DB; CI runs them). Run after engine, config, tax, or scenario changes.
+Test suite: **402 unit tests, ~2s** (`cd backend && uv run pytest -v`) + **22 Postgres integration tests** (skipped unless `TEST_DATABASE_URL` points at a scratch DB; CI runs them). Run after engine, config, tax, or scenario changes.
 
 **Runway burn:** default = trailing 90-day outflows MINUS payments matched to cashflow expense events (`engines/event_matching.py`, shared with the Tracker's Adjusted mode): a paid special-assessment installment is the event, not recurring spend. Matching reads planned, confirmed AND completed events (`CashflowEngine.get_active_events`); only planned/confirmed project forward — marking a paid installment completed must never put it back into the burn (it did until Oct 2026). Unmatched one-offs stay in — add a (past) event to exclude one. Saved overrides live in `custom_assumptions.runway` ("Save as default" on the page); no fallback to target spending.
 
