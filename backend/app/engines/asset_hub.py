@@ -77,7 +77,13 @@ class AssetHubEngine:
             old_bal = old_balances.get(acct.id)
             change_30d = None
             if old_bal is not None:
-                change_30d = _cents_to_dollars(acct.current_balance - old_bal)
+                # Net-worth terms on both sides: what you owe counts negative. A
+                # liability's current_balance is stored as a positive amount owed while
+                # its balance snapshots are negative, so the raw difference ADDED the two
+                # (a $327K loan showed "+$654K", a card whose debt grew showed green).
+                now_nw = acct.current_balance if acct.is_asset else -abs(acct.current_balance)
+                old_nw = old_bal if acct.is_asset else -abs(old_bal)
+                change_30d = _cents_to_dollars(now_nw - old_nw)
 
             has_enrichment = any([acct.notes, acct.tags, acct.fire_role, acct.strategy])
 
