@@ -1,4 +1,4 @@
-"""Upgrade check — what the September 2026 update changed in THIS install.
+"""Upgrade check — what the September and October 2026 updates changed in THIS install.
 
 Read-only. Run it after updating, before trusting the projections; it prints a
 report of everything in your own data that the update touched and what (if
@@ -24,6 +24,7 @@ from app.core.database import async_session_factory  # noqa: E402
 from app.engines.plan_months import (  # noqa: E402
     PLAN_MONTH_KEYS,
     SALE_KEYS,
+    is_closed,
     is_held,
     month_from_offset,
 )
@@ -104,6 +105,78 @@ def bad_events(events: list) -> list[str]:
     return out
 
 
+# --- October 2026 ---------------------------------------------------------
+
+def past_dated_events(events: list, today: date) -> list[str]:
+    """Planned/confirmed events whose date (or whole run) is over. Projections stopped
+    counting them on that date whether or not the money moved; the Runway page now
+    says "date passed" instead of "realized"."""
+    out = []
+    for ev in events:
+        if ev.is_recurring and ev.end_date is None:
+            continue  # ongoing
+        last = ev.end_date if ev.is_recurring else ev.date
+        if last < today:
+            out.append(f"{ev.name} ({ev.event_type}, {last.isoformat()})")
+    return out
+
+
+def stale_sales(sales: list[dict], today: date) -> list[str]:
+    """Entries whose sale month is already past and that aren't marked closed: a past
+    sale_date resolves to "now", so both engines land the proceeds again every month."""
+    out = []
+    for s in sales:
+        if not isinstance(s, dict) or is_closed(s) or not s.get("sale_date"):
+            continue
+        raw = str(s["sale_date"])
+        try:
+            past = (int(raw[0:4]), int(raw[5:7])) < (today.year, today.month)
+        except ValueError:
+            continue
+        if past:
+            out.append(f"'{s.get('key')}' (sale_date {raw})")
+    return out
+
+
+def matcher_expense_hits(projection: dict, events: list) -> list[str]:
+    """Expense events whose names contain sell_event_label_match / illiquid_vest_event_match.
+    Before this update they zeroed the secondary property's equity or drained the
+    illiquid pool in their month; the matchers now fire on income only."""
+    sell = (projection.get("sell_event_label_match") or "").lower()
+    vest = [t.lower() for t in (projection.get("illiquid_vest_event_match", ["vest"]) or []) if t]
+    out = []
+    for ev in events:
+        if ev.event_type != "expense":
+            continue
+        name = (ev.name or "").lower()
+        if sell and sell in name:
+            out.append(f"'{ev.name}' no longer removes the secondary property's equity")
+        if any(t in name for t in vest):
+            out.append(f"'{ev.name}' no longer drains the illiquid pool")
+    return out
+
+
+def scenario_override_problem(overrides: dict | None) -> str | None:
+    """What a save of this scenario would now be rejected for (None = it saves fine).
+    Projections skip these entries with a warning; they never had an effect."""
+    from app.schemas.fire import _validate_scenario_overrides
+
+    try:
+        _validate_scenario_overrides(overrides)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+def categories_turning_income(categories: list) -> list[str]:
+    """Categories stored as non-income that the widened rule (a name ending in "Income",
+    or a dividends spelling) flags as income on the next category sync."""
+    from app.ingestion.category_sync import classify_flags
+
+    return [c.normalized_category for c in categories
+            if not c.is_income and classify_flags(c.normalized_category, c.parent_category)[0]]
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -169,6 +242,7 @@ async def _tag_guard_rows(db) -> list[str]:
 async def main() -> None:
     from app.engines.cashflow import CashflowEngine
     from app.models.cashflow_event import CashflowEvent
+    from app.models.category_mapping import CategoryMapping
     from app.models.fire_config import FireConfig
     from app.models.fire_config_history import FireConfigHistory
     from app.models.fire_scenario import FireScenario
@@ -183,7 +257,7 @@ async def main() -> None:
         )).scalars().all()
         future = [e for e in events if (e.end_date or e.date) >= today]
 
-        print("FIREMaster upgrade check — September 2026 update (read-only)")
+        print("FIREMaster upgrade check — September + October 2026 updates (read-only)")
         print(f"{len(scenarios)} scenario(s), {len(events)} active cashflow event(s)")
 
         # 1. Plan months pinned by the update ----------------------------------
@@ -251,6 +325,44 @@ async def main() -> None:
         # 7. Monarch tags on loans / credit cards (Property P&L) ----------------
         tagged = await _tag_guard_rows(db)
         _section("Monarch property tags on loan accounts or card refunds", not tagged, tagged or ["none"])
+
+        # --- October 2026 update -------------------------------------------------
+        print("\n--- October 2026 update ---")
+
+        # 8. Events past their date but never marked completed --------------------
+        past = past_dated_events(events, today)
+        _section("Events whose date has passed but aren't marked completed (projections no longer count them)",
+                 not past, past + ["if it happened: Runway → edit → Status: Completed; if it slipped: move the date"]
+                 if past else ["none"])
+
+        # 9. Sales dated in the past and not closed -------------------------------
+        stale = []
+        for label, sales in all_sales:
+            stale += [f"{label}: {x} — its proceeds land again every month. Sold? add \"closed\": true. "
+                      "Slipped? set the new sale_date" for x in stale_sales(sales, today)]
+        _section("Property sales dated in the past and not marked closed", not stale, stale or ["none"])
+
+        # 10. Name matchers now ignore expenses (a correction, nothing to decide) ---
+        base_proj = ((config.custom_assumptions or {}).get("projection") or {}) if config else {}
+        hits = [f"Base config: {h}" for h in matcher_expense_hits(base_proj, future)]
+        for sc in scenarios:
+            sp = ((sc.overrides or {}).get("custom_assumptions") or {}).get("projection")
+            if isinstance(sp, dict) and ({"sell_event_label_match", "illiquid_vest_event_match"} & set(sp)):
+                hits += [f"Scenario '{sc.name}': {h}" for h in matcher_expense_hits({**base_proj, **sp}, future)]
+        _section("Retirement: expense events no longer trip the sale/vest name matchers", True,
+                 hits or ["no expense event matched — nothing moved"])
+
+        # 11. Scenario settings that never had an effect -------------------------
+        probs = [f"Scenario '{sc.name}': {msg}" for sc in scenarios
+                 if (msg := scenario_override_problem(sc.overrides))]
+        _section("Scenario settings that never had an effect (saving the scenario now rejects them)",
+                 not probs, probs or ["none"])
+
+        # 12. Categories that become income on the next sync ---------------------
+        cats = (await db.execute(select(CategoryMapping))).scalars().all()
+        turning = categories_turning_income(cats)
+        _section("Categories that count as income from the next sync (savings rate and readiness move)",
+                 not turning, turning or ["none"])
 
     print("\nFixes for every REVIEW item: docs/UPGRADING.md")
 
