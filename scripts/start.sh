@@ -51,6 +51,18 @@ fi
 # Apply migrations
 echo "Applying database migrations..."
 cd "$PROJECT_DIR/backend"
+
+# Trust certifi's CA bundle in these native processes, not the OS store. Python's ssl
+# module defaults to the system bundle (/etc/ssl/cert.pem on macOS), which still carries
+# roots certifi has removed - "emSign ECC Root CA - G3" was pulled in certifi 2026.10.19
+# after its key was compromised. aiohttp (the Monarch sync, via gql) honors SSL_CERT_FILE;
+# httpx already uses certifi. The Docker images use Debian's store, which lacks that root.
+# An SSL_CERT_FILE you set yourself wins.
+if [ -z "${SSL_CERT_FILE:-}" ]; then
+    SSL_CERT_FILE="$($UV run python -c 'import certifi; print(certifi.where())')"
+    export SSL_CERT_FILE
+fi
+
 $UV run alembic upgrade head
 
 # Start backend
