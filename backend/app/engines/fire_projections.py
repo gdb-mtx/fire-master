@@ -21,19 +21,19 @@ from datetime import date, timedelta
 from typing import Callable
 from dateutil.relativedelta import relativedelta
 
-from sqlalchemy import select, func
+from sqlalchemy import Date, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.account import Account
 from app.models.cashflow_event import CashflowEvent
-from app.models.fire_config import FireConfig
+from app.models.fire_config import SCENARIO_LOCKED_COLUMNS, FireConfig
 from app.models.fire_scenario import FireScenario
 from app.models.goal import Goal
 from app.models.income_source import IncomeSource
 from app.models.net_worth_snapshot import NetWorthSnapshot
 from app.engines.event_calendar import RECURRENCE_STEP_MONTHS as _RECURRENCE_STEP_MONTHS
 from app.engines.event_calendar import event_occurrence_dates
-from app.engines.plan_months import is_held, resolve_month_offset, sale_offset
+from app.engines.plan_months import is_closed, is_held, resolve_month_offset, sale_offset
 from app.engines.net_worth import NetWorthEngine
 from app.engines.tax_engine import _get_rmd_divisor
 from app.engines.spending import SpendingEngine
@@ -234,6 +234,10 @@ def cashflow_by_year(by_month: dict[int, list[tuple[str, float]]], total_years: 
     return out
 
 
+class ScenarioNotFoundError(LookupError):
+    """An explicit scenario_id matched no saved scenario (the API answers 404)."""
+
+
 class FireProjectionsEngine:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -257,11 +261,15 @@ class FireProjectionsEngine:
     ) -> FireConfig:
         """Get FIRE config merged with the active scenario (or a specific one).
 
-        If scenario_id is provided, use that scenario.
+        If scenario_id is provided, use that scenario — and raise
+        ScenarioNotFoundError when it doesn't exist, rather than quietly answering
+        with the base plan under the scenario's name.
         Otherwise, check for an active scenario.
-        If no scenario, returns the base config unchanged.
+        If no scenario, returns a copy of the base config.
 
-        Returns a DETACHED copy — safe to read, never written back to DB.
+        Always returns a DETACHED copy — safe to read or tweak, never written back.
+        (The no-scenario path used to return the live session row, so a caller's
+        tweak would leak into every later read in the session and into any commit.)
         """
         config = await self.get_or_create_config()
 
@@ -272,15 +280,15 @@ class FireProjectionsEngine:
                 select(FireScenario).where(FireScenario.id == scenario_id)
             )
             scenario = result.scalar_one_or_none()
+            if scenario is None:
+                raise ScenarioNotFoundError(f"Scenario {scenario_id} not found")
         else:
             result = await self.db.execute(
                 select(FireScenario).where(FireScenario.is_active == True).limit(1)
             )
             scenario = result.scalar_one_or_none()
 
-        if scenario and scenario.overrides:
-            return self._apply_overrides(config, scenario.overrides)
-        return config
+        return self._apply_overrides(config, (scenario.overrides if scenario else None) or {})
 
     @staticmethod
     def _apply_overrides(config: FireConfig, overrides: dict) -> FireConfig:
@@ -291,23 +299,42 @@ class FireProjectionsEngine:
         or add to base subkeys; base subkeys not in scenario are preserved).
 
         Does NOT modify the original config object.
+
+        Read-time tolerant: stored overrides can bypass API validation (psql, seed
+        scripts, history restore), so a bad entry is skipped with a warning instead
+        of crashing every projection while the scenario is active. A top-level key
+        must be a fire_config column; an ISO date string for a date column is
+        parsed (JSON has no date type, and a raw string broke date arithmetic).
         """
         merged = FireConfig()
+        columns = FireConfig.__table__.columns
         # Copy all column values from original
-        for col in FireConfig.__table__.columns:
+        for col in columns:
             setattr(merged, col.name, getattr(config, col.name))
 
         # Apply top-level column overrides
         for key, value in overrides.items():
             if key == "custom_assumptions":
                 continue  # handled separately below
-            if hasattr(merged, key):
-                setattr(merged, key, value)
+            col = columns.get(key)
+            if col is None or key in SCENARIO_LOCKED_COLUMNS:
+                logger.warning("Scenario override %r is not a fire_config setting; ignored", key)
+                continue
+            if isinstance(value, str) and isinstance(col.type, Date):
+                try:
+                    value = date.fromisoformat(value[:10])
+                except ValueError:
+                    logger.warning("Scenario override %s=%r is not a date; ignored", key, value)
+                    continue
+            setattr(merged, key, value)
 
         # Deep-merge custom_assumptions
         base_ca = deepcopy(config.custom_assumptions or {})
-        override_ca = overrides.get("custom_assumptions", {})
-        for subkey, subval in override_ca.items():
+        override_ca = overrides.get("custom_assumptions")
+        if override_ca is not None and not isinstance(override_ca, dict):
+            logger.warning("Scenario custom_assumptions must be an object, got %r; ignored", override_ca)
+            override_ca = None
+        for subkey, subval in (override_ca or {}).items():
             if isinstance(subval, dict) and isinstance(base_ca.get(subkey), dict):
                 base_ca[subkey] = {**base_ca[subkey], **subval}
             else:
@@ -1371,6 +1398,13 @@ class FireProjectionsEngine:
             if m in cf_by_month:
                 for label, amount in cf_by_month[m]:
                     income += amount
+                    # Both matchers below convert an asset into cash, so only an
+                    # INCOME event (amount > 0) can trigger them — the same rule as
+                    # sale_event_suppressed and _single_pool_event_skip. An expense
+                    # carrying the label ("Mountain House Special Assessment") is real
+                    # money out; it once zeroed the secondary property's equity.
+                    if amount <= 0:
+                        continue
                     # Drop secondary-property RE equity when its (non-suppressed) sale
                     # event fires — matched via projection.sell_event_label_match.
                     # When the generic path owns the property, its event was
@@ -1383,7 +1417,7 @@ class FireProjectionsEngine:
                     # Drop illiquid when private investments vest — matched via
                     # projection.illiquid_vest_event_match substrings
                     if illiquid > 0 and any(t.lower() in label.lower() for t in illiquid_vest_event_match):
-                        illiquid = max(0, illiquid - abs(amount))
+                        illiquid = max(0, illiquid - amount)
 
             # Chart marker: only label-worthy occurrences (one-offs + start of recurrings)
             event_label = "; ".join(cf_labels_by_month[m]) if m in cf_labels_by_month else None
@@ -1465,7 +1499,8 @@ class FireProjectionsEngine:
                     if generic_sold.get(key):
                         continue
                     generic_sold[key] = True
-                    net_proceeds = property_sale_net_proceeds(s, m, re_appreciation_rate)
+                    # A CLOSED sale's proceeds are already in the balances.
+                    net_proceeds = 0.0 if is_closed(s) else property_sale_net_proceeds(s, m, re_appreciation_rate)
                     if s.get("proceeds_to", "taxable") == "cash":
                         income += net_proceeds
                     else:
@@ -1484,7 +1519,8 @@ class FireProjectionsEngine:
                         re_equity -= re_income_prop; re_income_prop = 0
                         income_prop_sold = True
                     _dest = s.get("proceeds_to", "taxable")
-                    _lbl = f"Sell {key.replace('_', ' ').title()} (+${net_proceeds:,.0f}→{_dest})"
+                    _lbl = (f"{key.replace('_', ' ').title()} sold (proceeds in balances)" if is_closed(s)
+                            else f"Sell {key.replace('_', ' ').title()} (+${net_proceeds:,.0f}→{_dest})")
                     event_label = (event_label + "; " + _lbl) if event_label else _lbl
 
             # --- Expenses ---
@@ -1735,9 +1771,10 @@ class FireProjectionsEngine:
                 sm = sale_offset(s, today)
                 if sm is None:
                     continue  # held — no sale to mark
+                _name = s.get('key', '').replace('_', ' ').title()
                 chart_events.append(
                     {"month": sm, "age": round(current_age + sm / 12, 1),
-                     "label": f"Sell {s.get('key', '').replace('_', ' ').title()}", "color": "#ff4d6a"},
+                     "label": f"{_name} sold" if is_closed(s) else f"Sell {_name}", "color": "#ff4d6a"},
                 )
         else:
             # LEGACY markers for the single-property sale blocks

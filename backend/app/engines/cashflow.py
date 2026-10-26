@@ -14,6 +14,7 @@ from app.models.category_mapping import CategoryMapping
 from app.models.fire_config import FireConfig
 from app.models.income_source import IncomeSource
 from app.models.transaction import Transaction
+from app.engines.plan_months import is_closed, resolve_month_offset
 from app.engines.event_matching import (
     DATE_WINDOW_DAYS,
     Candidate,
@@ -160,10 +161,19 @@ class CashflowEngine:
         return sources, retirement_date, inflation
 
     async def get_active_events(self) -> list[CashflowEvent]:
-        """All non-cancelled, non-completed events."""
+        """Planned and confirmed events (the forward plan) PLUS completed ones.
+
+        A completed event is money that already moved: it never projects forward,
+        but its payments must still be recognised when the trailing burn is
+        cleaned — a special-assessment installment marked "paid" is still the
+        event, not recurring spend. Loading only planned/confirmed put a paid
+        installment straight back into the burn the moment it was marked done.
+        project_runway splits the list; the Tracker already reads every
+        non-cancelled event.
+        """
         result = await self.db.execute(
             select(CashflowEvent)
-            .where(CashflowEvent.status.in_(["planned", "confirmed"]))
+            .where(CashflowEvent.status.in_(["planned", "confirmed", "completed"]))
             .order_by(CashflowEvent.date)
         )
         return list(result.scalars().all())
@@ -183,7 +193,7 @@ class CashflowEngine:
         ca = config.custom_assumptions or {}
         sales = [
             s for s in (ca.get("property_sales") or [])
-            if isinstance(s, dict) and s.get("sale_date")
+            if isinstance(s, dict) and (s.get("sale_date") or is_closed(s))
         ]
         appreciation = (ca.get("projection") or {}).get("re_appreciation_rate", 0.01)
         name = None
@@ -236,8 +246,6 @@ class CashflowEngine:
             property_sale_net_proceeds,
             sale_event_suppressed,
         )
-        from app.engines.plan_months import resolve_month_offset
-
         today = today or date.today()
         current_cash = await self.get_current_cash()
         burn_start = today - timedelta(days=TRAILING_DAYS)
@@ -246,6 +254,9 @@ class CashflowEngine:
         sources, retirement_date, inflation = await self._get_income_model_inputs()
 
         events = await self.get_active_events()
+        # Completed events already moved money: they clean the burn below but never
+        # project forward (the balance already reflects them).
+        forward_events = [e for e in events if e.status != "completed"]
 
         # Trailing burn, CLEANED: a payment that paid a cashflow event (a special
         # assessment installment, a one-off bill) is the event, already modeled —
@@ -278,19 +289,22 @@ class CashflowEngine:
 
         plan_sales, re_appreciation, scenario_name = await self._get_plan_sales()
         by_month, labels_by_month = build_cashflow_schedule(
-            events, today, months,
+            forward_events, today, months,
             skip=(lambda cf: sale_event_suppressed(cf, plan_sales)) if plan_sales else None,
         )
         sales: list[ScenarioSale] = []
         for sale in plan_sales:
-            m = resolve_month_offset(sale, "sale_date", "sale_month", today)
+            # A CLOSED sale already happened: sold as of now, proceeds already in cash.
+            closed = is_closed(sale)
+            m = 0 if closed else resolve_month_offset(sale, "sale_date", "sale_month", today)
             if m >= months:
                 continue
             sales.append(ScenarioSale(
                 key=str(sale.get("key", "property")),
                 month=(start_month + relativedelta(months=m)).strftime("%Y-%m"),
                 month_index=m,
-                net_proceeds=round(property_sale_net_proceeds(sale, m, re_appreciation), 2),
+                net_proceeds=0.0 if closed else round(property_sale_net_proceeds(sale, m, re_appreciation), 2),
+                closed=closed,
                 proceeds_to=str(sale.get("proceeds_to", "taxable")),
                 burn_change=round(float(sale.get("post_sale_rent", 0) or 0)
                                   - float(sale.get("monthly_cost", 0) or 0), 2),
@@ -343,8 +357,9 @@ class CashflowEngine:
                 if i == sale.month_index:
                     month_income += sale.net_proceeds
                     event_names.append(
-                        f"Sell {sale.key.replace('_', ' ').title()} "
-                        f"(+${sale.net_proceeds:,.0f}\u2192{sale.proceeds_to})"
+                        f"{sale.key.replace('_', ' ').title()} sold (proceeds in balances)" if sale.closed
+                        else f"Sell {sale.key.replace('_', ' ').title()} "
+                             f"(+${sale.net_proceeds:,.0f}\u2192{sale.proceeds_to})"
                     )
 
             net = month_income - month_expenses

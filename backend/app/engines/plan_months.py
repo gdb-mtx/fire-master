@@ -67,9 +67,22 @@ def resolve_month_offset(
     return int(val) if val is not None else default
 
 
+def is_closed(sale: dict) -> bool:
+    """A property_sales entry whose sale already CLOSED (`closed: true`).
+
+    Its proceeds are already in the account balances, so no engine may add them
+    again; it counts as sold from month 0 (carrying cost off, post-sale rent and
+    lost rental income on), and it still owns its hand-made "… Sale Proceeds"
+    event. Without this state a sold property's entry had two wrong options:
+    kept, its past sale_date clamps to "now" and lands the proceeds a second
+    time every month; deleted, its carrying cost returns to the plan.
+    """
+    return bool(sale.get("closed"))
+
+
 def is_held(sale: dict) -> bool:
     """A property_sales entry with no sale date is a property KEPT for good."""
-    return not sale.get("sale_date") and sale.get("sale_month") is None
+    return not sale.get("sale_date") and sale.get("sale_month") is None and not is_closed(sale)
 
 
 def sale_offset(sale: dict, today: date) -> int | None:
@@ -79,8 +92,10 @@ def sale_offset(sale: dict, today: date) -> int | None:
     its carrying cost keeps applying (added on top of the budget while
     in_base_burn is false) and its rental income keeps flowing. This is how a
     plan says "keep it and keep paying for it" — before, an entry without a date
-    resolved to month 0 and sold immediately.
+    resolved to month 0 and sold immediately. A CLOSED entry is sold as of now (0).
     """
+    if is_closed(sale):
+        return 0
     if is_held(sale):
         return None
     return resolve_month_offset(sale, "sale_date", "sale_month", today, default=None)

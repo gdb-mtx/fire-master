@@ -7,6 +7,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
+# fire_config columns a scenario override may never set (identity / audit).
+SCENARIO_LOCKED_COLUMNS = frozenset({"id", "created_at", "updated_at"})
+
 
 class FireConfig(Base):
     """Single-row table holding all FIRE assumptions and targets."""

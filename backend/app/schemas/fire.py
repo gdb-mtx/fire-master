@@ -1,7 +1,7 @@
 import datetime as _dt
 from uuid import UUID
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, computed_field, field_validator
 
 from app.models.enums import GoalStatus, GoalType, IncomeType
 
@@ -437,17 +437,63 @@ class FireMetricsResponse(BaseModel):
 # --- FIRE Scenarios ---
 
 
+def _validate_scenario_overrides(v: dict | None) -> dict | None:
+    """Reject override blobs that would silently do nothing or crash projections.
+
+    Top-level keys are fire_config settings; per-plan assumptions live under
+    custom_assumptions. An unknown key used to be accepted and then ignored, so
+    the scenario reported success while changing nothing; custom_assumptions:
+    null was accepted and then crashed every projection while active.
+    """
+    if v is None:
+        return v
+    from sqlalchemy import Date  # local: keep schemas free of model imports at load
+
+    from app.models.fire_config import SCENARIO_LOCKED_COLUMNS, FireConfig
+
+    columns = FireConfig.__table__.columns
+    if "custom_assumptions" in v and not isinstance(v["custom_assumptions"], dict):
+        raise ValueError("custom_assumptions must be an object (send {} for none)")
+    unknown = sorted(
+        k for k in v
+        if k != "custom_assumptions" and (k not in columns or k in SCENARIO_LOCKED_COLUMNS)
+    )
+    if unknown:
+        raise ValueError(
+            f"not fire_config settings: {', '.join(unknown)} — "
+            "per-plan assumptions belong under custom_assumptions"
+        )
+    for key, value in v.items():
+        col = columns.get(key)
+        if col is not None and isinstance(value, str) and isinstance(col.type, Date):
+            try:
+                _dt.date.fromisoformat(value[:10])
+            except ValueError:
+                raise ValueError(f"{key} must be an ISO date (YYYY-MM-DD), got {value!r}")
+    return v
+
+
 class FireScenarioCreate(BaseModel):
     name: str
     description: str | None = None
     overrides: dict | None = None
     is_active: bool = False
 
+    @field_validator("overrides")
+    @classmethod
+    def check_overrides(cls, v: dict | None) -> dict | None:
+        return _validate_scenario_overrides(v)
+
 
 class FireScenarioUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     overrides: dict | None = None
+
+    @field_validator("overrides")
+    @classmethod
+    def check_overrides(cls, v: dict | None) -> dict | None:
+        return _validate_scenario_overrides(v)
 
 
 class FireScenarioResponse(BaseModel):

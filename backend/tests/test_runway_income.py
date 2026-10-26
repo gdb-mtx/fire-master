@@ -356,3 +356,45 @@ class TestBurnBaselineExcludesModeledEvents:
         r = await _engine(db).project_runway(months=3, today=date(2026, 9, 22))
         assert r.trailing_burn == r.trailing_burn_raw == pytest.approx(907.0, abs=0.01)
         assert r.burn_exclusions == []
+
+    @pytest.mark.asyncio
+    async def test_completed_event_still_cleans_the_burn(self):
+        # Marking the paid installment "completed" must not put it back into the
+        # average. It did until Oct 2026: the loader read planned/confirmed only.
+        today = date(2026, 9, 22)
+        assessment = _event("Assessment #4", 4_400_00, date(2026, 7, 14), etype="expense")
+        assessment.status = "completed"
+        outflows = [
+            _outflow(4_429_04, date(2026, 7, 14), "HOA portal"),
+            _outflow(4_500_00, date(2026, 7, 20), "Rent"),
+            _outflow(4_500_00, date(2026, 8, 20), "Rent"),
+            _outflow(4_500_00, date(2026, 9, 20), "Rent"),
+        ]
+        db = _mock_db_for_runway(
+            cash_cents=50_000_00, trailing_income_cents=0, sources=[], events=[assessment],
+            outflows=outflows,
+        )
+        r = await _engine(db).project_runway(months=3, today=today)
+        assert r.trailing_burn == pytest.approx(4_500.0, abs=0.01)
+        assert [ex.event_name for ex in r.burn_exclusions] == ["Assessment #4"]
+        # The mock serves whatever it is given, so also pin the query itself:
+        # the database must be asked for completed rows.
+        events_stmt = db.execute.await_args_list[5].args[0]
+        sql = str(events_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "'completed'" in sql and "'cancelled'" not in sql
+
+    @pytest.mark.asyncio
+    async def test_completed_event_never_projects_forward(self):
+        # Received early and marked completed: the money is already in the
+        # balance, so projecting it again would count it twice.
+        today = date(2026, 9, 22)
+        refund = _event("Tax refund", 8_000_00, date(2026, 10, 15))
+        db = _mock_db_for_runway(cash_cents=50_000_00, trailing_income_cents=0, sources=[], events=[refund])
+        planned = await _engine(db).project_runway(months=3, today=today)
+        assert planned.projection[1].income == pytest.approx(8_000.0)
+
+        refund.status = "completed"
+        db = _mock_db_for_runway(cash_cents=50_000_00, trailing_income_cents=0, sources=[], events=[refund])
+        done = await _engine(db).project_runway(months=3, today=today)
+        assert done.projection[1].income == pytest.approx(0.0)
+        assert all("Tax refund" not in p.events for p in done.projection)

@@ -90,6 +90,7 @@ class ScenarioSale(BaseModel):
     proceeds_to: str  # where the Retirement engine routes it ("taxable" / "cash")
     burn_change: float  # per month from the sale on: post-sale rent − carrying cost
     income_change: float  # per month from the sale on: the property's rental income stops
+    closed: bool = False  # sale already happened: no proceeds (they're in the balance), changes apply now
 
 
 class RunwayResponse(BaseModel):

@@ -1,8 +1,9 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.accounts import router as accounts_router
 from app.api.advisor import router as advisor_router
@@ -19,6 +20,7 @@ from app.api.sync import router as sync_router
 from app.api.tax import router as tax_router
 from app.api.transactions import router as transactions_router
 from app.core.config import get_settings
+from app.engines.fire_projections import ScenarioNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,13 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(ScenarioNotFoundError)
+async def _scenario_not_found(_request: Request, exc: ScenarioNotFoundError) -> JSONResponse:
+    # Any endpoint taking ?scenario_id= gets a 404 for an unknown id, instead of
+    # the base plan returned under the scenario's name.
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 _settings = get_settings()
 app.add_middleware(
