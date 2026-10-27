@@ -7,7 +7,7 @@ import { useMemo, useState } from "react";
 import {
   COLORS, HOLDING_ORDER, holdingValue, holdingsStory, mergeMilestones, type HoldingKey, type Plan,
 } from "./model";
-import { money, monthName, numberWord, wholeAge } from "./format";
+import { midClip, money, monthName, numberWord, wholeAge } from "./format";
 import { DataTable, GridY, HoverLayer } from "./chartKit";
 import { clamp, cursorKeys, niceScale, useWidth } from "./chartMath";
 import MilestoneStrip from "./MilestoneStrip";
@@ -126,7 +126,7 @@ export default function HoldingsChart({ plan, compare, cursor, setCursor }: {
                   />
                   {!narrow && cmpEnd != null && (
                     <text x={g.x1 + 10} y={Math.min(g.y(cmpEnd), g.y(g.totals[n - 1])) - 22} className="lbl2">
-                      {compare.name.length > 18 ? compare.name.slice(0, 17) + "…" : compare.name} {money(cmpEnd)}
+                      {midClip(compare.name)} {money(cmpEnd)}
                     </text>
                   )}
                 </>

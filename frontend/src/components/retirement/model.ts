@@ -164,8 +164,13 @@ export interface Plan {
   thresholdMonths: number;
   hasRental: boolean;
   present: Set<SourceKey | HoldingKey>; // series with money somewhere in the plan
-  outMonth: number | null; // every spendable pool empty
+  // Runs out: every spendable pool empty (engine), or a cash shortfall that
+  // never recovers before the end (the engine keeps running while an IRA it
+  // won't draw still holds money).
+  outMonth: number | null;
+  outByEngine: boolean;
   shortRows: Row[]; // months that end with cash below zero
+  spells: { first: Row; last: Row }[]; // stretches of consecutive short months
 }
 
 export function toPlan(name: string, proj: WealthPoolProjection): Plan {
@@ -184,6 +189,15 @@ export function toPlan(name: string, proj: WealthPoolProjection): Plan {
     if (r.priv > 1) present.add("priv");
   }
   present.add("cash");
+  const spells: { first: Row; last: Row }[] = [];
+  for (const r of rows) {
+    if (r.cash >= -1) continue;
+    const s = spells[spells.length - 1];
+    if (s && s.last.m === r.m - 1) s.last = r;
+    else spells.push({ first: r, last: r });
+  }
+  const tail = spells[spells.length - 1];
+  const stranded = tail && rows.length && tail.last.m === rows[rows.length - 1].m ? tail.first.m : null;
   return {
     name,
     proj,
@@ -198,8 +212,10 @@ export function toPlan(name: string, proj: WealthPoolProjection): Plan {
     thresholdMonths: rule?.threshold_months ?? 12,
     hasRental: (proj.assumptions ?? []).some((a) => a.key === "rental_occupancy"),
     present,
-    outMonth: proj.money_runs_out_month ?? null,
+    outMonth: proj.money_runs_out_month ?? stranded,
+    outByEngine: proj.money_runs_out_month != null,
     shortRows: rows.filter((r) => r.cash < -1),
+    spells,
   };
 }
 
@@ -216,22 +232,17 @@ function firstSavingsRow(p: Plan): Row | undefined {
   return p.rows.find((r) => r.fBrk > 1 || r.fIra - r.sepp > 1);
 }
 
-/** The run of short months starting at the first one, and what ends it. */
+/** The first stretch of short months, what ends it, and the totals across all stretches. */
 function shortSpell(p: Plan) {
-  const first = p.shortRows[0];
-  if (!first) return null;
-  let last = first;
-  for (const r of p.rows) {
-    if (r.m <= first.m) continue;
-    if (r.cash < -1) last = r;
-    else break;
-  }
+  const s = p.spells[0];
+  if (!s) return null;
+  const { first, last } = s;
   const after = p.rows.find((r) => r.m > last.m);
   const rescue = after
     ? p.milestones.find((x) => (x.kind === "sale" || (x.kind === "money" && (x.amount ?? 0) > 0)) && x.month === after.m)
     : undefined;
   const lowest = p.shortRows.reduce((a, r) => (r.cash < a.cash ? r : a), first);
-  return { first, last, months: last.m - first.m + 1, after, rescue, lowest };
+  return { first, last, months: last.m - first.m + 1, after, rescue, lowest, stretches: p.spells.length, total: p.shortRows.length };
 }
 
 // ── Words: verdict and facts ──────────────────────────────────────────────────
@@ -266,8 +277,13 @@ export function verdictWords(p: Plan, compare: Plan | null): VerdictWords {
   if (tone === "out") {
     const out = rowAt(p, p.outMonth!);
     headline = `Money runs out in ${monthName(out.d)}, at ${wholeAge(out.a)}.`;
-    const years = Math.max(1, Math.round(out.m / 12));
-    sub = `Every savings pool is empty by then, ${plural(years, "year")} from now. From that month on, spending isn't covered.`;
+    const away = out.m < 24 ? plural(Math.max(1, out.m), "month") : plural(Math.round(out.m / 12), "year");
+    if (p.outByEngine) {
+      sub = `Every savings pool is empty by then, ${away} from now. From that month on, spending isn't covered.`;
+    } else {
+      sub = `That's ${away} from now. From then on spending isn't covered, and by ${p.endAge} cash is ${money(-end.cash)} short.` +
+        (out.ira > 1 ? ` ${money(out.ira)} is still in IRAs when it happens; see which IRA money this projection draws, below.` : "");
+    }
     facts.push({ value: monthName(out.d), label: `when the money runs out, at age ${wholeAge(out.a)}.`, tone: "bad" });
   } else {
     const spell = tone === "short" ? shortSpell(p) : null;
@@ -276,7 +292,9 @@ export function verdictWords(p: Plan, compare: Plan | null): VerdictWords {
       const until = spell.rescue
         ? `, until ${spell.rescue.label.replace(/ sold$/, " sells")} in ${monthName(spell.after!.d)}`
         : spell.after ? `, until ${monthName(spell.after.d)}` : "";
-      sub = `Bills can't be paid for ${plural(spell.months, "month")}${until}; at worst cash is ${money(spell.lowest.cash)}. After that the money lasts past ${p.endAge}.`;
+      sub = spell.stretches === 1
+        ? `Bills can't be paid for ${plural(spell.months, "month")}${until}; at worst cash is ${money(spell.lowest.cash)}. After that the money lasts past ${p.endAge}.`
+        : `Bills can't be paid in ${plural(spell.total, "month")} across ${numberWord(spell.stretches)} stretches; the first lasts ${plural(spell.months, "month")}${until}. At worst cash is ${money(spell.lowest.cash)}. After the last one, the money lasts past ${p.endAge}.`;
     } else {
       headline = `Your money lasts past ${p.endAge}.`;
       sub = "Nothing runs out. " + healthySub(p);
@@ -415,6 +433,13 @@ export function sourcesAnswer(p: Plan): string {
 
 export function holdingsAnswer(p: Plan): string {
   const end = endRow(p);
+  if (toneOf(p) === "out") {
+    const out = rowAt(p, p.outMonth!);
+    const left = [end.ira > 1 ? `${money(end.ira)} in IRAs` : "", end.home > 1 ? `${money(end.home)} in property` : "",
+      end.priv > 1 ? `${money(end.priv)} in private investments` : ""].filter(Boolean);
+    return `The money you can spend is gone in ${monthName(out.d)}.` +
+      (end.cash < -1 ? ` By ${p.endAge} the plan is ${money(-end.cash)} short` + (left.length ? `, with ${listJoin(left)} left.` : ".") : "");
+  }
   const spend = spendable(end);
   let text = `${money(end.total)} at ${p.endAge}, ` +
     (end.total - spend <= 1 ? "all of it money you can spend."
@@ -458,7 +483,7 @@ export function bridgeStory(p: Plan, r: Row): { text: string; bad: boolean } {
     if (covers.length) bits.push(`You spend ${money(r.spend)}: ` + covers.map(([k, v]) => `${money(v)} from ${sourceWord(p, k)}`).join(", ") + ".");
   }
   const bad = r.cash < -1;
-  if (bad) bits.push(`Cash is ${money(-r.cash)} short; nothing can refill it yet.`);
+  if (bad) bits.push(`Cash is ${money(-r.cash)} short this month.`);
   else if (p.cushionOn) {
     if (r.invested > 1) bits.push(`${money(r.invested)} above the cushion goes into the brokerage.`);
     else if (r.cash < r.cushion - 60) bits.push("Cash is below the cushion, with nothing to refill it from yet.");

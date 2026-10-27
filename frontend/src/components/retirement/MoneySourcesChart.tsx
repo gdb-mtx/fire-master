@@ -87,7 +87,7 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
                     {over && (
                       <>
                         <path d={`M${g.xc(k) - bw / 2 - 2},${g.y(g.s.max) + 13} L${g.xc(k) + bw / 2 + 2},${g.y(g.s.max) + 7} L${g.xc(k) + bw / 2 + 2},${g.y(g.s.max) + 11} L${g.xc(k) - bw / 2 - 2},${g.y(g.s.max) + 17} Z`} fill="#f5f0e6" />
-                        <text x={g.xc(k)} y={g.y(g.s.max) - 6} className="lbl" textAnchor="middle">{money(g.tot[k])}</text>
+                        <text x={k === 0 ? g.xc(k) - bw / 2 : g.xc(k)} y={g.y(g.s.max) - 6} className="lbl" textAnchor={k === 0 ? "start" : "middle"}>{money(g.tot[k])}</text>
                       </>
                     )}
                     <rect x={g.xc(k) - bw / 2 - 4} y={g.y(yr.spend) - 1.25} width={bw + 8} height={2.5} fill="#1c1b19" rx={1.25} />

@@ -45,3 +45,17 @@ export function clip(label: string, max = 24): string {
 }
 
 export const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+
+/** Shorten by dropping middle words, keeping the ends that tell similar names
+ * apart: "Gradual Property Exit (no 72t)" → "Gradual … (no 72t)". */
+export function midClip(name: string, max = 20): string {
+  if (name.length <= max) return name;
+  const words = name.split(" ");
+  let cut = false;
+  while (words.join(" ").length > max && words.length > 2) {
+    words.splice(cut ? 2 : 1, 1);
+    if (!cut) { words.splice(1, 0, "\u2026"); cut = true; }
+  }
+  const out = words.join(" ");
+  return out.length <= max + 2 ? out : name.slice(0, max - 1) + "\u2026";
+}
