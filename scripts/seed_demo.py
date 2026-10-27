@@ -19,7 +19,7 @@ What it seeds:
     classified through the real rules engine, not pre-stamped
   - The FIRE config for the persona: SEPP bridge starting month 12, a
     property_sales plan (sell the Desert Casita in ~6 months, downsize out of
-    the City Loft at month 60), Social Security at 62
+    the City Loft at month 36), Social Security at 62
 
 All dates are anchored to TODAY at seed time, so the story is always "just laid
 off, severance ending soon, sale closing in ~6 months" — re-running the script
@@ -163,7 +163,7 @@ DEMO_PROPERTIES = [
      46_800_000, 29_600_000, 46_800_000, 240_000, 420_000,
      ["Primary residence — owner-occupied, spare room rented to a long-term tenant ($360/mo)",
       "Monthly HOA ~$680 via LoftPay; special assessment running this year",
-      "Downsize plan: sell around month 60 (see the property_sales config)"]),
+      "Downsize plan: sell around month 36 (see the property_sales config)"]),
     ("desert_casita", "Desert Casita", "17 Ocotillo Court, Dry Wells", "#c4813d",
      38_600_000, 23_800_000, 36_100_000, 280_000, None,
      ["Snowbird short-term rental, under contract to sell in ~6 months",
@@ -285,7 +285,7 @@ def build_demo_config_values(anchor: date) -> dict:
     Age ~51.75, married filing jointly, retiring now, bridging to 59½ on
     severance + SEPP/72(t) + a Canadian RRSP drawdown. Uses the generic
     property_sales mechanism (the documented path): sell the Desert Casita in
-    ~6 months, downsize out of the City Loft at month 60, proceeds compound in
+    ~6 months, downsize out of the City Loft at month 36, proceeds compound in
     a taxable brokerage pool.
     """
     dob = anchor.replace(day=1) - relativedelta(months=621)  # age 51y 9mo
@@ -371,7 +371,10 @@ def build_demo_config_values(anchor: date) -> dict:
                 {
                     "key": "city_loft",
                     "re_bucket": "primary",
-                    "sale_month": 60,
+                    # Month 36, not 60 (Oct 2026): at 60 the brokerage ran dry first and
+                    # the demo opened on 14 months of unpaid bills. At 36 cash never
+                    # goes short, even with spending $1K/mo higher.
+                    "sale_month": 36,
                     "value": 468_000,
                     "cost_basis": 468_000,
                     "agent_fee_pct": 0.06,
