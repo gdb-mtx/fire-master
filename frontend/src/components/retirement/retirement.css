@@ -126,12 +126,13 @@
 /* ── Readout ─────────────────────────────────────────────── */
 .rt-readout { border-left: 1px solid var(--rt-rule); padding: 20px 22px 22px; background: var(--rt-readout); min-width: 0; }
 .rt-readout-stack { display: grid; }
-.rt-readout-stack > .rt-readout-body { grid-area: 1 / 1; min-width: 0; }
-.rt-readout-body.sizer { visibility: hidden; pointer-events: none; }
+.rt-readout-stack > .rt-readout-head { grid-area: 1 / 1; min-width: 0; }
+.rt-readout .sizer { visibility: hidden; pointer-events: none; }
 .rt-readout .when { font-size: 14px; color: var(--rt-ink-2); }
 .rt-readout .story { font-size: 16px; line-height: 1.45; margin: 6px 0 14px; min-height: 4.4em; text-wrap: pretty; }
 .rt-readout .story.bad { color: var(--rt-bad); }
-.rt-rows { display: grid; gap: 7px; }
+.rt-rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
+.rt-rows > .rt-row { grid-column: 1; }
 .rt-row { display: grid; grid-template-columns: 30px 76px 1fr; align-items: center; gap: 10px; font-size: 14px; }
 .rt-row .key { width: 28px; height: 14px; border-radius: 4px; }
 .rt-row .key.line { height: 0; border-top: 2.5px dashed var(--rt-ink-2); border-radius: 0; }
