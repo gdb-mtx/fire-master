@@ -36,7 +36,12 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
     const inv = rows.map((r) => r.invested);
     const hasInv = inv.some((v) => v > 1);
     const botH = hasInv ? 104 : 78;
-    const sBot = niceScale(Math.max(1, ...out) * 1.05, 2, hasInv ? -Math.max(...inv) * 1.05 : 0);
+    // A single big investment (a windfall swept to the brokerage) would flatten
+    // every monthly withdrawal; below the baseline the scale stops at twice the
+    // largest withdrawal and taller bars are clipped with their true amount.
+    const maxOut = Math.max(1, ...out);
+    const invCap = hasInv ? Math.min(Math.max(...inv), Math.max(maxOut * 2, 1000)) : 0;
+    const sBot = niceScale(maxOut * 1.05, 2, -invCap * 1.05);
     const b0 = T + topH + gap;
     const yB = (v: number) => b0 + botH - ((v - sBot.min) / (sBot.max - sBot.min)) * botH;
     const axY = b0 + botH + 18;
@@ -124,10 +129,22 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
                   base += v;
                   return <rect key={key} x={g.xc(k) - bw / 2} y={ya} width={bw} height={Math.max(1, yb - ya)} fill={COLORS[key as "brk"]} rx={1.5} />;
                 })}
-                {row.invested > 1 && (
-                  <rect x={g.xc(k) - bw / 2} y={g.yB(0)} width={bw} height={Math.max(1, g.yB(-row.invested) - g.yB(0))}
-                    fill={COLORS.brk} fillOpacity={0.42} rx={1.5} />
-                )}
+                {row.invested > 1 && (() => {
+                  const clipped = row.invested > -g.sBot.min;
+                  const yEnd = g.yB(-Math.min(row.invested, -g.sBot.min));
+                  return (
+                    <>
+                      <rect x={g.xc(k) - bw / 2} y={g.yB(0)} width={bw} height={Math.max(1, yEnd - g.yB(0))}
+                        fill={COLORS.brk} fillOpacity={0.42} rx={1.5} />
+                      {clipped && (
+                        <>
+                          <path d={`M${g.xc(k) - bw / 2 - 2},${yEnd - 9} L${g.xc(k) + bw / 2 + 2},${yEnd - 13} L${g.xc(k) + bw / 2 + 2},${yEnd - 9} L${g.xc(k) - bw / 2 - 2},${yEnd - 5} Z`} fill="#f5f0e6" />
+                          <text x={g.xc(k) + bw / 2 + 4} y={yEnd - 2} className="lbl2">{money(-row.invested)}</text>
+                        </>
+                      )}
+                    </>
+                  );
+                })()}
               </g>
             );
           })}
