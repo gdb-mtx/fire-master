@@ -5,14 +5,14 @@ starter persona and don't match the demo persona's properties — scenario
 overrides REPLACE the custom_assumptions.property_sales list wholesale, so a
 mismatched list would gut the persona's baseline plan. These four are built on
 the demo persona's actual story (retire at ~52, SEPP bridge, sell the Desert
-Casita at month 6, downsize out of the City Loft at month 60):
+Casita at month 6, downsize out of the City Loft at month 36):
 
-1. "Baseline — Sell Casita, Downsize at Year 5"  — no overrides; the plan as configured.
+1. "Baseline — Sell Casita, Downsize at Year 3"  — no overrides; the plan as configured.
 2. "Keep the Desert Casita"                       — hold it 20 years instead: its sale
    moves to month 240, so the projection carries its $2,250/mo cost and shows what
    keeping the getaway really costs.
-3. "Downsize the Loft Now"                        — City Loft sale moves from month 60
-   to month 12: equity freed 4 years sooner, renting at $2,400/mo from year 1.
+3. "Downsize the Loft Now"                        — City Loft sale moves from month 36
+   to month 12: equity freed 2 years sooner, renting at $2,400/mo from year 1.
 4. "Trim Spending to $11K/mo"                     — pure spending-sensitivity what-if;
    no property changes.
 
@@ -77,7 +77,7 @@ CASITA_SALE = {
 LOFT_SALE = {
     "key": "city_loft",
     "re_bucket": "primary",
-    "sale_month": 60,
+    "sale_month": 36,  # matches seed_demo.py (was 60 until Oct 2026)
     "value": 468_000,
     "cost_basis": 468_000,
     "agent_fee_pct": 0.06,
@@ -95,12 +95,15 @@ LOFT_SALE = {
 }
 
 
+# The baseline downsizes at year 3 since Oct 2026 (it was year 5).
+RENAMED = {"Baseline — Sell Casita, Downsize at Year 5": "Baseline — Sell Casita, Downsize at Year 3"}
+
 SCENARIOS = [
     {
-        "name": "Baseline — Sell Casita, Downsize at Year 5",
+        "name": "Baseline — Sell Casita, Downsize at Year 3",
         "description": (
             "The plan as configured: sell the Desert Casita in 6 months, downsize "
-            "out of the City Loft at year 5, bridge to 59½ on severance + "
+            "out of the City Loft at year 3, bridge to 59½ on severance + "
             "SEPP + the RRSP drawdown. Every other scenario is compared against this."
         ),
         "is_active": False,
@@ -126,8 +129,8 @@ SCENARIOS = [
     {
         "name": "Downsize the Loft Now",
         "description": (
-            "Sell the City Loft at month 12 instead of year 5: ~$170K of equity "
-            "compounds in the taxable pool four years sooner, traded against "
+            "Sell the City Loft at month 12 instead of year 3: ~$170K of equity "
+            "compounds in the taxable pool two years sooner, traded against "
             "renting at $2,400/mo from year one."
         ),
         "is_active": False,
@@ -166,6 +169,12 @@ async def main():
 
         result = await session.execute(select(FireScenario))
         existing = {s.name: s for s in result.scalars().all()}
+        # Renamed scenarios: carry the old row over instead of leaving a stale twin.
+        for old, new in RENAMED.items():
+            if old in existing and new not in existing:
+                existing[old].name = new
+                existing[new] = existing.pop(old)
+                print(f"  RENAME scenario '{old}' -> '{new}'")
 
         created = 0
         updated = 0
