@@ -295,6 +295,10 @@ class CashRule(BaseModel):
     cushion_floor: float = 0
     invest_above_cushion: bool = False
     threshold_months: float = 12  # legacy rule: pools pay once cash < N months of the gap
+    # Which IRA money can refill cash (projection.open_all_iras_after_59_5).
+    open_all_iras: bool = False  # on: the 72(t) account pays too once open; IRAs repair cash from 59½
+    age_59_5_month: int = 0  # month offset of 59½ (0 once past): IRA money is out of reach before it
+    ira_a_open_month: int | None = None  # the 72(t) account takes extra withdrawals from here; None = never
 
 
 class WealthPoolProjection(BaseModel):

@@ -229,19 +229,27 @@ def _rich_config(**projection):
     {},
     {"cash_cushion_months": 6},
     {"cash_cushion_months": 6, "cash_cushion_floor": 25_000, "invest_cash_above_cushion": True},
-], ids=["threshold", "cushion", "cushion+floor+invest"])
+    {"open_all_iras_after_59_5": True},
+    {"cash_cushion_months": 6, "cash_cushion_floor": 25_000, "invest_cash_above_cushion": True,
+     "open_all_iras_after_59_5": True},
+], ids=["threshold", "cushion", "cushion+floor+invest", "threshold+open-iras", "cushion+all+open-iras"])
 @pytest.mark.asyncio
 async def test_money_identity_every_month(
     projection, frozen_today, net_worth_breakdown, mock_accounts, mock_cashflow_events, mock_income_sources,
 ):
     """Spending + change in cash (+ money invested) = income + Social Security +
     one-time money + withdrawals, every month — the identity the Retirement
-    page's money-sources chart draws. Fields are rounded to dollars, so allow $6."""
+    page's money-sources chart draws."""
     engine = _make_engine(_rich_config(**projection), net_worth_breakdown, mock_accounts,
                           mock_cashflow_events, mock_income_sources)
     r = await engine.project_wealth_pools(end_age=95, bridge_months=12 * 60)
-    prev = r.starting_cash
     assert any(p.one_time_income > 0 for p in r.points) and any(p.ss_income > 0 for p in r.points)
+    assert_money_identity(r)
+
+
+def assert_money_identity(r):
+    """The identity above, every month of a run. Fields are rounded to dollars, so allow $6."""
+    prev = r.starting_cash
     for p in r.points:
         d_cash = p.cash - prev
         prev = p.cash

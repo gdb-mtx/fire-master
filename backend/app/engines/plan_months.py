@@ -45,6 +45,7 @@ def month_from_offset(today: date, offset: int) -> str:
 
 def resolve_month_offset(
     cfg: dict, date_key: str, month_key: str, today: date, default: int | None = 0,
+    *, clamp: bool = True,
 ) -> int | None:
     """A plan month as an offset from today's month.
 
@@ -53,6 +54,9 @@ def resolve_month_offset(
     Calendar offsets match build_cashflow_schedule, so a pinned sale and a
     cashflow event dated the same month land on the same month. A pinned month
     already past resolves to 0 (now); a malformed one falls back to the offset.
+    clamp=False returns a past month as a negative offset instead, for a clock
+    that started in the past (the 72(t) five-year rule counts from the first
+    payment).
     """
     raw = cfg.get(date_key)
     if raw:
@@ -60,7 +64,8 @@ def resolve_month_offset(
             year, month = int(str(raw)[0:4]), int(str(raw)[5:7])
             if not 1 <= month <= 12:
                 raise ValueError(raw)
-            return max(0, (year - today.year) * 12 + (month - today.month))
+            offset = (year - today.year) * 12 + (month - today.month)
+            return max(0, offset) if clamp else offset
         except (TypeError, ValueError):
             logger.warning("Ignoring malformed %s=%r; using %s", date_key, raw, month_key)
     val = cfg.get(month_key, default)

@@ -280,8 +280,10 @@ def build_projection_assumptions(config: FireConfig, facts: dict) -> list[Projec
         if facts["has_iras"] and facts["enforce_rmd"]:
             refill.append("required IRA withdrawals")
         refill.append("the brokerage")
-        if facts["has_ira_b"]:
-            refill.append("the IRAs after 59½")
+        if facts["has_ira_b"] or (facts["open_all_iras"] and facts["has_ira_a"]):
+            later = facts["ira_a_opens_later"]
+            refill.append("the IRAs after 59½"
+                          + (f" (the 72(t) account from {_fmt_month(later)})" if later else ""))
         if facts["has_roth"]:
             refill.append("the Roth")
         floor = f", never less than {_fmt_usd(rule.cushion_floor)}" if rule.cushion_floor else ""
@@ -352,7 +354,20 @@ def build_projection_assumptions(config: FireConfig, facts: dict) -> list[Projec
             f"From {facts['rmd_age']:g} the IRS minimum leaves the IRAs every year; "
             "what isn't spent goes to the brokerage.",
             f"from {facts['rmd_age']:g}", kind="rule")
-    if facts["has_ira_a"]:
+    if facts["has_ira_a"] and facts["open_all_iras"]:
+        later = facts["ira_a_opens_later"]
+        when = "now" if facts["past_59_5"] else f"from 59½, in {_fmt_month(facts['age_59_5'])}"
+        if later:
+            add("ira_access", "Which IRA money can be spent",
+                f"Every IRA can pay the bills {when}, except the 72(t) account: it joins in "
+                f"{_fmt_month(later)}, five years after its first payment. An extra withdrawal "
+                "before then would bring back the 10% penalty on every 72(t) payment so far.",
+                f"72(t) account from {_fmt_month(later)}")
+        else:
+            add("ira_access", "Which IRA money can be spent",
+                f"Every IRA can pay the bills {when}, the 72(t) account included.",
+                "every IRA now" if facts["past_59_5"] else "every IRA from 59½")
+    elif facts["has_ira_a"]:
         add("ira_access", "Which IRA money can be spent",
             "After 59½ only the IRA not set aside for 72(t) is drawn. The 72(t) account pays only "
             "its 72(t) payments" + (f" and required withdrawals from {facts['rmd_age']:g}."
@@ -1352,6 +1367,13 @@ class FireProjectionsEngine:
         cushion_months = max(0.0, float(_cushion_months or 0))
         cushion_floor = max(0.0, float(proj_cfg.get("cash_cushion_floor") or 0)) if cushion_on else 0.0
         invest_above_cushion = cushion_on and bool(proj_cfg.get("invest_cash_above_cushion", False))
+        # Open every IRA after 59½ (opt-in, Oct 2026). Unset, only IRA-B is drawn
+        # by choice and a cash hole is repaired from the brokerage and the Roth
+        # alone, byte for byte (tests/test_wealth_pools_golden.py). Set, the 72(t)
+        # account (IRA-A) pays too once it opens — after IRA-B, before the Roth,
+        # in both cash modes — and in threshold mode the IRAs also repair a cash
+        # hole from 59½. When it opens: see ira_a_open_month below.
+        open_all_iras = bool(proj_cfg.get("open_all_iras_after_59_5", False))
         # Required minimum distributions (fire-master#14). From config.rmd_start_age
         # the IRS Uniform Lifetime minimum is forced out of the tax-deferred IRAs
         # (IRA-A + IRA-B aggregate, as the IRS aggregates traditional IRAs) whenever
@@ -1472,6 +1494,24 @@ class FireProjectionsEngine:
 
         # Key month offsets (from today)
         months_to_59_5 = max(0, int((dob + relativedelta(years=59, months=6) - today).days / 30.44))
+
+        # First month the 72(t) account may take money beyond its payments (opt-in
+        # only; None = never). A 72(t) series must run until the LATER of 59½ and
+        # five years after its first payment: an extra withdrawal before then
+        # "modifies" it, and the 10% penalty comes back on every payment so far,
+        # with interest. The five years count from the FIRST payment, which may be
+        # in the past, so it is resolved unclamped (sepp_start_month is clamped to
+        # now). A series that starts at or after 59½ owes no penalty, so nothing
+        # locks it. Without a series, IRA-A opens at 59½ like any IRA.
+        ira_a_open_month = None
+        if open_all_iras:
+            ira_a_open_month = months_to_59_5
+            if sepp_monthly and ira_a_start:
+                first_payment = resolve_month_offset(
+                    sepp_cfg, "start_date", "sepp_start_month", today, clamp=False)
+                at_59_5 = int((dob + relativedelta(years=59, months=6) - today).days / 30.44)
+                if first_payment < at_59_5:
+                    ira_a_open_month = max(months_to_59_5, first_payment + 60)
 
         # SS from config — the entered amount IS the benefit at the entered start age
         ss_amount = _cents_to_dollars(config.social_security_monthly or 0)
@@ -1846,6 +1886,16 @@ class FireProjectionsEngine:
                         b_draw = min(gap_b, ira_b)
                         ira_b -= b_draw
                         ira_draw += b_draw
+                # Opt-in: the 72(t) account once open, on whatever gap IRA-B left
+                # (the same gap and threshold test as IRA-B).
+                if ira_a_open_month is not None and m >= ira_a_open_month and ira_a > 0:
+                    gap_a = expenses - income - ira_draw - taxable_draw
+                    if gap_a > 0 and cash < gap_a * ira_b_draw_threshold_months:
+                        a_draw = min(gap_a, ira_a)
+                        ira_a -= a_draw
+                        ira_draw += a_draw
+                        if ira_a <= 0 and sepp_monthly and sepp_depletes_age is None and m >= sepp_start_month:
+                            sepp_depletes_age = age
 
                 # --- Required minimum distributions (fire-master#14) ---
                 # From rmd_start_age the IRS forces (aggregate traditional IRA balance /
@@ -1903,6 +1953,20 @@ class FireProjectionsEngine:
                     taxable -= repair
                     taxable_draw += repair
                     deficit -= repair
+                # Opt-in: from 59½ the IRAs close the hole too, IRA-B first, then
+                # the 72(t) account once open; the Roth stays last.
+                if deficit > 0 and open_all_iras and m >= months_to_59_5 and ira_b > 0:
+                    repair = min(deficit, ira_b)
+                    ira_b -= repair
+                    ira_draw += repair
+                    deficit -= repair
+                if deficit > 0 and ira_a_open_month is not None and m >= ira_a_open_month and ira_a > 0:
+                    repair = min(deficit, ira_a)
+                    ira_a -= repair
+                    ira_draw += repair
+                    deficit -= repair
+                    if ira_a <= 0 and sepp_monthly and sepp_depletes_age is None and m >= sepp_start_month:
+                        sepp_depletes_age = age
                 if deficit > 0 and roth > 0:
                     repair = min(deficit, roth)
                     roth -= repair
@@ -1952,6 +2016,14 @@ class FireProjectionsEngine:
                     ira_b -= b_draw
                     ira_draw += b_draw
                     need -= b_draw
+                # 3b. Opt-in: the 72(t) account, once open.
+                if need > 0 and ira_a_open_month is not None and m >= ira_a_open_month and ira_a > 0:
+                    a_draw = min(need, ira_a)
+                    ira_a -= a_draw
+                    ira_draw += a_draw
+                    need -= a_draw
+                    if ira_a <= 0 and sepp_monthly and sepp_depletes_age is None and m >= sepp_start_month:
+                        sepp_depletes_age = age
                 # 4. The Roth, last (fire-master#13).
                 if need > 0 and roth > 0:
                     roth_draw = min(need, roth)
@@ -2100,6 +2172,8 @@ class FireProjectionsEngine:
             _moment(rrsp_runs_out_month, "draw", "RRIF money runs out")
         if has_iras and current_age < 59.5:
             _moment(months_to_59_5, "age", "Age 59½")
+        if ira_a_open_month is not None and ira_a_start and ira_a_open_month != months_to_59_5:
+            _moment(ira_a_open_month, "draw", "72(t) account opens")
         if ss_amount > 0:
             _moment(ss_start_month, "age", "Social Security starts", ss_amount)
         if healthcare_monthly > 0 and current_age < medicare_age:
@@ -2130,8 +2204,17 @@ class FireProjectionsEngine:
             cushion_floor=cushion_floor,
             invest_above_cushion=invest_above_cushion,
             threshold_months=float(ira_b_draw_threshold_months),
+            open_all_iras=open_all_iras,
+            age_59_5_month=months_to_59_5,
+            ira_a_open_month=ira_a_open_month if ira_a_start else None,
         )
         assumptions = build_projection_assumptions(config, {
+            "open_all_iras": open_all_iras,
+            "past_59_5": current_age >= 59.5,
+            "age_59_5": today + relativedelta(months=months_to_59_5),
+            "ira_a_opens_later": (today + relativedelta(months=ira_a_open_month)
+                                  if ira_a_open_month is not None and ira_a_start
+                                  and ira_a_open_month > months_to_59_5 else None),
             "today": today,
             "cash_rule": cash_rule,
             "current_age": current_age,
