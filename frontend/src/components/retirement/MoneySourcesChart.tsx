@@ -3,8 +3,8 @@
 // year is clipped (with a break mark and its true total) so it can't flatten
 // every other bar.
 
-import { useMemo, useState } from "react";
-import { COLORS, SOURCE_ORDER, sourceValue, sourceWord, sourcesStory, type Plan, type SourceKey } from "./model";
+import { useId, useMemo, useState } from "react";
+import { BAD, COLORS, SOURCE_ORDER, sourceValue, sourceWord, sourcesStory, type Plan, type SourceKey } from "./model";
 import { money, wholeAge } from "./format";
 import { DataTable, GridY, HoverLayer } from "./chartKit";
 import { clamp, cursorKeys, niceScale, useWidth } from "./chartMath";
@@ -12,7 +12,7 @@ import Readout, { type ReadoutRow } from "./Readout";
 
 const NAMES: Record<SourceKey, string> = {
   income: "Income", ss: "Social Security", ira: "From the IRAs", rrif: "From the RRIF",
-  brk: "From the brokerage", cash: "From cash", one: "One-time money",
+  brk: "From the brokerage", cash: "From cash", one: "One-time money", unpaid: "Unpaid bills",
 };
 
 export default function MoneySourcesChart({ plan, cursor, setCursor }: {
@@ -22,6 +22,7 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
 }) {
   const [ref, width] = useWidth<HTMLDivElement>();
   const [table, setTable] = useState(false);
+  const uid = useId().replace(/:/g, "");
   const ys = plan.years;
   const keys = useMemo(() => SOURCE_ORDER.filter((k) => k === "cash" || plan.present.has(k)), [plan.present]);
   const narrow = width < 560;
@@ -50,12 +51,15 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
 
   const readRows: ReadoutRow[] = [...keys].reverse().map((k) => ({
     color: COLORS[k],
+    key: k === "unpaid" ? "hatch" as const : undefined,
     value: money(sourceValue(t, k)),
     name: k === "ira" && t.sepp > 0 ? `From the IRAs, ${money(t.sepp)} of it 72(t)` : k === "income" ? capitalizeFirst(sourceWord(plan, "income")) : NAMES[k],
     muted: sourceValue(t, k) <= 50,
+    bad: k === "unpaid" && sourceValue(t, k) > 50,
   }));
   readRows.push({ key: "tick", value: money(t.spend), name: "Spending" });
   if (t.invested > 500) readRows.push({ value: money(t.invested), name: "Put into the brokerage", total: true, muted: true });
+  if (t.repaid > 500) readRows.push({ value: money(t.repaid), name: "Pays back earlier unpaid bills", total: true, muted: true });
   if (t.toCash > 500) readRows.push({ value: money(t.toCash), name: "Added to cash", total: true, muted: true });
 
   return (
@@ -71,6 +75,13 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
             />
           ) : (
             <svg width={g.W} height={g.H} role="img" aria-label="Sources of spending money by year">
+              <defs>
+                {/* Unpaid bills: a hatched gap, not a fill — it is money that was never there. */}
+                <pattern id={`${uid}-hatch`} width={5} height={5} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                  <rect width={5} height={5} fill="#f5f0e6" />
+                  <rect width={2} height={5} fill={BAD} />
+                </pattern>
+              </defs>
               <GridY x0={g.x0} x1={g.x1} y={g.y} scale={g.s} />
               {ys.map((yr, k) => {
                 let base = 0;
@@ -82,7 +93,9 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
                       if (v <= 0 || base >= g.s.max) { base += Math.max(0, v); return null; }
                       const ya = g.y(base + v), yb = g.y(base);
                       base += v;
-                      return <rect key={key} x={g.xc(k) - bw / 2} y={ya + 1} width={bw} height={Math.max(0.5, yb - ya - 1)} fill={COLORS[key]} rx={1.5} />;
+                      return key === "unpaid"
+                        ? <rect key={key} x={g.xc(k) - bw / 2} y={ya + 1} width={bw} height={Math.max(0.5, yb - ya - 1)} fill={`url(#${uid}-hatch)`} stroke={BAD} strokeWidth={1} rx={1.5} />
+                        : <rect key={key} x={g.xc(k) - bw / 2} y={ya + 1} width={bw} height={Math.max(0.5, yb - ya - 1)} fill={COLORS[key]} rx={1.5} />;
                     })}
                     {over && (
                       <>
@@ -113,7 +126,9 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
           when={`${t.y}, age ${wholeAge(t.a)}`}
           story={sourcesStory(plan, t)}
           rows={readRows}
-          hint="Each bar adds up to what came in that year. Taller than the black line means money was left over."
+          hint={plan.present.has("unpaid")
+            ? "Each bar adds up to what came in that year; crimson is the part of spending nothing paid. Taller than the black line means money was left over."
+            : "Each bar adds up to what came in that year. Taller than the black line means money was left over."}
         />
       </div>
       <div className="rt-tools">

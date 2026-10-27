@@ -134,6 +134,7 @@
 .rt-row .key.line { height: 0; border-top: 2.5px dashed var(--rt-ink-2); border-radius: 0; }
 .rt-row .key.tick { height: 3px; border-radius: 2px; background: var(--rt-ink); }
 .rt-row .key.ring { background: transparent !important; border: 2px solid var(--rt-ink); border-radius: 50%; width: 12px; height: 12px; }
+.rt-row .key.hatch { background: repeating-linear-gradient(45deg, #9b1c31 0 2px, #f5f0e6 2px 5px) !important; border: 1px solid #9b1c31; box-sizing: border-box; }
 .rt-row .val { font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .rt-row .nm { color: var(--rt-ink-2); line-height: 1.3; }
 .rt-row.muted .val, .rt-row.muted .nm { color: var(--rt-ink-3); font-weight: 400; }

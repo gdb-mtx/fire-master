@@ -368,8 +368,9 @@ def build_projection_assumptions(config: FireConfig, facts: dict) -> list[Projec
                 f"Every IRA can pay the bills {when}, the 72(t) account included.",
                 "every IRA now" if facts["past_59_5"] else "every IRA from 59½")
     elif facts["has_ira_a"]:
+        when = "Now" if facts["past_59_5"] else f"After 59½, in {_fmt_month(facts['age_59_5'])},"
         add("ira_access", "Which IRA money can be spent",
-            "After 59½ only the IRA not set aside for 72(t) is drawn. The 72(t) account pays only "
+            f"{when} only the IRA not set aside for 72(t) is drawn. The 72(t) account pays only "
             "its 72(t) payments" + (f" and required withdrawals from {facts['rmd_age']:g}."
                                    if facts["enforce_rmd"] else "."),
             "one IRA only", kind="rule")

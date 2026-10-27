@@ -5,7 +5,7 @@ export interface ReadoutRow {
   value: string;
   name: string;
   color?: string;
-  key?: "swatch" | "line" | "tick" | "ring";
+  key?: "swatch" | "line" | "tick" | "ring" | "hatch";
   muted?: boolean;
   total?: boolean;
   bad?: boolean;

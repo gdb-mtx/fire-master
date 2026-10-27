@@ -8,7 +8,7 @@ import {
 } from "./format";
 
 // ── Series: palette and stack orders ──────────────────────────────────────────
-export type SourceKey = "income" | "ss" | "ira" | "rrif" | "brk" | "cash" | "one";
+export type SourceKey = "income" | "ss" | "ira" | "rrif" | "brk" | "cash" | "one" | "unpaid";
 export type HoldingKey = "brk" | "rrif" | "ira" | "cash" | "home" | "priv";
 
 // Hue families from the Oct 26 2026 palette decision (income amber, Social Security green,
@@ -17,15 +17,16 @@ export type HoldingKey = "brk" | "rrif" | "ira" | "cash" | "home" | "priv";
 // rust, aubergine, bottle green, mauve, stone, sand. Every pair that can touch in
 // a stack (neighbours, and the pairs an empty series leaves touching) is at least
 // ΔE 15 apart in OKLab, so neighbours stay distinct for full-colour readers.
+/** Shortfalls and warnings: a crimson kept clear of the RRIF rust. */
+export const BAD = "#9b1c31";
 export const COLORS = {
   income: "#cfa856", ss: "#59a4a1", ira: "#3770a3", rrif: "#b15c3d", brk: "#573c70",
   cash: "#3f6a35", one: "#c88cae", home: "#b1a28f", priv: "#ded6c9",
+  unpaid: BAD, // bills nothing paid: cash fell below $0
 } as const;
-/** Shortfalls and warnings: a crimson kept clear of the RRIF rust. */
-export const BAD = "#9b1c31";
 
 /** Bottom → top. Blue (IRAs) never sits directly on violet (brokerage). */
-export const SOURCE_ORDER: SourceKey[] = ["income", "ss", "ira", "rrif", "brk", "cash", "one"];
+export const SOURCE_ORDER: SourceKey[] = ["income", "ss", "ira", "rrif", "brk", "cash", "one", "unpaid"];
 export const HOLDING_ORDER: HoldingKey[] = ["brk", "rrif", "ira", "cash", "home", "priv"];
 
 // ── Rows ──────────────────────────────────────────────────────────────────────
@@ -52,6 +53,12 @@ export interface Row {
   fBrk: number;
   invested: number; // cash moved into the brokerage
   dCash: number; // change in cash this month
+  // dCash split at $0: money really taken from cash, bills nothing paid (the fall
+  // below $0), earlier unpaid bills paid back (the rise up to $0), cash added above it
+  fromCash: number;
+  unpaid: number;
+  repaid: number;
+  toCash: number;
   gap: number; // regular shortfall: spending − income sources − SS − 72(t) − RRIF
   ev: string | null;
 }
@@ -66,6 +73,9 @@ export function toRows(p: WealthPoolProjection): Row[] {
     const evOut = n(x.event_expense);
     const one = n(x.one_time_income);
     const regular = x.income - ss - evIn + evOut; // sources (+ legacy overlays)
+    const fall = Math.max(0, prev - x.cash), rise = Math.max(0, x.cash - prev);
+    const fromCash = prev > 0 ? Math.min(prev, fall) : 0;
+    const repaid = prev < 0 ? Math.min(-prev, rise) : 0;
     const row: Row = {
       m: x.month ?? 0,
       d: x.date.slice(0, 7),
@@ -89,6 +99,10 @@ export function toRows(p: WealthPoolProjection): Row[] {
       fBrk: n(x.taxable_draw),
       invested: n(x.cash_invested),
       dCash: x.cash - prev,
+      fromCash,
+      unpaid: fall - fromCash,
+      repaid,
+      toCash: rise - repaid,
       gap: x.expenses - (regular + ss) - n(x.sepp_draw) - x.rrsp_draw,
       ev: x.event,
     };
@@ -119,24 +133,27 @@ export interface YearRow {
   brk: number;
   fromCash: number;
   toCash: number;
+  unpaid: number; // bills nothing paid this year (cash below $0), net of what was paid back
+  repaid: number; // earlier unpaid bills paid back this year, net
   invested: number;
   end: Row;
 }
 
 /** Calendar years, full years only (a three-month stub would read as a cheap year). */
 export function toYears(rows: Row[]): YearRow[] {
-  const by = new Map<number, YearRow & { dCash: number }>();
+  const by = new Map<number, YearRow & { dCash: number; dBelow: number }>();
   for (const r of rows) {
     const y = Number(r.d.slice(0, 4));
     let t = by.get(y);
     if (!t) {
       t = { y, a: r.a, m0: r.m, m1: r.m, n: 0, spend: 0, inc: 0, ss: 0, one: 0, ira: 0, sepp: 0,
-        rrif: 0, brk: 0, fromCash: 0, toCash: 0, invested: 0, dCash: 0, end: r };
+        rrif: 0, brk: 0, fromCash: 0, toCash: 0, unpaid: 0, repaid: 0, invested: 0, dCash: 0, dBelow: 0, end: r };
       by.set(y, t);
     }
     t.n++; t.m1 = r.m; t.end = r;
     t.spend += r.spend; t.inc += r.inc; t.ss += r.ss; t.one += r.one; t.ira += r.fIra;
-    t.sepp += r.sepp; t.rrif += r.fRrif; t.brk += r.fBrk; t.invested += r.invested; t.dCash += r.dCash;
+    t.sepp += r.sepp; t.rrif += r.fRrif; t.brk += r.fBrk; t.invested += r.invested;
+    t.dCash += r.toCash - r.fromCash; t.dBelow += r.repaid - r.unpaid;
   }
   const all = [...by.values()];
   const full = all.filter((t) => t.n === 12);
@@ -144,12 +161,14 @@ export function toYears(rows: Row[]): YearRow[] {
   for (const t of out) {
     t.fromCash = Math.max(0, -t.dCash);
     t.toCash = Math.max(0, t.dCash);
+    t.unpaid = Math.max(0, -t.dBelow);
+    t.repaid = Math.max(0, t.dBelow);
   }
   return out;
 }
 
 export const sourceValue = (t: YearRow, k: SourceKey): number =>
-  ({ income: t.inc, ss: t.ss, ira: t.ira, rrif: t.rrif, brk: t.brk, cash: t.fromCash, one: t.one })[k];
+  ({ income: t.inc, ss: t.ss, ira: t.ira, rrif: t.rrif, brk: t.brk, cash: t.fromCash, one: t.one, unpaid: t.unpaid })[k];
 
 // ── The plan, ready to draw ───────────────────────────────────────────────────
 export interface Plan {
@@ -193,6 +212,7 @@ export function toPlan(name: string, proj: WealthPoolProjection): Plan {
     if (r.fRrif > 1 || r.rrif > 1) present.add("rrif");
     if (r.fBrk > 1 || r.brk > 1) present.add("brk");
     if (r.one > 1) present.add("one");
+    if (r.unpaid > 1) present.add("unpaid");
     if (r.home > 1) present.add("home");
     if (r.priv > 1) present.add("priv");
   }
@@ -569,7 +589,7 @@ export function bridgeAnswer(p: Plan): { text: string; bad: boolean } {
 
 const SOURCE_WORD: Record<SourceKey, string> = {
   income: "income", ss: "Social Security", ira: "the IRAs", rrif: "the RRIF", brk: "the brokerage",
-  cash: "cash", one: "one-time money",
+  cash: "cash", one: "one-time money", unpaid: "unpaid bills",
 };
 export const sourceWord = (p: Plan, k: SourceKey) =>
   k === "income" && p.hasRental ? "rent and other income" : SOURCE_WORD[k];
@@ -581,6 +601,7 @@ export function sourcesAnswer(p: Plan): string {
   if (!ten.length) return "";
   const total = ten.reduce((t, y) => t + y.spend, 0);
   const iraWord = p.present.has("rrif") ? "the IRAs and RRIF" : "the IRAs";
+  const unpaid = ten.reduce((t, y) => t + y.unpaid, 0);
   const buckets: [string, number][] = [
     ["the brokerage", ten.reduce((t, y) => t + y.brk, 0)],
     [iraWord, ten.reduce((t, y) => t + y.ira + y.rrif, 0)],
@@ -592,8 +613,11 @@ export function sourcesAnswer(p: Plan): string {
   const top = buckets.filter((b) => b[1] > 500).sort((a, b) => b[1] - a[1]).slice(0, 3);
   if (!top.length) return "";
   const span = ten.length === 10 ? "the next ten years" : `the next ${plural(ten.length, "year")}`;
-  let text = `Most of it comes from ${top[0][0]}. Over ${span} you spend ${money(total)}: ` +
-    top.map(([w, v], i) => (i === 0 ? `${w} ${verb(w, "cover")} ${money(v)}` : `${w} ${money(v)}`)).join(", ") + ".";
+  const paid = top.map(([w, v], i) => (i === 0 ? `${w} ${verb(w, "cover")} ${money(v)}` : `${w} ${money(v)}`)).join(", ");
+  let text = unpaid > 500 && unpaid >= top[0][1]
+    ? `Most of it goes unpaid. Over ${span} you spend ${money(total)}: ${money(unpaid)} of bills can't be paid; ${paid}.`
+    : `Most of it comes from ${top[0][0]}. Over ${span} you spend ${money(total)}: ${paid}` +
+      (unpaid > 500 ? `; ${money(unpaid)} of bills can't be paid.` : ".");
   const ssStart = p.years.find((y) => y.ss > 0);
   if (ssStart && p.years[0].ss === 0) text += ` Social Security starts in ${ssStart.y}, at ${money(ssStart.ss)} that year.`;
   return text;
@@ -655,9 +679,14 @@ export function bridgeStory(p: Plan, r: Row): { text: string; bad: boolean } {
     bits.push(`You spend ${money(r.spend)}. Savings pay ${payWords(r)}.`);
   } else if (!here.some((x) => x.kind === "sale" || (x.kind === "money" && (x.amount ?? 0) > 0))) {
     const covers = ([
-      ["income", r.inc], ["ss", r.ss], ["ira", r.fIra], ["rrif", r.fRrif], ["brk", r.fBrk], ["cash", Math.max(0, -r.dCash)],
+      ["income", r.inc], ["ss", r.ss], ["ira", r.fIra], ["rrif", r.fRrif], ["brk", r.fBrk], ["cash", r.fromCash],
     ] as [SourceKey, number][]).filter((x) => x[1] > 50).sort((a, b) => b[1] - a[1]).slice(0, 3);
-    if (covers.length) bits.push(`You spend ${money(r.spend)}: ` + covers.map(([k, v]) => `${money(v)} from ${sourceWord(p, k)}`).join(", ") + ".");
+    if (covers.length) {
+      bits.push(`You spend ${money(r.spend)}: ` + covers.map(([k, v]) => `${money(v)} from ${sourceWord(p, k)}`).join(", ") +
+        (r.unpaid > 50 ? `; ${money(r.unpaid)} of it can't be paid.` : "."));
+    } else if (r.unpaid > 50) {
+      bits.push(`You spend ${money(r.spend)}; none of it can be paid.`);
+    }
   }
   const bad = r.cash < -1;
   if (bad) {
@@ -675,14 +704,16 @@ export function bridgeStory(p: Plan, r: Row): { text: string; bad: boolean } {
 }
 
 export function sourcesStory(p: Plan, t: YearRow): string {
-  const parts = SOURCE_ORDER.map((k) => [k, sourceValue(t, k)] as [SourceKey, number])
+  const parts = SOURCE_ORDER.filter((k) => k !== "unpaid").map((k) => [k, sourceValue(t, k)] as [SourceKey, number])
     .filter((x) => x[1] > 50).sort((a, b) => b[1] - a[1]);
   let s = `You spend ${money(t.spend)}.`;
   if (parts.length) {
     s += ` The most comes from ${sourceWord(p, parts[0][0])} (${money(parts[0][1])})` +
       (parts[1] ? `, then ${sourceWord(p, parts[1][0])} (${money(parts[1][1])}).` : ".");
   }
+  if (t.unpaid > 50) s += ` ${money(t.unpaid)} of bills can't be paid.`;
   if (t.invested > 500) s += ` ${money(t.invested)} goes into the brokerage.`;
+  if (t.repaid > 500) s += ` ${money(t.repaid)} pays back earlier unpaid bills.`;
   if (t.toCash > 500) s += ` ${money(t.toCash)} more comes in than goes out, so cash grows.`;
   return s;
 }
