@@ -29,6 +29,61 @@ docker compose exec backend uv run python ../scripts/upgrade_check.py
 
 ---
 
+## October 2026 — optional: let every IRA pay the bills after 59½
+
+**In short:**
+- A new, **optional** rule: after 59½, every IRA can pay the bills, including the account
+  set aside for 72(t) once its series allows. Off unless you set it.
+- The Retirement page names the date locked IRA money becomes reachable, and whenever cash
+  sits at $0 it says how much savings pay each month and from where.
+
+No migration runs and **no projection number moves unless you turn the rule on**. Your
+stored data is untouched.
+
+### What moves in your numbers
+
+| Where | Before | After |
+|---|---|---|
+| **Retirement projection** | (unchanged) | Identical, month by month, for every plan that doesn't set `open_all_iras_after_59_5` |
+| **Retirement page: short or run-out plans** | "…is still in IRAs; see which IRA money this projection draws" | Names the unlock: "$642K sits in IRAs you can't reach without a penalty until Jun 2034"; a stretch that ends at 59½ says so, with the money it opens |
+| **Retirement page: "Money runs out"** | The engine's month when every pool is empty | The start of a shortfall that never recovers, when that comes first |
+| **Retirement page: cash at $0** | A flat line at $0 | The cash chart labels it with the monthly draw ("Cash at $0: savings pay $8,632 a month"); readouts name every source; one big payback month no longer flattens the withdrawals panel |
+
+### Decide these
+
+- **Open every IRA after 59½?** Today, after 59½ only the IRA *not* set aside for 72(t)
+  pays the bills; the 72(t) account pays only its 72(t) payments and required withdrawals
+  from 73. And under the default cash rule, a cash shortfall that opened before 59½ is never
+  paid back, even with money sitting in the IRAs. In `custom_assumptions.projection`
+  (merge-patch): `open_all_iras_after_59_5: true`. Then:
+  - The 72(t) account opens at the later of 59½ and five years after its first payment
+    (earlier, an extra withdrawal would bring back the 10% penalty on every payment so far).
+  - From 59½ the IRAs pay back a cash shortfall, after the brokerage and before the Roth.
+  - **Expect:** no change while your brokerage never runs dry before required withdrawals
+    begin. Where cash used to sit short beside IRA money, the shortfall closes, and wealth at
+    82 can come out *lower*: today's projection leaves those bills unpaid at no cost while the
+    IRAs keep growing. The lower number is the one where the bills are paid.
+
+### For agents: API changes
+
+All additive; nothing was removed or renamed.
+
+- **`cash_rule`** gains `open_all_iras`, `age_59_5_month` (0 once past) and
+  `ira_a_open_month` (null when the rule is off or there is no 72(t) account).
+- **Milestone** "72(t) account opens" (`kind: draw`) when that month differs from 59½.
+- **Assumption** `ira_access` names the dates when the rule is on.
+- **Order with the rule on:** threshold mode draws the brokerage, IRA-B (59½), the open
+  72(t) account, required withdrawals, then the Roth, and repairs a cash hole in the same
+  order (IRAs from 59½); cushion mode refills from required withdrawals, the brokerage, IRA-B,
+  the open 72(t) account, then the Roth.
+
+### Undo
+
+Send `open_all_iras_after_59_5: null` in a config merge-patch. Config edits are archived in
+`fire_config_history` as always.
+
+---
+
 ## October 2026 — a new Retirement page; an optional cash cushion
 
 **In short:**
