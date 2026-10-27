@@ -11,7 +11,7 @@ export function money(v: number): string {
   else if (a >= 99_500) s = "$" + Math.round(a / 1000) + "K";
   else if (a >= 9_950) s = "$" + (a / 1000).toFixed(1).replace(/\.0$/, "") + "K";
   else s = "$" + Math.round(a).toLocaleString("en-US");
-  return (neg && Math.round(a) !== 0 ? "−" : "") + s;
+  return (neg && Math.round(a) !== 0 ? "−\u2060" : "") + s; // word joiner: the sign never wraps alone
 }
 
 export const signedMoney = (v: number) => (v >= 0 ? "+" : "−") + money(Math.abs(v));

@@ -31,6 +31,9 @@ export default function HoldingsChart({ plan, compare, cursor, setCursor }: {
   const keys = useMemo(() => HOLDING_ORDER.filter((k) => k === "cash" || plan.present.has(k)), [plan.present]);
   const narrow = width < 560;
 
+  // What 59½ opens, under the plan's IRA rule (projection.open_all_iras_after_59_5).
+  const label59 = !plan.hasIraA || (plan.openAllIras && (plan.iraAOpenMonth ?? 0) <= plan.age59Month) ? "59½: IRAs open"
+    : plan.openAllIras ? "59½: other IRAs open" : "59½: one IRA opens";
   const g = useMemo(() => {
     const W = Math.max(300, width - 12);
     const L = narrow ? 48 : 58, R = narrow ? 10 : 140, T = 22, plotH = narrow ? 240 : 300;
@@ -55,18 +58,19 @@ export default function HoldingsChart({ plan, compare, cursor, setCursor }: {
     }
     const span = (rows[n - 1]?.m ?? 0) / 12;
     const every = span > 25 ? 5 : span > 10 ? 2 : 1;
-    const flags = plan.milestones.filter((m) => m.kind === "age" || m.kind === "warning");
+    const flags = plan.milestones.filter((m) => m.kind === "age" || m.kind === "warning" || m.label === "72(t) account opens");
     const sold = plan.milestones.filter((m) => m.kind === "sale");
     if (sold.length) {
       const lastSale = sold[sold.length - 1];
-      flags.push({ ...lastSale, label: sold.length === 1 ? lastSale.label : `All ${numberWord(sold.length)} properties sold` });
+      flags.push({ ...lastSale, label: sold.length === 1 ? lastSale.label
+        : sold.length === 2 ? "Both properties sold" : `All ${numberWord(sold.length)} properties sold` });
     }
     const merged = mergeMilestones(flags.sort((a, b) => a.month - b.month), 0);
-    const placed = placeFlags(merged.map((f) => ({ m: f.m, text: f.text.replace(/^59½$/, "59½: IRAs open"), warn: f.warn })),
+    const placed = placeFlags(merged.map((f) => ({ m: f.m, text: f.text.replace(/^59½$/, label59), warn: f.warn })),
       (m) => x(clamp(m, 0, n - 1)), W - 4);
     const msY = T + plotH + 60;
     return { W, H: msY + stripHeight(placed), T, plotH, x0, x1, x, totals, cmpTotals, s, y, bands, every, placed, msY };
-  }, [width, narrow, rows, keys, compare, plan.milestones]);
+  }, [width, narrow, rows, keys, compare, plan.milestones, label59]);
 
   if (!rows.length) return null;
   const i = clamp(cursor, 0, rows.length - 1);
@@ -158,7 +162,7 @@ export default function HoldingsChart({ plan, compare, cursor, setCursor }: {
         </div>
         <Readout
           when={`${monthName(r.d)}, age ${wholeAge(r.a)}`}
-          story={holdingsStory(r)}
+          story={holdingsStory(plan, r)}
           rows={readRows}
           hint={plan.present.has("home") || plan.present.has("priv") ? "Gray bands are things you own but can't spend from." : undefined}
         />

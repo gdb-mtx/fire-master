@@ -3,7 +3,7 @@
 // with money put into the brokerage hanging under the baseline.
 
 import { useId, useMemo } from "react";
-import { BAD, COLORS, flagWorthy, mergeMilestones, bridgeStory, type Plan } from "./model";
+import { BAD, COLORS, flagWorthy, mergeMilestones, bridgeStory, zeroSpells, type Plan } from "./model";
 import { money, monthName, wholeAge } from "./format";
 import { GridY, HoverLayer } from "./chartKit";
 import { clamp, cursorKeys, niceScale, useWidth } from "./chartMath";
@@ -39,7 +39,13 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
     // A single big investment (a windfall swept to the brokerage) would flatten
     // every monthly withdrawal; below the baseline the scale stops at twice the
     // largest withdrawal and taller bars are clipped with their true amount.
-    const maxOut = Math.max(1, ...out);
+    // Likewise a single month that pays back a cash hole would flatten every
+    // ordinary withdrawal: when the largest is over three times the next, the
+    // scale stops at twice the next and that bar is clipped with its amount.
+    const ranked = [...out].sort((a, b) => b - a);
+    const upCap = ranked.length > 1 && ranked[0] > 3 * Math.max(ranked[1], 1) && ranked[0] > 1000
+      ? Math.max(ranked[1] * 2, 1000) : Infinity;
+    const maxOut = Math.max(1, Math.min(ranked[0] ?? 0, upCap));
     const invCap = hasInv ? Math.min(Math.max(...inv), Math.max(maxOut * 2, 1000)) : 0;
     const sBot = niceScale(maxOut * 1.05, 2, -invCap * 1.05);
     const b0 = T + topH + gap;
@@ -49,7 +55,7 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
     const flags = mergeMilestones(plan.milestones.filter((x) => x.month < rows.length && flagWorthy(x)));
     const placed = placeFlags(flags.map((f) => ({ m: f.m, text: f.text, warn: f.warn })), (m) => xc(Math.min(m, rows.length - 1)), W - 4);
     const H = msY + stripHeight(placed);
-    return { W, H, L, R, T, topH, x0, x1, step, xc, cushion, sTop, yT, sBot, yB, b0, botH, axY, msY, placed, hasInv, out, inv };
+    return { W, H, L, R, T, topH, x0, x1, step, xc, cushion, sTop, yT, sBot, yB, b0, botH, axY, msY, placed, hasInv, out, inv, upCap };
   }, [width, narrow, rows, plan.cushionOn, plan.milestones]);
 
   if (!rows.length) return null;
@@ -70,6 +76,16 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
     });
   }
   const bw = Math.max(2, g.step * 0.62);
+  // Cash resting at $0: say on the line itself what savings pay each month.
+  const zeros = zeroSpells(plan, rows, 3).map((z) => {
+    const xa = g.xc(z.first.m) - g.step / 2, xb = g.xc(z.last.m) + g.step / 2;
+    const avg = money(z.total / z.months);
+    const room = g.x1 - xa;
+    const text = [`Cash at $0: savings pay ${avg} a month`, `$0: savings pay ${avg}/mo`]
+      .find((t) => t.length * 6.3 <= Math.max(room, xb - xa));
+    const below = y0 - g.T < 26;
+    return { key: z.first.m, xa, xb, text, tx: Math.min(xa, g.x1 - (text?.length ?? 0) * 6.3), ty: below ? y0 + 15 : y0 - 8 };
+  });
   const last = rows.length - 1;
   const yc = g.yT(rows[last].cash), yk = g.yT(g.cushion[last]);
   const close = Math.abs(yc - yk) < 16;
@@ -117,6 +133,12 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
           <path d={line} fill="none" stroke={COLORS.cash} strokeWidth={2.25} strokeLinejoin="round" clipPath={`url(#${uid}-up)`} />
           <path d={line} fill="none" stroke={BAD} strokeWidth={2.25} strokeLinejoin="round" clipPath={`url(#${uid}-dn)`} />
           {cushionPath && <path d={cushionPath} fill="none" stroke="#5c5a54" strokeWidth={1.5} strokeDasharray="5 4" />}
+          {zeros.map((z) => (
+            <g key={z.key} pointerEvents="none">
+              <line x1={z.xa} x2={z.xb} y1={y0} y2={y0} stroke={COLORS.cash} strokeWidth={5} strokeOpacity={0.28} strokeLinecap="round" />
+              {z.text && <text x={z.tx} y={z.ty} className="lbl2">{z.text}</text>}
+            </g>
+          ))}
 
           {rows.map((row, k) => {
             let base = 0;
@@ -124,11 +146,20 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
             return (
               <g key={row.m} className={"bar" + (k === i ? " on" : "")}>
                 {segs.map(([key, v]) => {
-                  if (v <= 0) return null;
-                  const ya = g.yB(base + v), yb = g.yB(base);
+                  if (v <= 0 || base >= g.upCap) return null;
+                  const ya = g.yB(Math.min(base + v, g.upCap)), yb = g.yB(base);
                   base += v;
                   return <rect key={key} x={g.xc(k) - bw / 2} y={ya} width={bw} height={Math.max(1, yb - ya)} fill={COLORS[key as "brk"]} rx={1.5} />;
                 })}
+                {g.out[k] > g.upCap && (() => {
+                  const yTop = g.yB(g.upCap);
+                  return (
+                    <>
+                      <path d={`M${g.xc(k) - bw / 2 - 2},${yTop + 9} L${g.xc(k) + bw / 2 + 2},${yTop + 5} L${g.xc(k) + bw / 2 + 2},${yTop + 9} L${g.xc(k) - bw / 2 - 2},${yTop + 13} Z`} fill="#f5f0e6" />
+                      <text x={g.xc(k) + bw / 2 + 4} y={yTop + 8} className="lbl2">{money(g.out[k])}</text>
+                    </>
+                  );
+                })()}
                 {row.invested > 1 && (() => {
                   const clipped = row.invested > -g.sBot.min;
                   const yEnd = g.yB(-Math.min(row.invested, -g.sBot.min));

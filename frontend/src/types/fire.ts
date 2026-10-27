@@ -250,6 +250,10 @@ export interface CashRule {
   cushion_floor: number;
   invest_above_cushion: boolean;
   threshold_months: number;
+  // Which IRA money can refill cash (projection.open_all_iras_after_59_5)
+  open_all_iras?: boolean;
+  age_59_5_month?: number; // month offset of 59½ (0 once past)
+  ira_a_open_month?: number | null; // the 72(t) account takes extra withdrawals from here; null = never
 }
 
 export interface WealthPoolProjection {
