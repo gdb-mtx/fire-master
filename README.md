@@ -1,5 +1,7 @@
 # FIREMaster
 
+**Website:** [firemaster.io](https://firemaster.io) · **Demo:** [demo.firemaster.io](https://demo.firemaster.io)
+
 A self-hosted FIRE (Financial Independence Retire Early) planning cockpit. Your real accounts, your real spending, your real
 retirement math — running on your own machine, with an AI analyst that can read all of it.
 
