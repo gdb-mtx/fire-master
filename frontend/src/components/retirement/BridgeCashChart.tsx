@@ -3,13 +3,13 @@
 // with money put into the brokerage hanging under the baseline.
 
 import { useId, useMemo } from "react";
-import { BAD, COLORS, flagWorthy, mergeMilestones, bridgeStory, zeroSpells, type Plan } from "./model";
+import { BAD, COLORS, flagWorthy, mergeMilestones, bridgeStory, zeroSpells, type Plan, type Row } from "./model";
 import { money, monthName, wholeAge } from "./format";
 import { GridY, HoverLayer } from "./chartKit";
 import { clamp, cursorKeys, niceScale, useWidth } from "./chartMath";
 import MilestoneStrip from "./MilestoneStrip";
 import { placeFlags, stripHeight } from "./flags";
-import Readout, { type ReadoutRow } from "./Readout";
+import Readout, { type ReadoutEntry, type ReadoutRow } from "./Readout";
 
 const MONTHS = 60;
 
@@ -22,6 +22,8 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
   const uid = useId().replace(/:/g, "");
   const rows = useMemo(() => plan.rows.slice(0, MONTHS), [plan.rows]);
   const narrow = width < 560;
+  // Every month's panel, for the readout's height (see Readout).
+  const sizers = useMemo(() => rows.map((row, k) => entryForMonth(plan, row, k === rows.length - 1)), [plan, rows]);
 
   const g = useMemo(() => {
     const W = Math.max(300, width - 12);
@@ -90,22 +92,7 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
   const yc = g.yT(rows[last].cash), yk = g.yT(g.cushion[last]);
   const close = Math.abs(yc - yk) < 16;
 
-  const story = bridgeStory(plan, r);
-  const iraName = r.sepp > 0 && Math.abs(r.sepp - r.fIra) < 2 ? "From the IRAs, all of it 72(t)"
-    : r.sepp > 0 ? `From the IRAs, ${money(r.sepp)} of it 72(t)` : "From the IRAs";
-  const readRows: ReadoutRow[] = [
-    { color: COLORS.cash, value: money(r.cash), name: "Cash on hand", bad: r.cash < -1 },
-  ];
-  if (plan.cushionOn) {
-    readRows.push({
-      key: "line", value: money(c),
-      name: plan.cushionFloor && Math.abs(c - plan.cushionFloor) < 1 ? `Cushion, at its ${money(plan.cushionFloor)} floor` : `Cushion, ${plan.cushionMonths} months of shortfall`,
-    });
-  }
-  if (plan.present.has("brk")) readRows.push({ color: COLORS.brk, value: money(r.fBrk), name: "From the brokerage", muted: r.fBrk <= 0 });
-  if (plan.present.has("rrif")) readRows.push({ color: COLORS.rrif, value: money(r.fRrif), name: "From the RRIF", muted: r.fRrif <= 0 });
-  if (plan.present.has("ira")) readRows.push({ color: COLORS.ira, value: money(r.fIra), name: iraName, muted: r.fIra <= 0 });
-  if (plan.investAbove) readRows.push({ color: "rgba(87, 60, 112, 0.42)", value: money(r.invested), name: "Put into the brokerage", muted: r.invested <= 0 });
+  const entry = inRange ? sizers[i] : entryForMonth(plan, r, true);
 
   return (
     <div className="rt-board">
@@ -214,12 +201,36 @@ export default function BridgeCashChart({ plan, cursor, setCursor }: {
         </svg>
       </div>
       <Readout
-        when={`${monthName(r.d)}, age ${wholeAge(r.a)}${inRange ? "" : " (end of this view)"}`}
-        story={story.text}
-        bad={story.bad}
-        rows={readRows}
+        when={entry.when}
+        story={entry.story}
+        bad={entry.bad}
+        rows={entry.rows}
+        sizers={sizers}
         hint="Hover the chart or use the arrow keys. Milestones under the chart jump to their month."
       />
     </div>
   );
+}
+
+function entryForMonth(plan: Plan, r: Row, atEnd: boolean): ReadoutEntry {
+  const c = plan.cushionOn ? r.cushion : 0;
+  const story = bridgeStory(plan, r);
+  const iraName = r.sepp > 0 && Math.abs(r.sepp - r.fIra) < 2 ? "From the IRAs, all of it 72(t)"
+    : r.sepp > 0 ? `From the IRAs, ${money(r.sepp)} of it 72(t)` : "From the IRAs";
+  const rows: ReadoutRow[] = [
+    { color: COLORS.cash, value: money(r.cash), name: "Cash on hand", bad: r.cash < -1 },
+  ];
+  if (plan.cushionOn) {
+    rows.push({
+      key: "line", value: money(c),
+      name: plan.cushionFloor && Math.abs(c - plan.cushionFloor) < 1 ? `Cushion, at its ${money(plan.cushionFloor)} floor` : `Cushion, ${plan.cushionMonths} months of shortfall`,
+    });
+  }
+  if (plan.present.has("brk")) rows.push({ color: COLORS.brk, value: money(r.fBrk), name: "From the brokerage", muted: r.fBrk <= 0 });
+  if (plan.present.has("rrif")) rows.push({ color: COLORS.rrif, value: money(r.fRrif), name: "From the RRIF", muted: r.fRrif <= 0 });
+  if (plan.present.has("ira")) rows.push({ color: COLORS.ira, value: money(r.fIra), name: iraName, muted: r.fIra <= 0 });
+  if (plan.investAbove) rows.push({ color: "rgba(87, 60, 112, 0.42)", value: money(r.invested), name: "Put into the brokerage", muted: r.invested <= 0 });
+  // The last month also stands in for any cursor beyond this view.
+  const when = `${monthName(r.d)}, age ${wholeAge(r.a)}` + (atEnd ? " (end of this view)" : "");
+  return { when, story: story.text, bad: story.bad, rows };
 }

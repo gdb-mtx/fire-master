@@ -125,6 +125,9 @@
 
 /* ── Readout ─────────────────────────────────────────────── */
 .rt-readout { border-left: 1px solid var(--rt-rule); padding: 20px 22px 22px; background: var(--rt-readout); min-width: 0; }
+.rt-readout-stack { display: grid; }
+.rt-readout-stack > .rt-readout-body { grid-area: 1 / 1; min-width: 0; }
+.rt-readout-body.sizer { visibility: hidden; pointer-events: none; }
 .rt-readout .when { font-size: 14px; color: var(--rt-ink-2); }
 .rt-readout .story { font-size: 16px; line-height: 1.45; margin: 6px 0 14px; min-height: 4.4em; text-wrap: pretty; }
 .rt-readout .story.bad { color: var(--rt-bad); }

@@ -4,11 +4,11 @@
 // every other bar.
 
 import { useId, useMemo, useState } from "react";
-import { BAD, COLORS, SOURCE_ORDER, sourceValue, sourceWord, sourcesStory, type Plan, type SourceKey } from "./model";
+import { BAD, COLORS, SOURCE_ORDER, sourceValue, sourceWord, sourcesStory, type Plan, type SourceKey, type YearRow } from "./model";
 import { money, wholeAge } from "./format";
 import { DataTable, GridY, HoverLayer } from "./chartKit";
 import { clamp, cursorKeys, niceScale, useWidth } from "./chartMath";
-import Readout, { type ReadoutRow } from "./Readout";
+import Readout, { type ReadoutEntry, type ReadoutRow } from "./Readout";
 
 const NAMES: Record<SourceKey, string> = {
   income: "Income", ss: "Social Security", ira: "From the IRAs", rrif: "From the RRIF",
@@ -26,6 +26,8 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
   const ys = plan.years;
   const keys = useMemo(() => SOURCE_ORDER.filter((k) => k === "cash" || plan.present.has(k)), [plan.present]);
   const narrow = width < 560;
+  // Every year's panel, for the readout's height (see Readout).
+  const sizers = useMemo(() => ys.map((y) => entryForYear(plan, keys, y)), [plan, keys, ys]);
 
   const g = useMemo(() => {
     const W = Math.max(300, width - 12);
@@ -49,18 +51,7 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
   const bw = Math.max(3, g.step * 0.66);
   const lastMonth = plan.rows[plan.rows.length - 1].m;
 
-  const readRows: ReadoutRow[] = [...keys].reverse().map((k) => ({
-    color: COLORS[k],
-    key: k === "unpaid" ? "hatch" as const : undefined,
-    value: money(sourceValue(t, k)),
-    name: k === "ira" && t.sepp > 0 ? `From the IRAs, ${money(t.sepp)} of it 72(t)` : k === "income" ? capitalizeFirst(sourceWord(plan, "income")) : NAMES[k],
-    muted: sourceValue(t, k) <= 50,
-    bad: k === "unpaid" && sourceValue(t, k) > 50,
-  }));
-  readRows.push({ key: "tick", value: money(t.spend), name: "Spending" });
-  if (t.invested > 500) readRows.push({ value: money(t.invested), name: "Put into the brokerage", total: true, muted: true });
-  if (t.repaid > 500) readRows.push({ value: money(t.repaid), name: "Pays back earlier unpaid bills", total: true, muted: true });
-  if (t.toCash > 500) readRows.push({ value: money(t.toCash), name: "Added to cash", total: true, muted: true });
+  const entry = sizers[i] ?? entryForYear(plan, keys, t);
 
   return (
     <>
@@ -123,9 +114,10 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
           )}
         </div>
         <Readout
-          when={`${t.y}, age ${wholeAge(t.a)}`}
-          story={sourcesStory(plan, t)}
-          rows={readRows}
+          when={entry.when}
+          story={entry.story}
+          rows={entry.rows}
+          sizers={sizers}
           hint={plan.present.has("unpaid")
             ? "Each bar adds up to what came in that year; crimson is the part of spending nothing paid. Taller than the black line means money was left over."
             : "Each bar adds up to what came in that year. Taller than the black line means money was left over."}
@@ -141,3 +133,19 @@ export default function MoneySourcesChart({ plan, cursor, setCursor }: {
 }
 
 const capitalizeFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+function entryForYear(plan: Plan, keys: SourceKey[], y: YearRow): ReadoutEntry {
+  const rows: ReadoutRow[] = [...keys].reverse().map((k) => ({
+    color: COLORS[k],
+    key: k === "unpaid" ? "hatch" as const : undefined,
+    value: money(sourceValue(y, k)),
+    name: k === "ira" && y.sepp > 0 ? `From the IRAs, ${money(y.sepp)} of it 72(t)` : k === "income" ? capitalizeFirst(sourceWord(plan, "income")) : NAMES[k],
+    muted: sourceValue(y, k) <= 50,
+    bad: k === "unpaid" && sourceValue(y, k) > 50,
+  }));
+  rows.push({ key: "tick", value: money(y.spend), name: "Spending" });
+  if (y.invested > 500) rows.push({ value: money(y.invested), name: "Put into the brokerage", total: true, muted: true });
+  if (y.repaid > 500) rows.push({ value: money(y.repaid), name: "Pays back earlier unpaid bills", total: true, muted: true });
+  if (y.toCash > 500) rows.push({ value: money(y.toCash), name: "Added to cash", total: true, muted: true });
+  return { when: `${y.y}, age ${wholeAge(y.a)}`, story: sourcesStory(plan, y), rows };
+}

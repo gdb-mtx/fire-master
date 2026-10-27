@@ -9,10 +9,10 @@ import {
 } from "./model";
 import { midClip, money, monthName, numberWord, wholeAge } from "./format";
 import { DataTable, GridY, HoverLayer } from "./chartKit";
-import { clamp, cursorKeys, niceScale, useWidth } from "./chartMath";
+import { clamp, cursorKeys, niceScale, pickSizers, useWidth } from "./chartMath";
 import MilestoneStrip from "./MilestoneStrip";
 import { placeFlags, stripHeight } from "./flags";
-import Readout, { type ReadoutRow } from "./Readout";
+import Readout, { type ReadoutEntry, type ReadoutRow } from "./Readout";
 
 const NAMES: Record<HoldingKey, string> = {
   brk: "Brokerage", rrif: "RRIF", ira: "IRAs", cash: "Cash", home: "Property", priv: "Private investments",
@@ -71,10 +71,14 @@ export default function HoldingsChart({ plan, compare, cursor, setCursor }: {
     const msY = T + plotH + 60;
     return { W, H: msY + stripHeight(placed), T, plotH, x0, x1, x, totals, cmpTotals, s, y, bands, every, placed, msY };
   }, [width, narrow, rows, keys, compare, plan.milestones, label59]);
+  // The panels most likely to be the tallest, for the readout's height (see Readout).
+  const sizers = useMemo(
+    () => pickSizers(rows.map((_, k) => entryForMonth(plan, compare, keys, g.totals, k))),
+    [plan, compare, keys, rows, g.totals],
+  );
 
   if (!rows.length) return null;
   const i = clamp(cursor, 0, rows.length - 1);
-  const r = rows[i];
   const n = rows.length;
 
   // Right-edge labels for bands tall enough to own one, top band first.
@@ -88,15 +92,7 @@ export default function HoldingsChart({ plan, compare, cursor, setCursor }: {
   }
   const cmpEnd = compare ? g.cmpTotals[g.cmpTotals.length - 1] : null;
 
-  const readRows: ReadoutRow[] = [...keys].reverse().map((k) => ({
-    color: COLORS[k], value: money(holdingValue(r, k)),
-    name: NAMES[k] + (GRAY.has(k) ? ", not spendable" : ""), muted: holdingValue(r, k) < 1,
-  }));
-  readRows.push({ value: money(g.totals[i]), name: "Total", total: true });
-  if (compare) {
-    const cr = compare.rows[Math.min(i, compare.rows.length - 1)];
-    if (cr) readRows.push({ key: "ring", value: money(cr.total - Math.min(0, cr.cash)), name: compare.name, muted: true });
-  }
+  const entry = entryForMonth(plan, compare, keys, g.totals, i);
 
   return (
     <>
@@ -161,9 +157,10 @@ export default function HoldingsChart({ plan, compare, cursor, setCursor }: {
           )}
         </div>
         <Readout
-          when={`${monthName(r.d)}, age ${wholeAge(r.a)}`}
-          story={holdingsStory(plan, r)}
-          rows={readRows}
+          when={entry.when}
+          story={entry.story}
+          rows={entry.rows}
+          sizers={sizers}
           hint={plan.present.has("home") || plan.present.has("priv") ? "Gray bands are things you own but can't spend from." : undefined}
         />
       </div>
@@ -174,4 +171,18 @@ export default function HoldingsChart({ plan, compare, cursor, setCursor }: {
       </div>
     </>
   );
+}
+
+function entryForMonth(plan: Plan, compare: Plan | null, keys: HoldingKey[], totals: number[], i: number): ReadoutEntry {
+  const r = plan.rows[i];
+  const rows: ReadoutRow[] = [...keys].reverse().map((k) => ({
+    color: COLORS[k], value: money(holdingValue(r, k)),
+    name: NAMES[k] + (GRAY.has(k) ? ", not spendable" : ""), muted: holdingValue(r, k) < 1,
+  }));
+  rows.push({ value: money(totals[i]), name: "Total", total: true });
+  if (compare) {
+    const cr = compare.rows[Math.min(i, compare.rows.length - 1)];
+    if (cr) rows.push({ key: "ring", value: money(cr.total - Math.min(0, cr.cash)), name: compare.name, muted: true });
+  }
+  return { when: `${monthName(r.d)}, age ${wholeAge(r.a)}`, story: holdingsStory(plan, r), rows };
 }

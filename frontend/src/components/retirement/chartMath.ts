@@ -44,3 +44,13 @@ export function cursorKeys(step: number, cursor: number, last: number, set: (m: 
 }
 
 export const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+
+/** The readout entries most likely to be the tallest: every one when there are
+ * few, else the longest sentences and the ones with the most rows (see Readout). */
+export function pickSizers<T extends { story: string; rows: unknown[] }>(entries: T[], max = 80): T[] {
+  if (entries.length <= max) return entries;
+  const mostRows = Math.max(...entries.map((e) => e.rows.length));
+  const byLength = [...entries].sort((a, b) => b.story.length - a.story.length).slice(0, 16);
+  const byRows = entries.filter((e) => e.rows.length === mostRows).slice(0, 8);
+  return [...new Set([...byLength, ...byRows])];
+}
