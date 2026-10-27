@@ -29,6 +29,73 @@ docker compose exec backend uv run python ../scripts/upgrade_check.py
 
 ---
 
+## October 2026 — a new Retirement page; an optional cash cushion
+
+**In short:**
+- The Retirement page is rebuilt around three questions: does cash hold through the next
+  five years, where does the money come from each year, and what do you own along the way.
+  It opens with a one-sentence verdict, every sentence is computed from your plan, and a
+  "How this projection works" list shows every rule the numbers rest on, tagging engine
+  defaults you never set.
+- A new, **optional** cash rule: keep a cushion of N months of what your income doesn't
+  cover, refilled from savings. Off unless you set it.
+- The Property P&L page says what each number is and for which period; its Net is now the
+  real total for the period you pick (it was a yearly estimate).
+
+No migration runs and **no projection number moves unless you turn the cushion on**. Your
+stored data is untouched.
+
+### What moves in your numbers
+
+| Where | Before | After |
+|---|---|---|
+| **Retirement projection** | (unchanged) | Identical, month by month, for every plan that doesn't set `cash_cushion_months` |
+| **Retirement page** | Bridge Period and Wealth Projection charts, FIRE-number tiles on top | Verdict, three question charts, rules list. The older cards (budget, cash flow, upcoming events, milestones, FIRE number) sit under "More detail", unchanged |
+| **Property P&L: Net** | "Net / yr", annualized, the same whatever period you picked | Rent minus costs for the period you pick; Costs and Rent are period totals with a monthly average |
+
+### Decide these
+
+- **Turn on the cash cushion?** Today, savings start paying the bills once cash falls below
+  12 months of the shortfall, and cash then holds wherever it was at that moment (often well
+  above what you need, earning the cash rate). The cushion instead keeps cash at a target and
+  refills it every month. In `custom_assumptions.projection` (Configure, or a merge-patch):
+  - `cash_cushion_months: 6`: keep 6 months of what income doesn't cover. Cashflow events
+    don't size it, so a windfall month can't shrink it to zero.
+  - `cash_cushion_floor: 25000`: never less than this many dollars (optional).
+  - `invest_cash_above_cushion: true`: move cash above the cushion into the brokerage each
+    month (optional).
+
+  Less idle cash usually means more money at 82. Set it in the base config to cover every
+  scenario (scenarios merge `projection` keys over the base).
+
+### For agents: API changes
+
+All additive; nothing was removed or renamed.
+
+- **`GET /api/fire/wealth-projection`** takes `scenario_id` (preview a plan without
+  activating it) and `base=true` (the base plan while a scenario is active). The Retirement
+  page reads it with `bridge_months=1200`, monthly to `end_age`.
+- **Per point:** `ss_income`, `event_income`, `event_expense`, `one_time_income`,
+  `sepp_draw`, `cash_cushion`, `cash_invested`. Display identity, every month:
+  `expenses + event_expense + Δcash + cash_invested = (income − ss_income − event_income +
+  event_expense) + (event_income − one_time_income) + cash_interest + ss_income +
+  one_time_income + (ira_draw − rmd_redeposit) + roth_draw + rrsp_draw + taxable_draw`.
+- **Response:** `assumptions` (every rule the run rests on, built from the EFFECTIVE config:
+  `key`, `label`, `detail`, `value`, `kind` = setting / rule / limit, `is_default`),
+  `milestones` (dated moments in plain words, with amounts), `cash_rule`, `starting_cash`,
+  `end_age`, `money_runs_out_month`.
+- **Cushion refill order:** required IRA withdrawals first (they leave the IRAs anyway),
+  then the brokerage, then IRA-B from 59½, then the Roth. Cash above the cushion pays first.
+- **Before you rely on it:** taxes on IRA, 72(t) and RRIF withdrawals are not counted, and
+  paychecks are not modeled (add work income as an income source of type Other, with dates).
+
+### Undo
+
+Turning the cushion off is deleting the keys: send them as `null` in a config merge-patch.
+Config edits are archived in `fire_config_history` as always.
+
+---
+
 ## October 2026 — a strengthening pass: events, sold properties, scenarios
 
 **In short:**
