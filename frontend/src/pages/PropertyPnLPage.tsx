@@ -435,53 +435,69 @@ function StripStat({
 
 /** What each number on this page is, how it's computed, and why it's here. */
 function StatGuide() {
-  const items: { term: string; text: string }[] = [
-    {
-      term: "Costs",
-      text:
-        "Every expense matched to the property in the period you picked: mortgage, HOA, insurance, " +
-        "tax, repairs, utilities and the rest. Matching uses your merchant rules, Monarch tags and " +
-        "manual picks. Mortgage payments count in full, principal included, though principal " +
-        "builds equity. The monthly figure divides the total by the calendar months in the " +
-        "period, so a quarterly or yearly bill is spread over the months it covers. A property " +
-        "whose first transaction came later is counted from that month.",
-    },
-    {
-      term: "Rent",
-      text:
-        "Rental income received in the period, matched the same way and spread over the same " +
-        "months. \u201cPossible\u201d is the monthly rent you entered for the property, for comparison.",
-    },
-    {
-      term: "Net",
-      text:
-        "Rent minus costs for the period. Green: the property paid you that much. Red: holding it " +
-        "cost you that much. It changes with the period you pick.",
-    },
-    {
-      term: "Equity today",
-      text:
-        "What the property is worth minus what is owed on it, from your accounts. The same whatever " +
-        "the period.",
-    },
-    {
-      term: "Costs as a share of equity",
-      text:
-        "A year of costs (the monthly figure \u00d7 12) divided by equity: the yearly price of " +
-        "keeping that money in the property. Compare it with what the money could earn invested.",
-    },
+  // Two independent columns, not one grid: grid rows align across columns, so the long
+  // Costs entry used to push the right column down and leave the last entry stranded.
+  // Left: what the period's money is. Right: what it says about the property.
+  const columns: { term: string; text: string }[][] = [
+    [
+      {
+        term: "Costs",
+        text:
+          "Every expense matched to the property in the period you picked: mortgage, HOA, " +
+          "insurance, tax, repairs, utilities and the rest. Matching uses your merchant rules, " +
+          "Monarch tags and manual picks. Mortgage payments count in full, principal included, " +
+          "though principal builds equity.",
+      },
+      {
+        term: "Rent",
+        text:
+          "Rental income received in the period, matched the same way. \u201cPossible\u201d is the " +
+          "monthly rent you entered for the property, for comparison.",
+      },
+      {
+        term: "Monthly figures",
+        text:
+          "Costs and rent divided by the calendar months in the period, so a quarterly or yearly " +
+          "bill is spread over the months it covers. A property whose first transaction came " +
+          "later is counted from that month, and its card says from when.",
+      },
+    ],
+    [
+      {
+        term: "Net",
+        text:
+          "Rent minus costs for the period. Green: the property paid you that much. Red: holding " +
+          "it cost you that much. It changes with the period you pick.",
+      },
+      {
+        term: "Equity today",
+        text:
+          "What the property is worth minus what is owed on it, from your accounts. The same " +
+          "whatever the period.",
+      },
+      {
+        term: "Costs as a share of equity",
+        text:
+          "A year of costs (the monthly figure \u00d7 12) divided by equity: the yearly price of " +
+          "keeping that money in the property. Compare it with what the money could earn invested.",
+      },
+    ],
   ];
   return (
     <section className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg px-5 py-4">
       <h3 className="text-sm font-semibold text-[var(--text-primary)]">What these numbers mean</h3>
-      <dl className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-3">
-        {items.map((it) => (
-          <div key={it.term}>
-            <dt className="text-[13px] font-semibold text-[var(--text-primary)]">{it.term}</dt>
-            <dd className="text-[13px] leading-relaxed text-[var(--text-secondary)] m-0">{it.text}</dd>
-          </div>
+      <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-3">
+        {columns.map((items, i) => (
+          <dl key={i} className="m-0 space-y-3">
+            {items.map((it) => (
+              <div key={it.term}>
+                <dt className="text-[13px] font-semibold text-[var(--text-primary)]">{it.term}</dt>
+                <dd className="text-[13px] leading-relaxed text-[var(--text-secondary)] m-0">{it.text}</dd>
+              </div>
+            ))}
+          </dl>
         ))}
-      </dl>
+      </div>
     </section>
   );
 }
