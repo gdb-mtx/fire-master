@@ -19,6 +19,10 @@ from app.ingestion.category_sync import classify_flags
     ("Brokerage Activity", "Investments", (False, True)),  # anything under the Investments parent
     ("Investments", "Other", (False, True)),             # no usable parent: name-set fallback
     ("Buy", None, (False, True)),                         # no parent at all: name-set fallback
+    # fire-master#26: a money-fund buy Monarch filed as "Investment" in its Financial group
+    ("Investment", "Financial", (False, True)),
+    ("Investment", None, (False, True)),
+    ("Investment Fees", "Financial", (False, False)),     # exact name only: fees are spending
     ("Credit Card Payment", "Other", (False, True)),     # name fallback
     ("Paychecks", None, (True, False)),
     # Income-named categories outside Monarch's Income group (Track 3 #7)

@@ -198,6 +198,10 @@ TRANSFER_CATEGORIES = {
     # Name-only fallback for rows that arrived without a parent group (Mint-era
     # imports); with a parent, the whole Investments group is caught above.
     "Investments", "Buy",
+    # Monarch also files some brokerage buys (a money-market fund purchase) as
+    # "Investment" under its Financial group, a spending group, so only the name
+    # can catch them. Exact match: "Investment Fees" stays spending (fire-master#26).
+    "Investment",
 }
 
 # Non-discretionary categories (needs, not wants)
