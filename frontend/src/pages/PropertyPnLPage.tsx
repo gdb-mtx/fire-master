@@ -1,5 +1,6 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import Layout from "../components/Layout";
+import InfoTip from "../components/InfoTip";
 import {
   useProperties,
   usePropertyPnL,
@@ -261,10 +262,12 @@ export default function PropertyPnLPage() {
             const isSel = selected?.property.id === p.property.id;
             const netPositive = p.totals.rental_actual - p.totals.total_cost >= 0;
             return (
-              <button
+              // A clickable card, not a <button>: the info icons inside are buttons, and a
+              // button can't hold one. The name is the keyboard control (Enter selects).
+              <div
                 key={p.property.id}
                 onClick={() => setSelectedId(p.property.id)}
-                className={`text-left bg-[var(--bg-card)] border rounded-xl p-5 relative overflow-hidden transition-all ${
+                className={`text-left bg-[var(--bg-card)] border rounded-xl p-5 relative overflow-hidden transition-all cursor-pointer ${
                   isSel
                     ? "border-[var(--text-primary)]! shadow-lg"
                     : "border-[var(--border)] hover:border-[var(--text-secondary)]!"
@@ -277,15 +280,22 @@ export default function PropertyPnLPage() {
                 />
                 <div className="flex items-start justify-between mb-3 pl-2">
                   <div>
-                    <div className="text-base font-semibold text-[var(--text-primary)]">
+                    <button
+                      type="button"
+                      aria-pressed={isSel}
+                      className="text-base font-semibold text-[var(--text-primary)] text-left rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--blue)]"
+                    >
                       {p.property.name}
-                    </div>
+                    </button>
                     <div className="text-[11px] text-[var(--text-secondary)] truncate max-w-[200px]">
                       {p.property.address ?? "—"}
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-xs text-[var(--text-secondary)]">Equity today</div>
+                    <div className="text-xs text-[var(--text-secondary)]">
+                      Equity today
+                      <InfoTip label="Equity today">{DEFINITIONS.equity}</InfoTip>
+                    </div>
                     <div className="text-sm font-semibold text-[var(--text-primary)]">
                       {fmtCompact(p.property.equity)}
                     </div>
@@ -299,11 +309,13 @@ export default function PropertyPnLPage() {
                 <div className="grid grid-cols-3 gap-3 pl-2">
                   <Metric
                     label="Costs"
+                    info={DEFINITIONS.costs}
                     value={fmt(p.totals.total_cost)}
                     sub={`${fmt(p.totals.monthly_cost)} a month`}
                   />
                   <Metric
                     label="Rent"
+                    info={DEFINITIONS.rent}
                     value={fmt(p.totals.rental_actual)}
                     sub={
                       p.property.potential_monthly_rental != null
@@ -315,6 +327,7 @@ export default function PropertyPnLPage() {
                   />
                   <Metric
                     label="Net"
+                    info={DEFINITIONS.net}
                     value={signed(p.totals.rental_actual - p.totals.total_cost)}
                     valueColor={netPositive ? "var(--green)" : "var(--red)"}
                     sub={netPositive ? "the property paid you" : "it cost you to hold"}
@@ -328,9 +341,10 @@ export default function PropertyPnLPage() {
                       {((p.totals.monthly_cost * 12 * 100) / p.property.equity).toFixed(1)}%
                     </span>{" "}
                     of its equity a year.
+                    <InfoTip label="Costs as a share of equity">{DEFINITIONS.equityShare}</InfoTip>
                   </div>
                 )}
-              </button>
+              </div>
             );
           })}
         </div>
@@ -355,8 +369,6 @@ export default function PropertyPnLPage() {
             </div>
           </div>
         )}
-
-        <StatGuide />
 
         {/* ============================================================ */}
         {/* MANAGE PANEL                                                  */}
@@ -388,18 +400,23 @@ const signed = (v: number) => (v >= 0 ? "+" : "\u2212") + fmt(Math.abs(v));
 
 function Metric({
   label,
+  info,
   value,
   sub,
   valueColor,
 }: {
   label: string;
+  info?: ReactNode;
   value: string;
   sub?: string;
   valueColor?: string;
 }) {
   return (
     <div className="min-w-0">
-      <div className="text-xs text-[var(--text-secondary)]">{label}</div>
+      <div className="text-xs text-[var(--text-secondary)]">
+        {label}
+        {info && <InfoTip label={label}>{info}</InfoTip>}
+      </div>
       <div
         className="text-[15px] font-semibold tabular-nums"
         style={{ color: valueColor ?? "var(--text-primary)" }}
@@ -433,74 +450,49 @@ function StripStat({
   );
 }
 
-/** What each number on this page is, how it's computed, and why it's here. */
-function StatGuide() {
-  // Two independent columns, not one grid: grid rows align across columns, so the long
-  // Costs entry used to push the right column down and leave the last entry stranded.
-  // Left: what the period's money is. Right: what it says about the property.
-  const columns: { term: string; text: string }[][] = [
-    [
-      {
-        term: "Costs",
-        text:
-          "Every expense matched to the property in the period you picked: mortgage, HOA, " +
-          "insurance, tax, repairs, utilities and the rest. Matching uses your merchant rules, " +
-          "Monarch tags and manual picks. Mortgage payments count in full, principal included, " +
-          "though principal builds equity.",
-      },
-      {
-        term: "Rent",
-        text:
-          "Rental income received in the period, matched the same way. \u201cPossible\u201d is the " +
-          "monthly rent you entered for the property, for comparison.",
-      },
-      {
-        term: "Monthly figures",
-        text:
-          "Costs and rent divided by the calendar months in the period, so a quarterly or yearly " +
-          "bill is spread over the months it covers. A property whose first transaction came " +
-          "later is counted from that month, and its card says from when.",
-      },
-    ],
-    [
-      {
-        term: "Net",
-        text:
-          "Rent minus costs for the period. Green: the property paid you that much. Red: holding " +
-          "it cost you that much. It changes with the period you pick.",
-      },
-      {
-        term: "Equity today",
-        text:
-          "What the property is worth minus what is owed on it, from your accounts. The same " +
-          "whatever the period.",
-      },
-      {
-        term: "Costs as a share of equity",
-        text:
-          "A year of costs (the monthly figure \u00d7 12) divided by equity: the yearly price of " +
-          "keeping that money in the property. Compare it with what the money could earn invested.",
-      },
-    ],
-  ];
-  return (
-    <section className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg px-5 py-4">
-      <h3 className="text-sm font-semibold text-[var(--text-primary)]">What these numbers mean</h3>
-      <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-3">
-        {columns.map((items, i) => (
-          <dl key={i} className="m-0 space-y-3">
-            {items.map((it) => (
-              <div key={it.term}>
-                <dt className="text-[13px] font-semibold text-[var(--text-primary)]">{it.term}</dt>
-                <dd className="text-[13px] leading-relaxed text-[var(--text-secondary)] m-0">{it.text}</dd>
-              </div>
-            ))}
-          </dl>
-        ))}
-      </div>
-    </section>
-  );
-}
+/** What each number on the cards is, how it's computed, and why it's there. Shown
+ *  behind the card labels' info icons (hover, focus or tap). */
+const DEFINITIONS: Record<"costs" | "rent" | "net" | "equity" | "equityShare", ReactNode> = {
+  costs: (
+    <>
+      <p>
+        Every expense matched to the property in the period you picked: mortgage, HOA, insurance,
+        tax, repairs, utilities and the rest. Matching uses your merchant rules, Monarch tags and
+        manual picks. Mortgage payments count in full, principal included, though principal builds
+        equity.
+      </p>
+      <p>
+        A month: the total divided by the calendar months in the period, so a quarterly or yearly
+        bill is spread over the months it covers. A property whose first transaction came later is
+        counted from that month, and its card says from when.
+      </p>
+    </>
+  ),
+  rent: (
+    <p>
+      Rental income received in the period, matched the same way and spread over the same months.
+      {" \u201cPossible\u201d"} is the monthly rent you entered for the property, for comparison.
+    </p>
+  ),
+  net: (
+    <p>
+      Rent minus costs for the period. Green: the property paid you that much. Red: holding it cost
+      you that much. It changes with the period you pick.
+    </p>
+  ),
+  equity: (
+    <p>
+      What the property is worth minus what is owed on it, from your accounts. The same whatever
+      the period.
+    </p>
+  ),
+  equityShare: (
+    <p>
+      A year of costs (the monthly figure {"\u00d7"} 12) divided by equity: the yearly price of
+      keeping that money in the property. Compare it with what the money could earn invested.
+    </p>
+  ),
+};
 
 // ---------------------------------------------------------------------------
 //  Detail: month-by-month matrix + composed chart
