@@ -522,14 +522,15 @@ export default function FireConfigPage() {
           {incomeSources && incomeSources.length > 0 && (
             <div className="space-y-2 mb-4">
               {incomeSources.map((src) => (
-                <div key={src.id} className="flex items-center justify-between py-2 px-3 rounded bg-[var(--bg-secondary)]">
-                  <div>
+                <div key={src.id} className="flex items-center justify-between gap-3 py-2 px-3 rounded bg-[var(--bg-secondary)]">
+                  {/* Each detail wraps as a whole piece on narrow screens; a date never splits. */}
+                  <div className="min-w-0 flex flex-wrap items-baseline gap-x-2">
                     <span className="text-sm text-[var(--text-primary)]">{src.name}</span>
-                    <span className="ml-2 text-xs text-[var(--text-secondary)]">{src.income_type}</span>
-                    {src.start_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">starts {src.start_date}</span>}
-                    {src.end_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">ends {src.end_date}</span>}
+                    <span className="text-xs text-[var(--text-secondary)]">{src.income_type}</span>
+                    {src.start_date && <span className="text-xs text-[var(--text-secondary)] whitespace-nowrap">starts {src.start_date}</span>}
+                    {src.end_date && <span className="text-xs text-[var(--text-secondary)] whitespace-nowrap">ends {src.end_date}</span>}
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="shrink-0 flex items-center gap-3">
                     <span className="text-sm font-mono text-[var(--green)]">{formatCurrency(src.annual_amount)}/yr</span>
                     <button onClick={() => deleteIncome.mutate(src.id)} className="text-xs text-[var(--text-secondary)] hover:text-[var(--red)] transition-colors">&times;</button>
                   </div>
@@ -539,7 +540,8 @@ export default function FireConfigPage() {
           )}
 
           {/* Add new */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3 items-end">
+          {/* Six fields fit one row only on a wide card (~840px): below xl the dates clipped. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 items-end">
             <div>
               <label className={labelCls}>Name</label>
               <input type="text" value={incomeForm.name} onChange={(e) => setIncomeForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g., Salary" className={inputCls} />
