@@ -12,6 +12,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.engines.earned_income import stops_at_retirement
 from app.models.account import Account
 from app.models.enums import AccountType
 from app.models.fire_config import FireConfig
@@ -716,11 +717,9 @@ class TaxEngine:
             for src in income_sources:
                 # Day-prorated contribution for this calendar year (an ended
                 # salary counts its partial year, not the full annual amount).
-                # Earned income additionally stops at the retirement date even
-                # without an explicit end_date.
-                end_override = None
-                if src.income_type.value in ("salary", "bonus", "side_hustle"):
-                    end_override = retirement_date
+                # Working-years pay additionally stops at the retirement date
+                # without an explicit end_date; an explicit one always wins.
+                end_override = retirement_date if stops_at_retirement(src, retirement_date) else None
                 annual = _prorated_annual_for_year(src, current_year, end_override)
                 if annual <= 0:
                     continue
@@ -987,8 +986,8 @@ class TaxEngine:
                     continue
                 if src.end_date and current > src.end_date:
                     continue
-                if src.income_type.value in ("salary", "bonus", "side_hustle"):
-                    continue  # earned income stops at retirement
+                if stops_at_retirement(src, retirement_date):
+                    continue  # working-years pay ended at retirement
                 if src.income_type.value == "social_security":
                     continue  # not yet started
                 baseline_income += src.annual_amount / 100

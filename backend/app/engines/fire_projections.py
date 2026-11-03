@@ -34,6 +34,7 @@ from app.models.income_source import IncomeSource
 from app.models.net_worth_snapshot import NetWorthSnapshot
 from app.engines.event_calendar import RECURRENCE_STEP_MONTHS as _RECURRENCE_STEP_MONTHS
 from app.engines.event_calendar import event_occurrence_dates
+from app.engines.earned_income import stops_at_retirement
 from app.engines.plan_months import is_closed, is_held, resolve_month_offset, sale_offset
 from app.engines.net_worth import NetWorthEngine
 from app.engines.tax_engine import _get_rmd_divisor
@@ -571,13 +572,14 @@ class FireProjectionsEngine:
             pension_start_age = config.pension_start_age if config.pension_monthly else None
             pension_annual = (config.pension_monthly * 12) if config.pension_monthly else 0
 
-            # Continuing income from sources (rental, dividends, etc.)
-            # Only count sources WITHOUT an end_date — they persist through retirement.
-            # Sources with end_date (severance, unemployment, temp rental) are temporary.
+            # Continuing income from sources (rental, dividends, work started in
+            # retirement). Only count sources WITHOUT an end_date — they persist
+            # through retirement. Sources with end_date (severance, unemployment,
+            # temp rental) are temporary; working-years pay stops at retirement.
+            retirement_date = self._get_retirement_date(config)
             continuing_annual = sum(
                 s.annual_amount for s in income_sources
-                if s.income_type.value not in ("salary", "bonus", "side_hustle")
-                and s.end_date is None
+                if s.end_date is None and not stops_at_retirement(s, retirement_date)
             )
 
             # Year-by-year PV of net withdrawals
@@ -760,10 +762,11 @@ class FireProjectionsEngine:
             if src.end_date and current_date > src.end_date:
                 continue
 
-            # Salary/bonus end at retirement unless explicit end_date
-            if src.income_type.value in ("salary", "bonus", "side_hustle"):
-                if retirement_date and current_date >= retirement_date and not src.end_date:
-                    continue
+            # Working-years pay (undated earned income that started before
+            # retirement) ends at retirement; earned income that starts after it runs.
+            if (retirement_date and current_date >= retirement_date
+                    and stops_at_retirement(src, retirement_date)):
+                continue
 
             monthly = src.annual_amount / 12
 

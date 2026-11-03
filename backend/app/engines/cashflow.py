@@ -14,6 +14,7 @@ from app.models.category_mapping import CategoryMapping
 from app.models.fire_config import FireConfig
 from app.models.income_source import IncomeSource
 from app.models.transaction import Transaction
+from app.engines.earned_income import stops_at_retirement
 from app.engines.plan_months import is_closed, resolve_month_offset
 from app.engines.event_matching import (
     DATE_WINDOW_DAYS,
@@ -129,10 +130,11 @@ class CashflowEngine:
                 continue
             if src.end_date and current_date > src.end_date:
                 continue
-            # Salary/bonus end at retirement unless explicit end_date
-            if src.income_type.value in ("salary", "bonus", "side_hustle"):
-                if retirement_date and current_date >= retirement_date and not src.end_date:
-                    continue
+            # Working-years pay (undated earned income that started before
+            # retirement) ends at retirement; earned income that starts after it runs.
+            if (retirement_date and current_date >= retirement_date
+                    and stops_at_retirement(src, retirement_date)):
+                continue
             monthly = src.annual_amount / 12
             # growth_rate is a NOMINAL raise — deflate to real before compounding
             if src.growth_rate and years_from_start > 0:

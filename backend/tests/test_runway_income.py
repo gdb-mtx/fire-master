@@ -36,6 +36,9 @@ SOURCES = [
     _src("Rental", 9_000_00, end=date(2026, 10, 12)),
     _src("Old Salary", 200_000_00, IncomeType.SALARY),  # no end_date -> dies at retirement
     _src("Raise Stream", 12_000_00, growth=4.0),
+    # Starts after retirement -> runs for life (fire-master#27); after Nov 2026, so the
+    # taper and cutoff diffs below never see it.
+    _src("Retirement Consulting", 30_000_00, IncomeType.SIDE_HUSTLE, start=date(2027, 1, 1)),
 ]
 RETIREMENT = date(2026, 9, 1)
 
