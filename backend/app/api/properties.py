@@ -286,6 +286,8 @@ async def get_pnl(
                 net_cost=_d(t["net_cost_cents"]) or 0.0,
                 monthly_cost=_d(t["monthly_cost_cents"]) or 0.0,
                 net_per_year=_d(t["net_per_year_cents"]) or 0.0,
+                months=t["months"],
+                first_month=t["first_month"],
             ),
             cost_per_equity=entry["cost_per_equity"],
         ))

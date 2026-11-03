@@ -77,11 +77,17 @@ function periodWords(preset: RangePreset, months: string[]): { title: string; sp
   };
 }
 
-/** Distinct months with any classified transaction for this property in the range. */
-function activeMonths(p: PropertyPnL): number {
-  const s = new Set<string>();
-  Object.values(p.categories).forEach((byMonth) => Object.keys(byMonth).forEach((m) => s.add(m)));
-  return s.size;
+/** "2026-06" → "Jun 2026". */
+function monthWords(ym: string): string {
+  return `${SHORT_MONTHS[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
+}
+
+/** When a property's months start after the period does (bought later, or "All time"),
+ *  say where its per-month figures are counted from. */
+function countedFrom(p: PropertyPnL, start?: string): string {
+  const first = p.totals.first_month;
+  if (!first || (start && first <= start.slice(0, 7))) return "";
+  return `, from ${monthWords(first)}`;
 }
 
 export default function PropertyPnLPage() {
@@ -288,9 +294,7 @@ export default function PropertyPnLPage() {
 
                 <div className="pl-2 mb-2 text-xs text-[var(--text-secondary)]">
                   {period.title}
-                  {activeMonths(p) > 0 && activeMonths(p) < 12 && range !== "all"
-                    ? `, ${activeMonths(p)} ${activeMonths(p) === 1 ? "month" : "months"} with activity`
-                    : ""}
+                  {countedFrom(p, start)}
                 </div>
                 <div className="grid grid-cols-3 gap-3 pl-2">
                   <Metric
@@ -376,13 +380,8 @@ export default function PropertyPnLPage() {
 }
 
 function rentalPerMonth(p: PropertyPnL): number {
-  // Actual rental income spread over the months that had any activity.
-  const monthsWithData = new Set<string>();
-  Object.values(p.categories).forEach((byMonth) =>
-    Object.keys(byMonth).forEach((m) => monthsWithData.add(m)),
-  );
-  const n = monthsWithData.size || 1;
-  return p.totals.rental_actual / n;
+  // Rent spread over the same calendar months as the cost figure.
+  return p.totals.months > 0 ? p.totals.rental_actual / p.totals.months : 0;
 }
 
 const signed = (v: number) => (v >= 0 ? "+" : "\u2212") + fmt(Math.abs(v));
@@ -443,13 +442,15 @@ function StatGuide() {
         "Every expense matched to the property in the period you picked: mortgage, HOA, insurance, " +
         "tax, repairs, utilities and the rest. Matching uses your merchant rules, Monarch tags and " +
         "manual picks. Mortgage payments count in full, principal included, though principal " +
-        "builds equity. The monthly figure divides the total by the months that had any activity.",
+        "builds equity. The monthly figure divides the total by the calendar months in the " +
+        "period, so a quarterly or yearly bill is spread over the months it covers. A property " +
+        "whose first transaction came later is counted from that month.",
     },
     {
       term: "Rent",
       text:
-        "Rental income received in the period, matched the same way. \u201cPossible\u201d is the " +
-        "monthly rent you entered for the property, for comparison.",
+        "Rental income received in the period, matched the same way and spread over the same " +
+        "months. \u201cPossible\u201d is the monthly rent you entered for the property, for comparison.",
     },
     {
       term: "Net",

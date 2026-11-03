@@ -26,6 +26,10 @@ export interface PropertyPnLTotals {
   net_cost: number;
   monthly_cost: number;
   net_per_year: number;
+  /** Calendar months the per-month figures divide by, counted from first_month. */
+  months: number;
+  /** "YYYY-MM": the later of the period start and the property's first transaction. */
+  first_month: string | null;
 }
 
 export interface PropertyPnL {

@@ -7,12 +7,16 @@ unmatched -> None.
 """
 
 import uuid
+from datetime import date
+
+import pytest
 
 from app.engines.property_pnl import (
     Classification,
     RuleView,
     classify_transaction,
     match_tag_to_property,
+    months_in_period,
     resolve_with_tag,
     tag_category,
 )
@@ -251,3 +255,38 @@ def test_depository_inflows_still_book_as_rental_income():
     assert resolve_with_tag(unmatched, RIVER, 150_000, "Transfer") == (
         RIVER, "Rental Income", "monarch_tag",
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-month basis: calendar months, not months with a transaction (fire-master#25)
+# ---------------------------------------------------------------------------
+
+TODAY = date(2026, 11, 3)
+LAST_12 = date(2025, 12, 1)  # what the page sends for "Last 12 months" on TODAY
+
+
+@pytest.mark.parametrize("start,end,first,expected", [
+    # Long-held property, last 12 months: the whole window, lumpy bills or not.
+    (LAST_12, None, date(2019, 3, 10), (date(2025, 12, 1), 12)),
+    # Bought mid-window: counted from its first transaction, not diluted.
+    (LAST_12, None, date(2026, 6, 15), (date(2026, 6, 1), 6)),
+    # All time: from the first transaction through this month.
+    (None, None, date(2024, 1, 20), (date(2024, 1, 1), 35)),
+    # A closed past range ignores today.
+    (date(2025, 1, 1), date(2025, 12, 31), date(2019, 3, 10), (date(2025, 1, 1), 12)),
+    # An end in the future stops at this month.
+    (LAST_12, date(2027, 6, 30), date(2019, 3, 10), (date(2025, 12, 1), 12)),
+    # "This year": January through this month.
+    (date(2026, 1, 1), None, date(2019, 3, 10), (date(2026, 1, 1), 11)),
+    # No transactions ever, or none until after the range: nothing to average.
+    (LAST_12, None, None, (None, 0)),
+    (date(2025, 1, 1), date(2025, 6, 30), date(2026, 2, 1), (None, 0)),
+])
+def test_months_in_period(start, end, first, expected):
+    assert months_in_period(start, end, first, TODAY) == expected
+
+
+def test_months_in_period_counts_the_current_month_whole():
+    # On Jan 3, "This year" is one month: January's bills so far are January's.
+    assert months_in_period(date(2026, 1, 1), None, date(2019, 3, 10), date(2026, 1, 3)) == (
+        date(2026, 1, 1), 1)

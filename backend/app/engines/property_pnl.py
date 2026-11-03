@@ -168,6 +168,38 @@ def tag_category(
     return _fallback_category(tx_category)
 
 
+def _month_index(d: date) -> int:
+    return d.year * 12 + d.month - 1
+
+
+def months_in_period(
+    start: date | None, end: date | None, first_activity: date | None, today: date,
+) -> tuple[date | None, int]:
+    """The calendar months a property's per-month P&L figures are averaged over:
+    (first month, number of months), fire-master#25.
+
+    From the later of the period's start and the property's first transaction
+    ever, through the earlier of the period's end and this month, both months
+    counted whole. A quarterly or semi-annual bill is spread over the months it
+    covers. The old divisor, the months that HAD a transaction, reported a
+    property paying $9,000 a quarter and $6,000 twice a year (6 active months,
+    $48,000) as $8,000 a month instead of $4,000. Starting at the first
+    transaction keeps a property acquired mid-period from being averaged over
+    months before it was owned. (None, 0) when the period holds none of its months.
+    """
+    if first_activity is None:
+        return None, 0
+    lo = _month_index(first_activity)
+    if start is not None:
+        lo = max(lo, _month_index(start))
+    hi = _month_index(today)
+    if end is not None:
+        hi = min(hi, _month_index(end))
+    if hi < lo:
+        return None, 0
+    return date(lo // 12, lo % 12 + 1, 1), hi - lo + 1
+
+
 def match_tag_to_property(tags, name_to_id: dict[str, uuid.UUID]) -> uuid.UUID | None:
     """Inbound direction: a Monarch tag whose name matches a property -> that property's id.
 
@@ -359,12 +391,16 @@ class PropertyPnLEngine:
     #  P&L aggregation
     # ------------------------------------------------------------------
 
-    async def get_pnl(self, start: date | None = None, end: date | None = None) -> dict:
+    async def get_pnl(
+        self, start: date | None = None, end: date | None = None, today: date | None = None,
+    ) -> dict:
         """Month-by-month P&L per property.
 
         Selects straight from transactions filtered by property_id (no CategoryMapping join),
         so manual / off-Monarch entries are included. Income vs expense is decided by amount sign.
+        Per-month figures divide by calendar months (months_in_period), not active months.
         """
+        today = today or date.today()
         props_result = await self.db.execute(
             select(Property).where(Property.is_active == True).order_by(Property.display_order)  # noqa: E712
         )
@@ -408,6 +444,15 @@ class PropertyPnLEngine:
 
         months = sorted(all_months)
 
+        # Each property's first transaction EVER, not just inside the period: a
+        # period's first bill can come months after its start.
+        first_result = await self.db.execute(
+            select(Transaction.property_id, func.min(Transaction.date))
+            .where(Transaction.property_id.isnot(None))
+            .group_by(Transaction.property_id)
+        )
+        first_activity = {pid: first for pid, first in first_result.all()}
+
         properties_out = []
         for p in properties:
             cat_matrix = matrix.get(p.id, {})
@@ -419,9 +464,11 @@ class PropertyPnLEngine:
             )
             rental_actual = sum(cat_matrix.get(RENTAL_INCOME, {}).values())
             potential = p.potential_monthly_rental_cents or 0
-            # Annualize potential over the months covered for a like-for-like comparison.
-            months_covered = len({m for by_month in cat_matrix.values() for m in by_month}) or 1
-            rental_potential = potential * months_covered
+            first_month, months_held = months_in_period(start, end, first_activity.get(p.id), today)
+            # An empty period has nothing to average; 1 keeps the zeros zero.
+            divisor = months_held or 1
+            # Potential rent over the same months, for a like-for-like comparison.
+            rental_potential = potential * months_held
 
             equity = p.equity_cents
             cost_per_equity = (
@@ -439,10 +486,13 @@ class PropertyPnLEngine:
                         "rental_actual_cents": rental_actual,
                         "rental_potential_cents": rental_potential,
                         "net_cost_cents": total_cost - rental_actual,
-                        "monthly_cost_cents": round(total_cost / months_covered),
-                        # Net annualized over the months of activity (same basis as monthly_cost),
-                        # so the card shows net PER YEAR, not the cumulative all-time net.
-                        "net_per_year_cents": round((total_cost - rental_actual) * 12 / months_covered),
+                        "monthly_cost_cents": round(total_cost / divisor),
+                        # Net annualized over the same months as monthly_cost, so it reads
+                        # PER YEAR, not as the cumulative all-time net.
+                        "net_per_year_cents": round((total_cost - rental_actual) * 12 / divisor),
+                        # The divisor itself, so every per-month figure can say what it covers.
+                        "months": months_held,
+                        "first_month": first_month.strftime("%Y-%m") if first_month else None,
                     },
                     "cost_per_equity": cost_per_equity,
                 }

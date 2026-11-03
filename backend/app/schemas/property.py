@@ -120,6 +120,10 @@ class PropertyPnLTotals(BaseModel):
     net_cost: float
     monthly_cost: float
     net_per_year: float
+    # Calendar months the per-month figures divide by, counted from first_month
+    # ("YYYY-MM"): the later of the period start and the property's first transaction.
+    months: int
+    first_month: str | None
 
 
 class PropertyPnL(BaseModel):
