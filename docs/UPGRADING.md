@@ -29,6 +29,57 @@ docker compose exec backend uv run python ../scripts/upgrade_check.py
 
 ---
 
+## November 2026 — three fixes from bug reports
+
+**In short:**
+- **Property P&L:** "a month" figures divide by the calendar months in the period, not by
+  the months that had a transaction, so quarterly and twice-yearly bills stop reading as
+  monthly costs (fire-master#25).
+- **Spending:** brokerage buys Monarch files as **"Investment"** (in its Financial group)
+  are transfers now, like "Buy" and the Investments group (fire-master#26).
+- **Income:** salary, bonus or side-hustle income that **starts after your retirement date**
+  keeps paying, to its own end date or for life. Only work that started before retirement
+  stops there (fire-master#27). Income sources take a start date in Settings.
+
+One migration runs: it marks stored "Investment" categories as transfers. Nothing else in
+your data changes. If you have no "Investment" category and no work income dated after
+retirement, no projection moves.
+
+### What moves in your numbers
+
+| Where | Before | After |
+|---|---|---|
+| **Property P&L, "a month"** | Total ÷ months with a transaction: $9,000 a quarter + $6,000 twice a year read **$8,000/mo** | Total ÷ calendar months in the period: **$4,000/mo**. A property whose first transaction came later in the period counts from that month; "All time" counts from its first transaction |
+| **Property P&L, rent a month / net a year / costs as a share of equity** | Same active-months divisor | Same calendar months as the cost figure |
+| **Runway burn, Spending, savings rate** | An $80,000 money-fund buy filed as "Investment" added ~$26,700/mo to the 90-day burn | Left out, like any transfer |
+| **Timeline, Monte Carlo, Runway, FIRE number** | A side hustle dated after retirement paid $0 | Pays from its start date, to its end date or for life |
+| **Tax planner and Roth ladder** | Earned income stopped at retirement even with a later end date; the ladder ignored all earned income | Runs to its end date; work in retirement fills the ladder's brackets |
+| **Retirement page** | (unchanged) | Unchanged: it still assumes you've stopped working and skips salary, bonus and side-hustle income, as the page says. To count work income there today, enter it as type Other with its dates |
+
+### Decide these
+
+- **Run the upgrade check.** It lists any work income it now pays past your retirement
+  date. If one isn't meant to keep paying, give it an end date (Settings → Income Sources).
+- Nothing else needs a decision.
+
+### For agents: API changes
+
+All additive; nothing was removed or renamed.
+
+- **`GET /api/properties/pnl`** totals gain `months` (the divisor) and `first_month`
+  (`"YYYY-MM"`, where the count starts). `monthly_cost`, `net_per_year` and
+  `rental_potential` use them.
+- **One income rule** for every engine with a retirement date:
+  `app/engines/earned_income.stops_at_retirement()`. `project_wealth_pools` is outside
+  it by design (no working phase).
+
+### Undo
+
+Give a work-income source an end date to stop it. Category flags follow Monarch's
+taxonomy on every sync; there is no switch for the "Investment" rule.
+
+---
+
 ## October 2026 — optional: let every IRA pay the bills after 59½
 
 **In short:**

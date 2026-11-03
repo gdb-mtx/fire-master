@@ -99,3 +99,30 @@ def test_categories_turning_income():
             SimpleNamespace(normalized_category="Paychecks", parent_category="Income", is_income=True),
             SimpleNamespace(normalized_category="Groceries", parent_category="Food", is_income=False)]
     assert uc.categories_turning_income(cats) == ["Rental Income"]
+
+
+def _income(name, itype, start=None, end=None):
+    from app.models.enums import IncomeType
+    return SimpleNamespace(name=name, income_type=IncomeType(itype), start_date=start, end_date=end)
+
+
+def test_retirement_work_sources():
+    retires = date(2032, 8, 31)
+    sources = [
+        _income("Consulting", "side_hustle", start=date(2032, 9, 1)),       # never paid before
+        _income("Bridge job", "salary", end=date(2034, 6, 30)),             # tax planner cut it short
+        _income("Old job", "salary"),                                       # stops at retirement, as before
+        _income("Ended job", "salary", end=date(2030, 1, 31)),              # ends before: unchanged
+        _income("Rent", "rental", start=date(2033, 1, 1)),                  # not earned income
+    ]
+    found = uc.retirement_work_sources(sources, retires)
+    assert [line.split("'")[1] for line in found] == ["Consulting", "Bridge job"]
+    assert "for life" in found[0] and "until then" in found[1]
+    assert uc.retirement_work_sources(sources, None) == []
+
+
+def test_investment_category_names():
+    cats = [SimpleNamespace(raw_category="Investment", normalized_category="Investment"),
+            SimpleNamespace(raw_category="Investments", normalized_category="Investments"),
+            SimpleNamespace(raw_category="Investment Fees", normalized_category="Investment Fees")]
+    assert uc.investment_category_names(cats) == ["Investment"]

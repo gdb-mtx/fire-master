@@ -1,4 +1,4 @@
-"""Upgrade check — what the September and October 2026 updates changed in THIS install.
+"""Upgrade check — what the September to November 2026 updates changed in THIS install.
 
 Read-only. Run it after updating, before trusting the projections; it prints a
 report of everything in your own data that the update touched and what (if
@@ -13,7 +13,7 @@ every REVIEW item is in docs/UPGRADING.md.
 
 import asyncio
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
@@ -177,6 +177,33 @@ def categories_turning_income(categories: list) -> list[str]:
             if not c.is_income and classify_flags(c.normalized_category, c.parent_category)[0]]
 
 
+def retirement_work_sources(sources: list, retirement_date: date | None) -> list[str]:
+    """Earned income (salary, bonus, side hustle) the November 2026 rule pays past the
+    retirement date (fire-master#27): one that starts on or after it used to be cut to
+    nothing, one with an explicit end_date after it was cut short by the tax planner."""
+    from app.engines.earned_income import is_earned, stops_at_retirement
+
+    if retirement_date is None:
+        return []
+    out = []
+    for s in sources:
+        if not is_earned(s) or stops_at_retirement(s, retirement_date):
+            continue
+        if s.end_date is None:
+            out.append(f"'{s.name}' starts {s.start_date}, after retirement ({retirement_date}): every "
+                       "projection now pays it from then on, for life (before, it never paid)")
+        elif s.end_date > retirement_date:
+            out.append(f"'{s.name}' ends {s.end_date}, after retirement ({retirement_date}): the tax "
+                       "planner and Roth ladder now count it until then (before, they stopped it at retirement)")
+    return out
+
+
+def investment_category_names(categories: list) -> list[str]:
+    """Raw categories normalized to "Investment", which this update stores as transfers
+    (fire-master#26): Monarch files some brokerage buys there, under Financial."""
+    return sorted(c.raw_category for c in categories if c.normalized_category == "Investment")
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -257,7 +284,7 @@ async def main() -> None:
         )).scalars().all()
         future = [e for e in events if (e.end_date or e.date) >= today]
 
-        print("FIREMaster upgrade check — September + October 2026 updates (read-only)")
+        print("FIREMaster upgrade check — September to November 2026 updates (read-only)")
         print(f"{len(scenarios)} scenario(s), {len(events)} active cashflow event(s)")
 
         # 1. Plan months pinned by the update ----------------------------------
@@ -363,6 +390,40 @@ async def main() -> None:
         turning = categories_turning_income(cats)
         _section("Categories that count as income from the next sync (savings rate and readiness move)",
                  not turning, turning or ["none"])
+
+        # --- November 2026 update ------------------------------------------------
+        print("\n--- November 2026 update ---")
+
+        # 13. Work income dated after retirement now pays --------------------------
+        from app.engines.fire_projections import FireProjectionsEngine
+        from app.models.income_source import IncomeSource
+
+        plan = await FireProjectionsEngine(db).get_effective_config()
+        sources = (await db.execute(
+            select(IncomeSource).where(IncomeSource.is_active == True)  # noqa: E712
+        )).scalars().all()
+        work = retirement_work_sources(sources, FireProjectionsEngine(db)._get_retirement_date(plan))
+        _section("Work income dated after your retirement date now counts (it was cut at retirement)",
+                 not work, work + ["not meant to keep paying? give it an end date (Settings → Income Sources)"]
+                 if work else ["none"])
+
+        # 14. Brokerage buys filed as "Investment" are transfers -------------------
+        from sqlalchemy import func
+
+        from app.models.transaction import Transaction
+
+        inv = investment_category_names(cats)
+        lines = []
+        if inv:
+            total = (await db.execute(
+                select(func.coalesce(func.sum(Transaction.amount), 0))
+                .where(Transaction.category.in_(inv), Transaction.amount < 0,
+                       Transaction.date >= today - timedelta(days=90))
+            )).scalar()
+            lines = [f"{', '.join(inv)}: now a transfer, so ${-int(total) / 100:,.0f} of buys in the last "
+                     "90 days left the Runway burn, Spending and the savings rate"]
+        _section('Brokerage buys Monarch files as "Investment" no longer count as spending', True,
+                 lines or ["no such category — nothing moved"])
 
     print("\nFixes for every REVIEW item: docs/UPGRADING.md")
 
