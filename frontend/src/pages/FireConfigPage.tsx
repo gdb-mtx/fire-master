@@ -69,6 +69,7 @@ export default function FireConfigPage() {
     name: "",
     income_type: "salary",
     annual_amount: "",
+    start_date: "",
     end_date: "",
     growth_rate: "",
   });
@@ -215,11 +216,12 @@ export default function FireConfigPage() {
       income_type: incomeForm.income_type,
       annual_amount: Math.round(parseFloat(incomeForm.annual_amount) * 100),
       frequency: "monthly",
+      start_date: incomeForm.start_date || undefined,
       end_date: incomeForm.end_date || undefined,
       growth_rate: incomeForm.growth_rate ? parseFloat(incomeForm.growth_rate) : undefined,
     } as any, {
       onSuccess: () => {
-        setIncomeForm({ name: "", income_type: "salary", annual_amount: "", end_date: "", growth_rate: "" });
+        setIncomeForm({ name: "", income_type: "salary", annual_amount: "", start_date: "", end_date: "", growth_rate: "" });
         setIncomeError("");
       },
       onError: (err: Error) => {
@@ -524,6 +526,7 @@ export default function FireConfigPage() {
                   <div>
                     <span className="text-sm text-[var(--text-primary)]">{src.name}</span>
                     <span className="ml-2 text-xs text-[var(--text-secondary)]">{src.income_type}</span>
+                    {src.start_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">starts {src.start_date}</span>}
                     {src.end_date && <span className="ml-2 text-xs text-[var(--text-secondary)]">ends {src.end_date}</span>}
                   </div>
                   <div className="flex items-center gap-3">
@@ -536,7 +539,7 @@ export default function FireConfigPage() {
           )}
 
           {/* Add new */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3 items-end">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3 items-end">
             <div>
               <label className={labelCls}>Name</label>
               <input type="text" value={incomeForm.name} onChange={(e) => setIncomeForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g., Salary" className={inputCls} />
@@ -555,6 +558,10 @@ export default function FireConfigPage() {
             <div>
               <label className={labelCls}>Annual ($)</label>
               <input type="number" value={incomeForm.annual_amount} onChange={(e) => setIncomeForm(f => ({ ...f, annual_amount: e.target.value }))} placeholder="0" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Start Date</label>
+              <input type="date" value={incomeForm.start_date} onChange={(e) => setIncomeForm(f => ({ ...f, start_date: e.target.value }))} className={inputCls} />
             </div>
             <div>
               <label className={labelCls}>End Date</label>
